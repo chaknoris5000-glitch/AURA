@@ -1,9 +1,9 @@
-1    fastapi
-2    uvicorn
-3    httpx
-4    openai
-5    requests
-6    python-multipart
-7    pydantic
-8    groq
-9    tavily-python
+fastapi
+uvicorn
+httpx
+openai
+requests
+python-multipart
+pydantic
+groq
+tavily-python
