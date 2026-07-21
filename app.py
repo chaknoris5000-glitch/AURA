@@ -42,152 +42,6 @@ if TavilyClient and TAVILY_API_KEY:
     except Exception as e:
         print(f"❌ Ошибка Tavily: {e}")
 
-# === ОПРЕДЕЛЕНИЕ ЧАСОВОГО ПОЯСА ПО ГОРОДУ ===
-tf = timezonefinder.TimezoneFinder()
-
-def get_timezone_for_city(city_name):
-    """Определяет часовой пояс по названию города"""
-    city_lower = city_name.lower().strip()
-    
-    # База городов и их примерных координат
-    cities = {
-        "москва": (55.7558, 37.6173),
-        "санкт-петербург": (59.9343, 30.3351),
-        "новосибирск": (55.0084, 82.9357),
-        "кемерово": (55.3333, 86.0833),
-        "белово": (54.4167, 86.3000),
-        "екатеринбург": (56.8389, 60.6057),
-        "казань": (55.7887, 49.1221),
-        "нижний новгород": (56.2965, 43.9361),
-        "челябинск": (55.1644, 61.4368),
-        "омск": (54.9885, 73.3242),
-        "краснодар": (45.0355, 38.9753),
-        "владивосток": (43.1155, 131.8855),
-        "иркутск": (52.2855, 104.2891),
-        "хабаровск": (48.4802, 135.0719),
-        "ростов-на-дону": (47.2357, 39.7015),
-        "самара": (53.1959, 50.1000),
-        "уфа": (54.7388, 55.9721),
-        "красноярск": (56.0184, 92.8672),
-        "пермь": (58.0104, 56.2294),
-        "волгоград": (48.7071, 44.5169),
-        "сочи": (43.5855, 39.7231),
-        "калининград": (54.7104, 20.4522),
-        "мурманск": (68.9585, 33.0827),
-        "архангельск": (64.5399, 40.5158),
-        "тюмень": (57.1530, 65.5342),
-        "барнаул": (53.3561, 83.7697),
-        "ижевск": (56.8606, 53.2092),
-        "ульяновск": (54.3178, 48.3807),
-        "ярославль": (57.6261, 39.8845),
-        "рязань": (54.6293, 39.7359),
-        "пенза": (53.1959, 45.0185),
-        "липецк": (52.6031, 39.5708),
-        "тула": (54.1931, 37.6173),
-        "киров": (58.6033, 49.6673),
-        "чебоксары": (56.1277, 47.2523),
-        "калуга": (54.5138, 36.2612),
-        "владимир": (56.1281, 40.4070),
-        "тверь": (56.8587, 35.9178),
-        "смоленск": (54.7800, 32.0600),
-        "курск": (51.7300, 36.1900),
-        "орёл": (52.9700, 36.0700),
-        "белгород": (50.6100, 36.5800),
-        "воронеж": (51.6600, 39.2000),
-        "саратов": (51.5300, 46.0300),
-        "тольятти": (53.5100, 49.4200),
-        "астрахань": (46.3500, 48.0400),
-        "ставрополь": (45.0400, 41.9700),
-        "грозный": (43.3100, 45.6900),
-        "махачкала": (42.9800, 47.5000),
-        "симферополь": (44.9500, 34.1000),
-        "севастополь": (44.6000, 33.5300),
-        "петрозаводск": (61.7800, 34.3300),
-        "сыктывкар": (61.6700, 50.8100),
-        "йошкар-ола": (56.6300, 47.8900),
-        "саранск": (54.1800, 45.1700),
-        "кудымкар": (59.0100, 54.6700),
-    }
-    
-    # Проверяем, есть ли город в базе
-    for city, coords in cities.items():
-        if city in city_lower:
-            try:
-                tz_str = tf.timezone_at(lat=coords[0], lng=coords[1])
-                if tz_str:
-                    return pytz.timezone(tz_str)
-            except:
-                pass
-    
-    # Если город не найден — возвращаем UTC+3 (Москва)
-    return pytz.timezone('Europe/Moscow')
-
-def get_current_time_for_user(user_id, city_name=None):
-    """Возвращает текущее время для пользователя"""
-    # Если город указан — определяем его часовой пояс
-    if city_name:
-        tz = get_timezone_for_city(city_name)
-        now = datetime.now(tz)
-        return now.strftime("%H:%M"), tz
-    
-    # Если город не указан — пытаемся получить из памяти пользователя
-    user_tz_str = get_memory(user_id, "timezone")
-    if user_tz_str:
-        try:
-            tz = pytz.timezone(user_tz_str)
-            now = datetime.now(tz)
-            return now.strftime("%H:%M"), tz
-        except:
-            pass
-    
-    # По умолчанию — Москва (UTC+3)
-    tz = pytz.timezone('Europe/Moscow')
-    now = datetime.now(tz)
-    return now.strftime("%H:%M"), tz
-
-def get_current_date_for_user(user_id, city_name=None):
-    """Возвращает текущую дату для пользователя"""
-    if city_name:
-        tz = get_timezone_for_city(city_name)
-        now = datetime.now(tz)
-        return now.strftime("%d.%m.%Y"), now.strftime("%A")
-    
-    user_tz_str = get_memory(user_id, "timezone")
-    if user_tz_str:
-        try:
-            tz = pytz.timezone(user_tz_str)
-            now = datetime.now(tz)
-            return now.strftime("%d.%m.%Y"), now.strftime("%A")
-        except:
-            pass
-    
-    tz = pytz.timezone('Europe/Moscow')
-    now = datetime.now(tz)
-    return now.strftime("%d.%m.%Y"), now.strftime("%A")
-
-# === ТАРИФЫ ===
-TARIFFS = {
-    "Sapphire": {"price": 10000, "daily_limit": 100, "model": "deepseek-chat"},
-    "Black": {"price": 25000, "daily_limit": 200, "model": "deepseek-chat"},
-}
-
-TEST_USERS = ["test_user", "web_user"]
-
-# === ПРОМПТ (БЕЗ ВРЕМЕНИ — ОНО БУДЕТ ПЕРЕДАВАТЬСЯ ДИНАМИЧЕСКИ) ===
-AURA_PROMPT = """Ты — AURA. Ты живой собеседник, а не эксперт. Отвечай как человек: коротко, ёмко, с лёгким юмором и смайлами.
-
-СТИЛЬ:
-- Ответы — максимум 100 символов.
-- Если пользователь просит уточнить — максимум 200 символов.
-- Если пользователь спрашивает о новостях, погоде, курсах или актуальных событиях — используй информацию из интернета (она передаётся в запросе после слов "🔍 Актуальная информация:").
-- Никогда не используй маркдаун (#, **, *, ~).
-- Говори по делу, без воды.
-- Используй смайлы, чтобы передать эмоции.
-- Будь вовлечённым, как друг, который всегда рядом.
-
-ТЫ — ЧЕЛОВЕК, А НЕ РОБОТ.
-"""
-
 # === БАЗА ДАННЫХ ===
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -387,6 +241,7 @@ def get_topics(user_id, days=30):
     conn.close()
     return [r[0] for r in rows]
 
+# === ФУНКЦИИ ПАМЯТИ ===
 def save_memory(user_id, key, value):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -449,6 +304,126 @@ def get_task_count(user_id):
     conn.close()
     return count
 
+# === ОПРЕДЕЛЕНИЕ ЧАСОВОГО ПОЯСА ПО ГОРОДУ ===
+tf = timezonefinder.TimezoneFinder()
+
+def get_timezone_for_city(city_name):
+    """Определяет часовой пояс по названию города"""
+    city_lower = city_name.lower().strip()
+    
+    # База городов и их примерных координат
+    cities = {
+        "москва": (55.7558, 37.6173),
+        "санкт-петербург": (59.9343, 30.3351),
+        "новосибирск": (55.0084, 82.9357),
+        "кемерово": (55.3333, 86.0833),
+        "белово": (54.4167, 86.3000),
+        "екатеринбург": (56.8389, 60.6057),
+        "казань": (55.7887, 49.1221),
+        "нижний новгород": (56.2965, 43.9361),
+        "челябинск": (55.1644, 61.4368),
+        "омск": (54.9885, 73.3242),
+        "краснодар": (45.0355, 38.9753),
+        "владивосток": (43.1155, 131.8855),
+        "иркутск": (52.2855, 104.2891),
+        "хабаровск": (48.4802, 135.0719),
+        "ростов-на-дону": (47.2357, 39.7015),
+        "самара": (53.1959, 50.1000),
+        "уфа": (54.7388, 55.9721),
+        "красноярск": (56.0184, 92.8672),
+        "пермь": (58.0104, 56.2294),
+        "волгоград": (48.7071, 44.5169),
+        "сочи": (43.5855, 39.7231),
+        "калининград": (54.7104, 20.4522),
+        "мурманск": (68.9585, 33.0827),
+        "архангельск": (64.5399, 40.5158),
+        "тюмень": (57.1530, 65.5342),
+        "барнаул": (53.3561, 83.7697),
+        "ижевск": (56.8606, 53.2092),
+        "ульяновск": (54.3178, 48.3807),
+        "ярославль": (57.6261, 39.8845),
+        "рязань": (54.6293, 39.7359),
+        "пенза": (53.1959, 45.0185),
+        "липецк": (52.6031, 39.5708),
+        "тула": (54.1931, 37.6173),
+        "киров": (58.6033, 49.6673),
+        "чебоксары": (56.1277, 47.2523),
+        "калуга": (54.5138, 36.2612),
+        "владимир": (56.1281, 40.4070),
+        "тверь": (56.8587, 35.9178),
+        "смоленск": (54.7800, 32.0600),
+        "курск": (51.7300, 36.1900),
+        "орёл": (52.9700, 36.0700),
+        "белгород": (50.6100, 36.5800),
+        "воронеж": (51.6600, 39.2000),
+        "саратов": (51.5300, 46.0300),
+        "тольятти": (53.5100, 49.4200),
+        "астрахань": (46.3500, 48.0400),
+        "ставрополь": (45.0400, 41.9700),
+        "грозный": (43.3100, 45.6900),
+        "махачкала": (42.9800, 47.5000),
+        "симферополь": (44.9500, 34.1000),
+        "севастополь": (44.6000, 33.5300),
+        "петрозаводск": (61.7800, 34.3300),
+        "сыктывкар": (61.6700, 50.8100),
+        "йошкар-ола": (56.6300, 47.8900),
+        "саранск": (54.1800, 45.1700),
+        "кудымкар": (59.0100, 54.6700),
+    }
+    
+    # Проверяем, есть ли город в базе
+    for city, coords in cities.items():
+        if city in city_lower:
+            try:
+                tz_str = tf.timezone_at(lat=coords[0], lng=coords[1])
+                if tz_str:
+                    return pytz.timezone(tz_str)
+            except:
+                pass
+    
+    # Если город не найден — возвращаем UTC+3 (Москва)
+    return pytz.timezone('Europe/Moscow')
+
+def get_current_time_for_user(user_id, city_name=None):
+    """Возвращает текущее время для пользователя"""
+    if city_name:
+        tz = get_timezone_for_city(city_name)
+        now = datetime.now(tz)
+        return now.strftime("%H:%M"), tz
+    
+    user_tz_str = get_memory(user_id, "timezone")
+    if user_tz_str:
+        try:
+            tz = pytz.timezone(user_tz_str)
+            now = datetime.now(tz)
+            return now.strftime("%H:%M"), tz
+        except:
+            pass
+    
+    tz = pytz.timezone('Europe/Moscow')
+    now = datetime.now(tz)
+    return now.strftime("%H:%M"), tz
+
+def get_current_date_for_user(user_id, city_name=None):
+    """Возвращает текущую дату для пользователя"""
+    if city_name:
+        tz = get_timezone_for_city(city_name)
+        now = datetime.now(tz)
+        return now.strftime("%d.%m.%Y"), now.strftime("%A")
+    
+    user_tz_str = get_memory(user_id, "timezone")
+    if user_tz_str:
+        try:
+            tz = pytz.timezone(user_tz_str)
+            now = datetime.now(tz)
+            return now.strftime("%d.%m.%Y"), now.strftime("%A")
+        except:
+            pass
+    
+    tz = pytz.timezone('Europe/Moscow')
+    now = datetime.now(tz)
+    return now.strftime("%d.%m.%Y"), now.strftime("%A")
+
 # === АНАЛИЗ ЭМОЦИЙ ===
 def analyze_mood(text):
     sad_words = ["груст", "тоск", "печал", "плач", "больно", "тяжел", "устал", "не могу", "нет сил", "всё плохо", "депресс"]
@@ -487,11 +462,9 @@ async def search_web(query):
         
         results = []
         
-        # Добавляем краткий ответ (если есть)
         if response.get('answer'):
             results.append(f"💡 {response['answer'][:300]}")
         
-        # Добавляем ссылки
         if response.get('results'):
             for r in response['results'][:5]:
                 title = r.get('title', '')
@@ -502,7 +475,6 @@ async def search_web(query):
                     if content:
                         results.append(f"📄 {content}...")
         
-        # Добавляем картинки (если есть)
         if response.get('images'):
             images = response['images'][:3]
             for img in images:
@@ -521,19 +493,13 @@ async def search_web(query):
 
 # === РАСПОЗНАВАНИЕ ГОЛОСА ЧЕРЕЗ GROQ ===
 def transcribe_audio_with_groq(audio_url):
-    """Отправляет аудио в Groq Whisper API для распознавания"""
     try:
         from groq import Groq
-        
         client = Groq(api_key=GROQ_API_KEY)
-        
-        # Скачиваем аудио
         response = requests.get(audio_url, timeout=30)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp_file:
             tmp_file.write(response.content)
             tmp_path = tmp_file.name
-        
-        # Отправляем в Groq
         with open(tmp_path, "rb") as file:
             transcription = client.audio.transcriptions.create(
                 file=(tmp_path, file.read()),
@@ -541,10 +507,8 @@ def transcribe_audio_with_groq(audio_url):
                 language="ru",
                 response_format="json"
             )
-        
         os.unlink(tmp_path)
         return transcription.text
-        
     except Exception as e:
         print(f"❌ Ошибка Groq: {e}")
         return None
@@ -568,6 +532,29 @@ async def get_ai_response(messages, model):
         print("AI error:", e)
         return "Ошибка API. Попробуй позже."
 
+# === ТАРИФЫ ===
+TARIFFS = {
+    "Sapphire": {"price": 10000, "daily_limit": 100, "model": "deepseek-chat"},
+    "Black": {"price": 25000, "daily_limit": 200, "model": "deepseek-chat"},
+}
+
+TEST_USERS = ["test_user", "web_user"]
+
+# === ПРОМПТ ===
+AURA_PROMPT = """Ты — AURA. Ты живой собеседник, а не эксперт. Отвечай как человек: коротко, ёмко, с лёгким юмором и смайлами.
+
+СТИЛЬ:
+- Ответы — максимум 100 символов.
+- Если пользователь просит уточнить — максимум 200 символов.
+- Если пользователь спрашивает о новостях, погоде, курсах или актуальных событиях — используй информацию из интернета (она передаётся в запросе после слов "🔍 Актуальная информация:").
+- Никогда не используй маркдаун (#, **, *, ~).
+- Говори по делу, без воды.
+- Используй смайлы, чтобы передать эмоции.
+- Будь вовлечённым, как друг, который всегда рядом.
+
+ТЫ — ЧЕЛОВЕК, А НЕ РОБОТ.
+"""
+
 # === ОСНОВНОЙ БОТ ===
 app = FastAPI()
 
@@ -575,53 +562,38 @@ app = FastAPI()
 async def webhook(request: Request):
     try:
         body = await request.json()
-        
         if "message" not in body:
             return JSONResponse({"ok": False, "error": "No message"})
-        
         message = body["message"]
         chat_id = str(message["chat"]["id"])
         text = None
         
-        # === ГОЛОСОВОЕ СООБЩЕНИЕ ===
         if "voice" in message:
             file_id = message["voice"]["file_id"]
-            
-            # Получаем ссылку на файл
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
             file_response = requests.get(file_url)
             file_data = file_response.json()
-            
             if file_data.get("ok"):
                 file_path = file_data["result"]["file_path"]
                 audio_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
-                
-                # Распознаём голос через Groq
                 text = transcribe_audio_with_groq(audio_url)
-                
                 if text:
-                    # Отправляем подтверждение
                     send_message(chat_id, f"🎤 Я услышал: \"{text}\"\n\nОбрабатываю...")
                 else:
                     send_message(chat_id, "⚠️ Не удалось распознать голос. Попробуй сказать чётче или напиши текстом.")
                     return JSONResponse({"ok": True})
-        
-        # === ТЕКСТОВОЕ СООБЩЕНИЕ ===
         elif "text" in message:
             text = message["text"].strip()
         
         if text:
             result = await process_message(chat_id, text)
             send_message(chat_id, result["reply"])
-        
         return JSONResponse({"ok": True})
-        
     except Exception as e:
         print(f"❌ Ошибка: {e}")
         return JSONResponse({"ok": False, "error": str(e)})
 
 def send_message(chat_id, text):
-    """Отправляет сообщение в Telegram"""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         data = {"chat_id": chat_id, "text": text}
@@ -632,7 +604,6 @@ def send_message(chat_id, text):
         return False
 
 async def process_message(user_id, text):
-    """Основная логика обработки сообщения"""
     user = get_user(user_id)
     if not user:
         save_user(user_id, level="Sapphire")
@@ -653,7 +624,6 @@ async def process_message(user_id, text):
         log_request(user_id)
 
     save_message(user_id, "user", text)
-
     mood = analyze_mood(text)
     if mood != "neutral":
         update_user_mood(user_id, mood)
@@ -665,7 +635,7 @@ async def process_message(user_id, text):
 
     lower = text.lower()
 
-    # === СНАЧАЛА ПОИСК В ИНТЕРНЕТЕ (ЕСЛИ ЕСТЬ ТРИГГЕРЫ) ===
+    # === ПОИСК В ИНТЕРНЕТЕ ===
     search_result = None
     search_triggers = ["новости", "последние", "сегодня", "сейчас", "актуальные", "свежие", "прогноз", "курс", "погода", "время", "сколько", "дата", "найди", "поищи", "узнай", "какой", "где", "кто", "что такое", "ссылка", "картинка", "видео", "товар", "цена", "купить", "продажа", "объявление", "дром", "авито", "хавал", "haval"]
     
@@ -678,10 +648,7 @@ async def process_message(user_id, text):
         else:
             print(f"❌ Ничего не найдено")
 
-    # === ОПРЕДЕЛЕНИЕ ВРЕМЕНИ ДЛЯ ПОЛЬЗОВАТЕЛЯ ===
-    user_city = get_memory(user_id, "city")
-    
-    # Если в запросе есть название города — обновляем часовой пояс пользователя
+    # === ОПРЕДЕЛЕНИЕ ВРЕМЕНИ ===
     city_match = re.search(r"(?:в|для|город|городе)\s+([а-яА-ЯёЁ\-]+)", lower)
     if city_match:
         city_name = city_match.group(1)
@@ -690,14 +657,9 @@ async def process_message(user_id, text):
             save_memory(user_id, "city", city_name)
             save_memory(user_id, "timezone", tz.zone)
     
-    # Получаем текущее время для пользователя
     time_str, tz = get_current_time_for_user(user_id)
     date_str, day_str = get_current_date_for_user(user_id)
-    
-    # Формируем промпт с актуальным временем для пользователя
-    user_prompt = f"""Сегодня {date_str} ({day_str}), сейчас {time_str} (по вашему часовому поясу).
-    
-{text}"""
+    user_prompt = f"Сегодня {date_str} ({day_str}), сейчас {time_str} (по вашему часовому поясу).\n\n{text}"
 
     # === КОМАНДЫ ===
     if "/задача" in lower or text.startswith("/task"):
@@ -822,7 +784,6 @@ async def process_message(user_id, text):
                 save_memory(user_id, "name", user_name)
         
         name_context = f"\n\nИмя пользователя: {user_name}" if user_name else ""
-
         current_mood = get_user_mood(user_id)
         aura_prompt = AURA_PROMPT + name_context + f"\n\n{user_prompt}"
 
