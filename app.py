@@ -3,22 +3,25 @@ import io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from datetime import datetime, timedelta
-import random
 import sqlite3
 import httpx
 from openai import OpenAI
 import json
 import re
 import os
+import requests
+import tempfile
 
 # === КОНФИГ ===
 DB_NAME = "aura.db"
 
-# === ПРЯМОЙ DEEPSEEK (ФЛАГМАН) ===
+# === КЛЮЧИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ===
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-133c0d2bfc664d878ac8dcbc346ea3fc")
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8774637081:AAGrAZI-umgkQXXulCulJVRWb8LmAp3Lua4")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 # === ТАРИФЫ ===
 TARIFFS = {
@@ -346,6 +349,36 @@ async def search_web(query):
     except:
         return None
 
+# === РАСПОЗНАВАНИЕ ГОЛОСА ЧЕРЕЗ GROQ ===
+def transcribe_audio_with_groq(audio_url):
+    """Отправляет аудио в Groq Whisper API для распознавания"""
+    try:
+        from groq import Groq
+        
+        client = Groq(api_key=GROQ_API_KEY)
+        
+        # Скачиваем аудио
+        response = requests.get(audio_url, timeout=30)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp_file:
+            tmp_file.write(response.content)
+            tmp_path = tmp_file.name
+        
+        # Отправляем в Groq
+        with open(tmp_path, "rb") as file:
+            transcription = client.audio.transcriptions.create(
+                file=(tmp_path, file.read()),
+                model="whisper-large-v3-turbo",
+                language="ru",
+                response_format="json"
+            )
+        
+        os.unlink(tmp_path)
+        return transcription.text
+        
+    except Exception as e:
+        print(f"❌ Ошибка Groq: {e}")
+        return None
+
 # === ПОДКЛЮЧЕНИЕ К ПРЯМОМУ DEEPSEEK ===
 client = OpenAI(
     api_key=DEEPSEEK_API_KEY,
@@ -371,40 +404,62 @@ app = FastAPI()
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
-        # Получаем данные от Telegram
         body = await request.json()
         
-        # Извлекаем сообщение
         if "message" not in body:
             return JSONResponse({"ok": False, "error": "No message"})
         
         message = body["message"]
         chat_id = str(message["chat"]["id"])
+        text = None
         
-        # Получаем текст
-        if "text" not in message:
-            return JSONResponse({"ok": False, "error": "No text"})
+        # === ГОЛОСОВОЕ СООБЩЕНИЕ ===
+        if "voice" in message:
+            file_id = message["voice"]["file_id"]
+            
+            # Получаем ссылку на файл
+            file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
+            file_response = requests.get(file_url)
+            file_data = file_response.json()
+            
+            if file_data.get("ok"):
+                file_path = file_data["result"]["file_path"]
+                audio_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+                
+                # Распознаём голос через Groq
+                text = transcribe_audio_with_groq(audio_url)
+                
+                if text:
+                    # Отправляем подтверждение
+                    send_message(chat_id, f"🎤 Я услышал: \"{text}\"\n\nОбрабатываю...")
+                else:
+                    send_message(chat_id, "⚠️ Не удалось распознать голос. Попробуй сказать чётче или напиши текстом.")
+                    return JSONResponse({"ok": True})
         
-        text = message["text"].strip()
+        # === ТЕКСТОВОЕ СООБЩЕНИЕ ===
+        elif "text" in message:
+            text = message["text"].strip()
         
-        # Обрабатываем через основную логику
-        result = await process_message(chat_id, text)
-        
-        # Отправляем ответ через Telegram Bot API
-        import requests
-        token = "8774637081:AAGrAZI-umgkQXXulCulJVRWb8LmAp3Lua4"
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        data = {
-            "chat_id": chat_id,
-            "text": result["reply"]
-        }
-        requests.post(url, json=data, timeout=30)
+        if text:
+            result = await process_message(chat_id, text)
+            send_message(chat_id, result["reply"])
         
         return JSONResponse({"ok": True})
         
     except Exception as e:
         print(f"❌ Ошибка: {e}")
         return JSONResponse({"ok": False, "error": str(e)})
+
+def send_message(chat_id, text):
+    """Отправляет сообщение в Telegram"""
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        data = {"chat_id": chat_id, "text": text}
+        response = requests.post(url, json=data, timeout=30)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"❌ Ошибка отправки: {e}")
+        return False
 
 async def process_message(user_id, text):
     """Основная логика обработки сообщения"""
@@ -441,8 +496,6 @@ async def process_message(user_id, text):
     lower = text.lower()
 
     # === КОМАНДЫ ===
-    
-    # === ЗАДАЧИ ===
     if "/задача" in lower or text.startswith("/task"):
         parts = text.split(" ", 1)
         if len(parts) >= 2:
@@ -494,7 +547,6 @@ async def process_message(user_id, text):
         else:
             reply = "Формат: /удалить [ID задачи]"
     
-    # === НАПОМИНАНИЯ ===
     elif "/напомни" in lower:
         parts = text.split(" ", 2)
         if len(parts) >= 3:
@@ -519,7 +571,6 @@ async def process_message(user_id, text):
         else:
             reply = "Нет напоминаний."
     
-    # === ЗАПРОСЫ ===
     elif "/докупить" in lower:
         parts = text.split(" ")
         if len(parts) >= 2:
@@ -559,14 +610,12 @@ async def process_message(user_id, text):
 ❓ Просто пиши, я отвечу! 😊"""
     
     else:
-        # === ПОИСК В ИНТЕРНЕТЕ ===
         search_result = None
         if any(word in lower for word in ["новости", "последние", "сегодня", "сейчас", "актуальные", "свежие", "прогноз", "курс", "погода", "время", "сколько", "дата"]):
             search_result = await search_web(text)
             if search_result:
                 text = text + f"\n\nАктуальная информация: {search_result}"
 
-        # === ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ ===
         user_name = get_memory(user_id, "name")
         if not user_name:
             name_match = re.search(r"(?:меня зовут|зовут|я )(\w+)", text.lower())
@@ -576,11 +625,9 @@ async def process_message(user_id, text):
         
         name_context = f"\n\nИмя пользователя: {user_name}" if user_name else ""
 
-        # === ДИНАМИЧЕСКИЙ ПРОМПТ ===
         current_mood = get_user_mood(user_id)
         aura_prompt = AURA_PROMPT + name_context
 
-        # === ФОРМИРУЕМ ЗАПРОС ===
         history = get_history(user_id, limit=30)
         messages = [{"role": "system", "content": aura_prompt}]
         for msg in history:
@@ -594,6 +641,7 @@ async def process_message(user_id, text):
 
 @app.get("/")
 async def root():
+    from fastapi.responses import FileResponse
     return FileResponse("web/index.html")
 
 if __name__ == "__main__":
