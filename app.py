@@ -789,4 +789,59 @@ async def process_message(user_id, text):
     
     elif "/остаток" in lower:
         if user_id in TEST_USERS:
-            reply = "Для тестового пользова
+            reply = "Для тестового пользователя лимитов нет. Можешь спрашивать сколько угодно."
+        else:
+            total = daily_limit + get_extra_requests(user_id) - get_today_requests(user_id)
+            reply = f"📊 Осталось запросов на сегодня: {total}. Всего доступно: {daily_limit + get_extra_requests(user_id)}."
+    
+    elif "/помощь" in lower or "/help" in lower:
+        reply = """🤖 **AURA — Помощь**
+
+📋 **Задачи:**
+/задача [текст] — добавить задачу
+/задачи — показать все задачи
+/выполнить [ID] — отметить как выполненную
+/удалить [ID] — удалить задачу
+
+⏰ **Напоминания:**
+/напомни ГГГГ-ММ-ДД ТЕКСТ — создать напоминание
+/моинапоминания — показать все напоминания
+
+💰 **Запросы:**
+/остаток — проверить остаток запросов
+/докупить [количество] — добавить запросы
+
+❓ Просто пиши, я отвечу! 😊"""
+    
+    else:
+        user_name = get_memory(user_id, "name")
+        if not user_name:
+            name_match = re.search(r"(?:меня зовут|зовут|я )(\w+)", text.lower())
+            if name_match:
+                user_name = name_match.group(1).capitalize()
+                save_memory(user_id, "name", user_name)
+        
+        name_context = f"\n\nИмя пользователя: {user_name}" if user_name else ""
+
+        current_mood = get_user_mood(user_id)
+        aura_prompt = AURA_PROMPT + name_context + f"\n\n{user_prompt}"
+
+        history = get_history(user_id, limit=30)
+        messages = [{"role": "system", "content": aura_prompt}]
+        for msg in history:
+            messages.append({"role": msg["role"], "content": msg["content"]})
+        messages.append({"role": "user", "content": text})
+
+        reply = await get_ai_response(messages, model)
+
+    save_message(user_id, "assistant", reply)
+    return {"reply": reply}
+
+@app.get("/")
+async def root():
+    from fastapi.responses import FileResponse
+    return FileResponse("web/index.html")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
