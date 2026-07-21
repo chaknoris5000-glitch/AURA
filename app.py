@@ -14,6 +14,9 @@ import os
 import requests
 import tempfile
 
+# === TAVILY ДЛЯ ПОИСКА В ИНТЕРНЕТЕ ===
+from tavily import TavilyClient
+
 # === КОНФИГ ===
 DB_NAME = "aura.db"
 
@@ -22,6 +25,10 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-133c0d2bfc664d878ac8dcbc346
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8774637081:AAGrAZI-umgkQXXulCulJVRWb8LmAp3Lua4")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+
+# === ИНИЦИАЛИЗАЦИЯ TAVILY ===
+tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
 
 # === ТАРИФЫ ===
 TARIFFS = {
@@ -331,22 +338,46 @@ def analyze_mood(text):
         return "tired"
     return "neutral"
 
-# === ПОИСК В ИНТЕРНЕТЕ ===
+# === ПОИСК В ИНТЕРНЕТЕ ЧЕРЕЗ TAVILY ===
 async def search_web(query):
+    """Поиск в интернете через Tavily — реальные ссылки, новости, картинки"""
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.get(
-                f"https://api.duckduckgo.com/?q={query}&format=json&no_html=1&skip_disambig=1"
-            )
-            data = response.json()
-            if data.get("AbstractText"):
-                return data["AbstractText"][:800]
-            elif data.get("RelatedTopics"):
-                for topic in data["RelatedTopics"]:
-                    if "Text" in topic:
-                        return topic["Text"][:800]
-            return None
-    except:
+        response = tavily_client.search(
+            query=query,
+            search_depth="basic",
+            max_results=5,
+            include_answer=True,
+            include_images=True,
+            include_raw_content=False
+        )
+        
+        results = []
+        
+        # Добавляем краткий ответ (если есть)
+        if response.get('answer'):
+            results.append(f"💡 {response['answer'][:300]}")
+        
+        # Добавляем ссылки
+        if response.get('results'):
+            for r in response['results'][:5]:
+                title = r.get('title', '')
+                url = r.get('url', '')
+                content = r.get('content', '')[:150]
+                if title and url:
+                    results.append(f"🔗 [{title}]({url})")
+                    if content:
+                        results.append(f"📄 {content}...")
+        
+        # Добавляем картинки (если есть)
+        if response.get('images'):
+            images = response['images'][:3]
+            for img in images:
+                results.append(f"🖼️ {img}")
+        
+        return "\n\n".join(results) if results else None
+        
+    except Exception as e:
+        print(f"❌ Ошибка Tavily: {e}")
         return None
 
 # === РАСПОЗНАВАНИЕ ГОЛОСА ЧЕРЕЗ GROQ ===
@@ -610,11 +641,18 @@ async def process_message(user_id, text):
 ❓ Просто пиши, я отвечу! 😊"""
     
     else:
+        # === ПОИСК В ИНТЕРНЕТЕ ЧЕРЕЗ TAVILY ===
         search_result = None
-        if any(word in lower for word in ["новости", "последние", "сегодня", "сейчас", "актуальные", "свежие", "прогноз", "курс", "погода", "время", "сколько", "дата"]):
+        search_triggers = ["новости", "последние", "сегодня", "сейчас", "актуальные", "свежие", "прогноз", "курс", "погода", "время", "сколько", "дата", "найди", "поищи", "узнай", "какой", "где", "кто", "что такое", "ссылка", "картинка", "видео", "товар", "цена", "купить", "продажа", "объявление", "дром", "авито"]
+        
+        if any(word in lower for word in search_triggers):
+            print(f"🔍 Ищу в интернете через Tavily: {text}")
             search_result = await search_web(text)
             if search_result:
-                text = text + f"\n\nАктуальная информация: {search_result}"
+                text = text + f"\n\n🔍 Актуальная информация:\n{search_result}"
+                print(f"✅ Найдено!")
+            else:
+                print(f"❌ Ничего не найдено")
 
         user_name = get_memory(user_id, "name")
         if not user_name:
