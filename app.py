@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from datetime import datetime, timedelta
 import sqlite3
-import httpx  # ← ИСПРАВЛЕНО!
+import httpx
 from openai import OpenAI
 import json
 import re
@@ -35,7 +35,7 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 tavily_client = None
 if TavilyClient and TAVILY_API_KEY:
     try:
-        tavily_client = TavilyClient(api_key=TAVILY_API_KEY)  # ← ИСПРАВЛЕНО!
+        tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
         print("✅ Tavily инициализирован")
     except Exception as e:
         print(f"❌ Ошибка Tavily: {e}")
