@@ -13,40 +13,37 @@ import re
 import os
 import requests
 import tempfile
-import pytz
-import timezonefinder
 
-# === TAVILY ДЛЯ ПОИСКА В ИНТЕРНЕТЕ ===
+# === TAVILY ДЛЯ ПОИСКА ===
 try:
     from tavily import TavilyClient
 except ImportError:
-    print("⚠️ Tavily не установлен. Установи: pip install tavily-python")
+    print("⚠️ Tavily не установлен")
     TavilyClient = None
 
 # === КОНФИГ ===
 DB_NAME = "aura.db"
 
-# === КЛЮЧИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЙ ===
+# === КЛЮЧИ ===
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-133c0d2bfc664d878ac8dcbc346ea3fc")
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8774637081:AAGrAZI-umgkQXXulCulJVRWb8LmAp3Lua4")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 
-# === ИНИЦИАЛИЗАЦИЯ TAVILY ===
+# === TAVILY ===
 tavily_client = None
 if TavilyClient and TAVILY_API_KEY:
     try:
         tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
         print("✅ Tavily инициализирован")
     except Exception as e:
-        print(f"❌ Ошибка Tavily: {e}")
+        print(f"❌ Tavily: {e}")
 
-# === БАЗА ДАННЫХ ===
+# === БАЗА ===
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    
     c.execute("""CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id TEXT UNIQUE,
@@ -56,17 +53,12 @@ def init_db():
         mood TEXT DEFAULT 'neutral',
         style TEXT DEFAULT 'neutral'
     )""")
-    
     try:
         c.execute("ALTER TABLE users ADD COLUMN mood TEXT DEFAULT 'neutral'")
-    except sqlite3.OperationalError:
-        pass
-    
+    except: pass
     try:
         c.execute("ALTER TABLE users ADD COLUMN style TEXT DEFAULT 'neutral'")
-    except sqlite3.OperationalError:
-        pass
-    
+    except: pass
     c.execute("""CREATE TABLE IF NOT EXISTS history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id TEXT,
@@ -106,7 +98,6 @@ def init_db():
         value TEXT,
         created_at TEXT
     )""")
-    
     c.execute("""CREATE TABLE IF NOT EXISTS tasks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id TEXT,
@@ -116,13 +107,12 @@ def init_db():
         created_at TEXT,
         due_date TEXT
     )""")
-    
     conn.commit()
     conn.close()
 
 init_db()
 
-# === ФУНКЦИИ БАЗЫ ===
+# === ФУНКЦИИ ===
 def get_user(user_id):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -241,7 +231,6 @@ def get_topics(user_id, days=30):
     conn.close()
     return [r[0] for r in rows]
 
-# === ФУНКЦИИ ПАМЯТИ ===
 def save_memory(user_id, key, value):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -258,7 +247,7 @@ def get_memory(user_id, key):
     conn.close()
     return row[0] if row else None
 
-# === ФУНКЦИИ ДЛЯ ЗАДАЧ ===
+# === ЗАДАЧИ ===
 def add_task(user_id, text, priority="normal", due_date=None):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -304,133 +293,12 @@ def get_task_count(user_id):
     conn.close()
     return count
 
-# === ОПРЕДЕЛЕНИЕ ЧАСОВОГО ПОЯСА ПО ГОРОДУ ===
-tf = timezonefinder.TimezoneFinder()
-
-def get_timezone_for_city(city_name):
-    """Определяет часовой пояс по названию города"""
-    city_lower = city_name.lower().strip()
-    
-    # База городов и их примерных координат
-    cities = {
-        "москва": (55.7558, 37.6173),
-        "санкт-петербург": (59.9343, 30.3351),
-        "новосибирск": (55.0084, 82.9357),
-        "кемерово": (55.3333, 86.0833),
-        "белово": (54.4167, 86.3000),
-        "екатеринбург": (56.8389, 60.6057),
-        "казань": (55.7887, 49.1221),
-        "нижний новгород": (56.2965, 43.9361),
-        "челябинск": (55.1644, 61.4368),
-        "омск": (54.9885, 73.3242),
-        "краснодар": (45.0355, 38.9753),
-        "владивосток": (43.1155, 131.8855),
-        "иркутск": (52.2855, 104.2891),
-        "хабаровск": (48.4802, 135.0719),
-        "ростов-на-дону": (47.2357, 39.7015),
-        "самара": (53.1959, 50.1000),
-        "уфа": (54.7388, 55.9721),
-        "красноярск": (56.0184, 92.8672),
-        "пермь": (58.0104, 56.2294),
-        "волгоград": (48.7071, 44.5169),
-        "сочи": (43.5855, 39.7231),
-        "калининград": (54.7104, 20.4522),
-        "мурманск": (68.9585, 33.0827),
-        "архангельск": (64.5399, 40.5158),
-        "тюмень": (57.1530, 65.5342),
-        "барнаул": (53.3561, 83.7697),
-        "ижевск": (56.8606, 53.2092),
-        "ульяновск": (54.3178, 48.3807),
-        "ярославль": (57.6261, 39.8845),
-        "рязань": (54.6293, 39.7359),
-        "пенза": (53.1959, 45.0185),
-        "липецк": (52.6031, 39.5708),
-        "тула": (54.1931, 37.6173),
-        "киров": (58.6033, 49.6673),
-        "чебоксары": (56.1277, 47.2523),
-        "калуга": (54.5138, 36.2612),
-        "владимир": (56.1281, 40.4070),
-        "тверь": (56.8587, 35.9178),
-        "смоленск": (54.7800, 32.0600),
-        "курск": (51.7300, 36.1900),
-        "орёл": (52.9700, 36.0700),
-        "белгород": (50.6100, 36.5800),
-        "воронеж": (51.6600, 39.2000),
-        "саратов": (51.5300, 46.0300),
-        "тольятти": (53.5100, 49.4200),
-        "астрахань": (46.3500, 48.0400),
-        "ставрополь": (45.0400, 41.9700),
-        "грозный": (43.3100, 45.6900),
-        "махачкала": (42.9800, 47.5000),
-        "симферополь": (44.9500, 34.1000),
-        "севастополь": (44.6000, 33.5300),
-        "петрозаводск": (61.7800, 34.3300),
-        "сыктывкар": (61.6700, 50.8100),
-        "йошкар-ола": (56.6300, 47.8900),
-        "саранск": (54.1800, 45.1700),
-        "кудымкар": (59.0100, 54.6700),
-    }
-    
-    # Проверяем, есть ли город в базе
-    for city, coords in cities.items():
-        if city in city_lower:
-            try:
-                tz_str = tf.timezone_at(lat=coords[0], lng=coords[1])
-                if tz_str:
-                    return pytz.timezone(tz_str)
-            except:
-                pass
-    
-    # Если город не найден — возвращаем UTC+3 (Москва)
-    return pytz.timezone('Europe/Moscow')
-
-def get_current_time_for_user(user_id, city_name=None):
-    """Возвращает текущее время для пользователя"""
-    if city_name:
-        tz = get_timezone_for_city(city_name)
-        now = datetime.now(tz)
-        return now.strftime("%H:%M"), tz
-    
-    user_tz_str = get_memory(user_id, "timezone")
-    if user_tz_str:
-        try:
-            tz = pytz.timezone(user_tz_str)
-            now = datetime.now(tz)
-            return now.strftime("%H:%M"), tz
-        except:
-            pass
-    
-    tz = pytz.timezone('Europe/Moscow')
-    now = datetime.now(tz)
-    return now.strftime("%H:%M"), tz
-
-def get_current_date_for_user(user_id, city_name=None):
-    """Возвращает текущую дату для пользователя"""
-    if city_name:
-        tz = get_timezone_for_city(city_name)
-        now = datetime.now(tz)
-        return now.strftime("%d.%m.%Y"), now.strftime("%A")
-    
-    user_tz_str = get_memory(user_id, "timezone")
-    if user_tz_str:
-        try:
-            tz = pytz.timezone(user_tz_str)
-            now = datetime.now(tz)
-            return now.strftime("%d.%m.%Y"), now.strftime("%A")
-        except:
-            pass
-    
-    tz = pytz.timezone('Europe/Moscow')
-    now = datetime.now(tz)
-    return now.strftime("%d.%m.%Y"), now.strftime("%A")
-
 # === АНАЛИЗ ЭМОЦИЙ ===
 def analyze_mood(text):
     sad_words = ["груст", "тоск", "печал", "плач", "больно", "тяжел", "устал", "не могу", "нет сил", "всё плохо", "депресс"]
     anxious_words = ["тревож", "волн", "боюс", "страш", "паник", "нерв", "пережив", "срок", "не успева", "давл"]
     happy_words = ["рад", "счаст", "класс", "отличн", "прекрасн", "здоров", "люблю", "ура", "позитив", "супер"]
     tired_words = ["устал", "спат", "вымотан", "без сил", "нет энергии", "перегруж", "выжат"]
-    
     lower = text.lower()
     if any(w in lower for w in sad_words):
         return "sad"
@@ -442,13 +310,11 @@ def analyze_mood(text):
         return "tired"
     return "neutral"
 
-# === ПОИСК В ИНТЕРНЕТЕ ЧЕРЕЗ TAVILY ===
+# === TAVILY ПОИСК ===
 async def search_web(query):
-    """Поиск в интернете через Tavily — реальные ссылки, новости, картинки"""
     if not tavily_client:
         print("❌ Tavily клиент не инициализирован")
         return None
-    
     try:
         print(f"🔍 Tavily поиск: {query}")
         response = tavily_client.search(
@@ -459,12 +325,9 @@ async def search_web(query):
             include_images=True,
             include_raw_content=False
         )
-        
         results = []
-        
         if response.get('answer'):
             results.append(f"💡 {response['answer'][:300]}")
-        
         if response.get('results'):
             for r in response['results'][:5]:
                 title = r.get('title', '')
@@ -474,24 +337,20 @@ async def search_web(query):
                     results.append(f"🔗 [{title}]({url})")
                     if content:
                         results.append(f"📄 {content}...")
-        
         if response.get('images'):
-            images = response['images'][:3]
-            for img in images:
+            for img in response['images'][:3]:
                 results.append(f"🖼️ {img}")
-        
         if results:
             print(f"✅ Tavily нашёл {len(results)} результатов")
             return "\n\n".join(results)
         else:
             print("❌ Tavily ничего не нашёл")
             return None
-        
     except Exception as e:
-        print(f"❌ Ошибка Tavily: {e}")
+        print(f"❌ Tavily: {e}")
         return None
 
-# === РАСПОЗНАВАНИЕ ГОЛОСА ЧЕРЕЗ GROQ ===
+# === ГОЛОС ===
 def transcribe_audio_with_groq(audio_url):
     try:
         from groq import Groq
@@ -510,10 +369,10 @@ def transcribe_audio_with_groq(audio_url):
         os.unlink(tmp_path)
         return transcription.text
     except Exception as e:
-        print(f"❌ Ошибка Groq: {e}")
+        print(f"❌ Groq: {e}")
         return None
 
-# === ПОДКЛЮЧЕНИЕ К ПРЯМОМУ DEEPSEEK ===
+# === DEEPSEEK ===
 client = OpenAI(
     api_key=DEEPSEEK_API_KEY,
     base_url=DEEPSEEK_BASE_URL
@@ -537,7 +396,6 @@ TARIFFS = {
     "Sapphire": {"price": 10000, "daily_limit": 100, "model": "deepseek-chat"},
     "Black": {"price": 25000, "daily_limit": 200, "model": "deepseek-chat"},
 }
-
 TEST_USERS = ["test_user", "web_user"]
 
 # === ПРОМПТ ===
@@ -580,7 +438,7 @@ async def webhook(request: Request):
                 if text:
                     send_message(chat_id, f"🎤 Я услышал: \"{text}\"\n\nОбрабатываю...")
                 else:
-                    send_message(chat_id, "⚠️ Не удалось распознать голос. Попробуй сказать чётче или напиши текстом.")
+                    send_message(chat_id, "⚠️ Не удалось распознать голос")
                     return JSONResponse({"ok": True})
         elif "text" in message:
             text = message["text"].strip()
@@ -600,7 +458,7 @@ def send_message(chat_id, text):
         response = requests.post(url, json=data, timeout=30)
         return response.status_code == 200
     except Exception as e:
-        print(f"❌ Ошибка отправки: {e}")
+        print(f"❌ Отправка: {e}")
         return False
 
 async def process_message(user_id, text):
@@ -618,7 +476,7 @@ async def process_message(user_id, text):
         extra = get_extra_requests(user_id)
         total_available = daily_limit + extra
         if today_used >= total_available:
-            return {"reply": f"Дневной лимит для уровня {level} исчерпан. Попробуй завтра или докупи запросы командой /докупить [количество]."}
+            return {"reply": f"Дневной лимит для уровня {level} исчерпан"}
         log_request(user_id)
     else:
         log_request(user_id)
@@ -635,31 +493,18 @@ async def process_message(user_id, text):
 
     lower = text.lower()
 
-    # === ПОИСК В ИНТЕРНЕТЕ ===
+    # === ПОИСК ===
     search_result = None
     search_triggers = ["новости", "последние", "сегодня", "сейчас", "актуальные", "свежие", "прогноз", "курс", "погода", "время", "сколько", "дата", "найди", "поищи", "узнай", "какой", "где", "кто", "что такое", "ссылка", "картинка", "видео", "товар", "цена", "купить", "продажа", "объявление", "дром", "авито", "хавал", "haval"]
     
     if any(word in lower for word in search_triggers):
-        print(f"🔍 Ищу в интернете через Tavily: {text}")
+        print(f"🔍 Поиск: {text}")
         search_result = await search_web(text)
         if search_result:
             text = text + f"\n\n🔍 Актуальная информация:\n{search_result}"
-            print(f"✅ Найдено!")
+            print("✅ Найдено!")
         else:
-            print(f"❌ Ничего не найдено")
-
-    # === ОПРЕДЕЛЕНИЕ ВРЕМЕНИ ===
-    city_match = re.search(r"(?:в|для|город|городе)\s+([а-яА-ЯёЁ\-]+)", lower)
-    if city_match:
-        city_name = city_match.group(1)
-        tz = get_timezone_for_city(city_name)
-        if tz:
-            save_memory(user_id, "city", city_name)
-            save_memory(user_id, "timezone", tz.zone)
-    
-    time_str, tz = get_current_time_for_user(user_id)
-    date_str, day_str = get_current_date_for_user(user_id)
-    user_prompt = f"Сегодня {date_str} ({day_str}), сейчас {time_str} (по вашему часовому поясу).\n\n{text}"
+            print("❌ Ничего не найдено")
 
     # === КОМАНДЫ ===
     if "/задача" in lower or text.startswith("/task"):
@@ -683,7 +528,7 @@ async def process_message(user_id, text):
                 lines.append(f"{emoji} #{task_id} {task_text}{date_str}")
             reply = "\n".join(lines) + f"\n\n📊 Всего: {len(tasks)} активных задач"
         else:
-            reply = "🎉 У тебя нет активных задач! Отдыхай или добавь новую командой /задача"
+            reply = "🎉 Нет активных задач!"
     
     elif "/выполнить" in lower or text.startswith("/done"):
         parts = text.split(" ")
@@ -691,7 +536,7 @@ async def process_message(user_id, text):
             try:
                 task_id = int(parts[1])
                 if complete_task(user_id, task_id):
-                    reply = f"✅ Задача #{task_id} выполнена! Молодец! 🎉"
+                    reply = f"✅ Задача #{task_id} выполнена! 🎉"
                 else:
                     reply = f"❌ Задача #{task_id} не найдена"
             except ValueError:
@@ -751,10 +596,10 @@ async def process_message(user_id, text):
     
     elif "/остаток" in lower:
         if user_id in TEST_USERS:
-            reply = "Для тестового пользователя лимитов нет. Можешь спрашивать сколько угодно."
+            reply = "Для тестового пользователя лимитов нет."
         else:
             total = daily_limit + get_extra_requests(user_id) - get_today_requests(user_id)
-            reply = f"📊 Осталось запросов на сегодня: {total}. Всего доступно: {daily_limit + get_extra_requests(user_id)}."
+            reply = f"📊 Осталось запросов на сегодня: {total}."
     
     elif "/помощь" in lower or "/help" in lower:
         reply = """🤖 **AURA — Помощь**
@@ -784,6 +629,14 @@ async def process_message(user_id, text):
                 save_memory(user_id, "name", user_name)
         
         name_context = f"\n\nИмя пользователя: {user_name}" if user_name else ""
+        
+        # Простое время (без pytz)
+        now = datetime.now()
+        current_date = now.strftime("%d.%m.%Y")
+        current_day = now.strftime("%A")
+        current_time = now.strftime("%H:%M")
+        user_prompt = f"Сегодня {current_date} ({current_day}), сейчас {current_time}.\n\n{text}"
+
         current_mood = get_user_mood(user_id)
         aura_prompt = AURA_PROMPT + name_context + f"\n\n{user_prompt}"
 
