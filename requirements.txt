@@ -8,5 +8,4 @@ pydantic
 groq
 tavily-python
 pytz
-pytz
 timezonefinder
