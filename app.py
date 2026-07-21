@@ -2,9 +2,8 @@ import sys
 import io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse
 from datetime import datetime, timedelta
 import random
 import sqlite3
@@ -12,22 +11,16 @@ import httpx
 from openai import OpenAI
 import json
 import re
-
-# === ДЛЯ ГОЛОСОВЫХ СООБЩЕНИЙ ===
-from openai import OpenAI as OpenAIClient
-
-whisper_client = OpenAIClient(
-    api_key="sk-133c0d2bfc664d878ac8dcbc346ea3fc"
-)
+import os
 
 # === КОНФИГ ===
 DB_NAME = "aura.db"
 
 # === ПРЯМОЙ DEEPSEEK (ФЛАГМАН) ===
-DEEPSEEK_API_KEY = "sk-133c0d2bfc664d878ac8dcbc346ea3fc"
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-133c0d2bfc664d878ac8dcbc346ea3fc")
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 
-# === ТАРИФЫ (ФЛАГМАНСКАЯ МОДЕЛЬ) ===
+# === ТАРИФЫ ===
 TARIFFS = {
     "Sapphire": {"price": 10000, "daily_limit": 100, "model": "deepseek-chat"},
     "Black": {"price": 25000, "daily_limit": 200, "model": "deepseek-chat"},
@@ -121,7 +114,6 @@ def init_db():
         created_at TEXT
     )""")
     
-    # === НОВАЯ ТАБЛИЦА ДЛЯ ЗАДАЧ ===
     c.execute("""CREATE TABLE IF NOT EXISTS tasks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id TEXT,
@@ -354,21 +346,6 @@ async def search_web(query):
     except:
         return None
 
-# === ФУНКЦИЯ ДЛЯ РАСПОЗНАВАНИЯ ГОЛОСА (WHISPER) ===
-def transcribe_voice(file_path):
-    """Распознаёт голос через Whisper"""
-    try:
-        with open(file_path, 'rb') as audio_file:
-            transcript = whisper_client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                language="ru"
-            )
-        return transcript.text
-    except Exception as e:
-        print(f"❌ Ошибка Whisper: {e}")
-        return None
-
 # === ПОДКЛЮЧЕНИЕ К ПРЯМОМУ DEEPSEEK ===
 client = OpenAI(
     api_key=DEEPSEEK_API_KEY,
@@ -391,15 +368,46 @@ async def get_ai_response(messages, model):
 # === ОСНОВНОЙ БОТ ===
 app = FastAPI()
 
-class Message(BaseModel):
-    user_id: str
-    text: str
-
 @app.post("/webhook")
-async def webhook(data: Message):
-    user_id = data.user_id
-    text = data.text.strip()
+async def webhook(request: Request):
+    try:
+        # Получаем данные от Telegram
+        body = await request.json()
+        
+        # Извлекаем сообщение
+        if "message" not in body:
+            return JSONResponse({"ok": False, "error": "No message"})
+        
+        message = body["message"]
+        chat_id = str(message["chat"]["id"])
+        
+        # Получаем текст
+        if "text" not in message:
+            return JSONResponse({"ok": False, "error": "No text"})
+        
+        text = message["text"].strip()
+        
+        # Обрабатываем через основную логику
+        result = await process_message(chat_id, text)
+        
+        # Отправляем ответ через Telegram Bot API
+        import requests
+        token = "8774637081:AAGrAZI-umgkQXXulCulJVRWb8LmAp3Lua4"
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        data = {
+            "chat_id": chat_id,
+            "text": result["reply"]
+        }
+        requests.post(url, json=data, timeout=30)
+        
+        return JSONResponse({"ok": True})
+        
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+        return JSONResponse({"ok": False, "error": str(e)})
 
+async def process_message(user_id, text):
+    """Основная логика обработки сообщения"""
     user = get_user(user_id)
     if not user:
         save_user(user_id, level="Sapphire")
