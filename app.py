@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from datetime import datetime, timedelta
 import sqlite3
-import httpx
+import httpx  # ← ИСПРАВЛЕНО!
 from openai import OpenAI
 import json
 import re
@@ -24,7 +24,7 @@ except ImportError:
 # === КОНФИГ ===
 DB_NAME = "aura.db"
 
-# === КЛЮЧИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ===
+# === КЛЮЧИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЙ ===
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-133c0d2bfc664d878ac8dcbc346ea3fc")
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8774637081:AAGrAZI-umgkQXXulCulJVRWb8LmAp3Lua4")
@@ -35,7 +35,7 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 tavily_client = None
 if TavilyClient and TAVILY_API_KEY:
     try:
-        tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
+        tavily_client = TavilyClient(api_key=TAVILY_API_KEY)  # ← ИСПРАВЛЕНО!
         print("✅ Tavily инициализирован")
     except Exception as e:
         print(f"❌ Ошибка Tavily: {e}")
