@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+httpx
+openai
+requests
+python-multipart
+pydantic
+sqlite3
