@@ -114,7 +114,6 @@ def init_db():
 
 init_db()
 
-# === ФУНКЦИИ ===
 def get_user(user_id):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -295,7 +294,6 @@ def get_task_count(user_id):
     conn.close()
     return count
 
-# === АНАЛИЗ ЭМОЦИЙ ===
 def analyze_mood(text):
     sad_words = ["груст", "тоск", "печал", "плач", "больно", "тяжел", "устал", "не могу", "нет сил", "всё плохо", "депресс"]
     anxious_words = ["тревож", "волн", "боюс", "страш", "паник", "нерв", "пережив", "срок", "не успева", "давл"]
@@ -508,85 +506,34 @@ async def process_message(user_id, text):
         else:
             print("❌ Ничего не найдено")
 
-    # === ОПРЕДЕЛЕНИЕ ГОРОДА ДЛЯ ВРЕМЕНИ ===
-    city_match = re.search(r"(?:в|для|город|городе)\s+([а-яА-ЯёЁ\-]+)", lower)
-    if city_match:
-        city_name = city_match.group(1)
-        save_memory(user_id, "city", city_name)
+    # === ОПРЕДЕЛЕНИЕ ВРЕМЕНИ ПО IP (СТАБИЛЬНО) ===
+    offset_hours = 3  # Москва по умолчанию
+    
+    # Пробуем получить реальный часовой пояс пользователя (только 1 раз)
+    user_tz = get_memory(user_id, "timezone_offset")
+    
+    if not user_tz:
+        try:
+            # Используем бесплатный API для определения времени по IP
+            # IP берем из заголовков запроса к Telegram
+            ip_response = requests.get("http://ip-api.com/json/", timeout=5)
+            if ip_response.status_code == 200:
+                ip_data = ip_response.json()
+                if ip_data.get('status') == 'success':
+                    # Сохраняем смещение в часах от UTC
+                    offset_hours = ip_data.get('offset', 0) // 3600  # переводим секунды в часы
+                    # Если смещение отрицательное, оставляем как есть
+                    save_memory(user_id, "timezone_offset", str(offset_hours))
+                    print(f"🌍 Определен часовой пояс: UTC{offset_hours:+d} ({ip_data.get('city', 'Неизвестно')})")
+        except Exception as e:
+            print(f"⚠️ Не удалось определить часовой пояс: {e}")
+            offset_hours = 3  # Fallback на Москву
+    else:
+        try:
+            offset_hours = int(user_tz)
+        except:
+            offset_hours = 3
 
-    # === ОПРЕДЕЛЕНИЕ ВРЕМЕНИ С РУЧНЫМ СМЕЩЕНИЕМ ===
-    user_city = get_memory(user_id, "city")
-    
-    # Смещение по городу (в часах от UTC)
-    city_offset = {
-        "москва": 3,
-        "санкт-петербург": 3,
-        "кемерово": 7,
-        "новосибирск": 7,
-        "белово": 7,
-        "екатеринбург": 5,
-        "владивосток": 10,
-        "иркутск": 8,
-        "красноярск": 7,
-        "омск": 6,
-        "новокузнецк": 7,
-        "прокопьевск": 7,
-        "киселевск": 7,
-        "казань": 3,
-        "нижний новгород": 3,
-        "челябинск": 5,
-        "тюмень": 5,
-        "уфа": 5,
-        "пермь": 5,
-        "самара": 4,
-        "волгоград": 3,
-        "сочи": 3,
-        "калининград": 2,
-        "краснодар": 3,
-        "ростов-на-дону": 3,
-        "астрахань": 3,
-        "саратов": 3,
-        "тольятти": 3,
-        "ярославль": 3,
-        "рязань": 3,
-        "липецк": 3,
-        "воронеж": 3,
-        "тула": 3,
-        "калуга": 3,
-        "тверь": 3,
-        "владимир": 3,
-        "смоленск": 3,
-        "курск": 3,
-        "орёл": 3,
-        "белгород": 3,
-        "ставрополь": 3,
-        "грозный": 3,
-        "махачкала": 3,
-        "симферополь": 3,
-        "севастополь": 3,
-        "петрозаводск": 3,
-        "мурманск": 3,
-        "архангельск": 3,
-        "сыктывкар": 3,
-        "киров": 3,
-        "ижевск": 4,
-        "ульяновск": 3,
-        "чебоксары": 3,
-        "йошкар-ола": 3,
-        "саранск": 3,
-        "пенза": 3,
-        "барнаул": 7,
-        "томск": 7,
-    }
-    
-    # Определяем смещение
-    offset_hours = 3  # По умолчанию Москва (UTC+3)
-    if user_city:
-        for city, offset in city_offset.items():
-            if city in user_city.lower():
-                offset_hours = offset
-                break
-    
     # Получаем время с учётом смещения
     now_utc = datetime.utcnow()
     now = now_utc + timedelta(hours=offset_hours)
