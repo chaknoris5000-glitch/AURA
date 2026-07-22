@@ -425,6 +425,43 @@ AURA_PROMPT = """Ты — AURA. Ты живой собеседник, а не э
 # === ОСНОВНОЙ БОТ ===
 app = FastAPI()
 
+# === ФУНКЦИЯ ОПРЕДЕЛЕНИЯ ВРЕМЕНИ ПО IP ===
+def get_user_timezone(request: Request):
+    """Определяет часовой пояс пользователя по его IP через ip-api.com"""
+    try:
+        # Получаем IP из заголовков (Render проксирует запросы)
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            ip = forwarded.split(",")[0].strip()
+        else:
+            ip = request.client.host if request.client else "127.0.0.1"
+        
+        # Не определяем для локальных IP
+        if ip.startswith(("127.", "192.168.", "10.", "172.")):
+            return None
+        
+        # Запрос к ip-api.com
+        response = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,regionName,city,timezone,offset", timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("status") == "success":
+                timezone = data.get("timezone")
+                offset = data.get("offset", 0)  # в секундах
+                city = data.get("city", "")
+                region = data.get("regionName", "")
+                country = data.get("country", "")
+                return {
+                    "timezone": timezone,
+                    "offset": offset // 3600,  # переводим в часы
+                    "city": city,
+                    "region": region,
+                    "country": country,
+                    "full": f"{city}, {region}, {country}"
+                }
+    except Exception as e:
+        print(f"⚠️ Ошибка определения времени по IP: {e}")
+    return None
+
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
@@ -453,7 +490,7 @@ async def webhook(request: Request):
             text = message["text"].strip()
         
         if text:
-            result = await process_message(chat_id, text)
+            result = await process_message(request, chat_id, text)
             send_message(chat_id, result["reply"])
         return JSONResponse({"ok": True})
     except Exception as e:
@@ -470,7 +507,7 @@ def send_message(chat_id, text):
         print(f"❌ Отправка: {e}")
         return False
 
-async def process_message(user_id, text):
+async def process_message(request: Request, user_id, text):
     user = get_user(user_id)
     if not user:
         save_user(user_id, level="Sapphire")
@@ -515,26 +552,32 @@ async def process_message(user_id, text):
         else:
             print("❌ Ничего не найдено")
 
-    # === АВТОМАТИЧЕСКОЕ ИСПРАВЛЕНИЕ ОШИБОК ВРЕМЕНИ ===
-    error_phrases = ["ты ошибся", "неправильно", "не то время", "неверно", "ты перепутал", "не так", "показывает не то"]
-    if any(phrase in lower for phrase in error_phrases):
-        city_match = re.search(r"(?:в|для|город|городе)\s+([а-яА-ЯёЁ\-]+)", lower)
-        if city_match:
-            city_name = city_match.group(1)
-            save_memory(user_id, "city", city_name)
-            reply = f"🗑️ Извини, исправляю! Запомнил: твой город {city_name.capitalize()}. Теперь время будет правильным!"
-            save_message(user_id, "assistant", reply)
-            return {"reply": reply}
-        else:
-            reply = "🗑️ Извини, я ошибся! Напиши, в каком городе ты находишься, и я запомню правильное время."
-            save_message(user_id, "assistant", reply)
-            return {"reply": reply}
-
-    # === ОПРЕДЕЛЕНИЕ ВРЕМЕНИ (ПРОСТОЙ СПОСОБ) ===
-    moscow_now = datetime.utcnow() + timedelta(hours=3)
-    current_date = moscow_now.strftime("%d.%m.%Y")
-    current_day = moscow_now.strftime("%A")
-    current_time = moscow_now.strftime("%H:%M")
+    # === ОПРЕДЕЛЕНИЕ ВРЕМЕНИ ПО IP ===
+    user_tz_data = get_user_timezone(request)
+    
+    # Если получили данные по IP — сохраняем в память
+    if user_tz_data:
+        save_memory(user_id, "city", user_tz_data["city"])
+        save_memory(user_id, "timezone", user_tz_data["timezone"])
+        save_memory(user_id, "tz_offset", str(user_tz_data["offset"]))
+        save_memory(user_id, "location", user_tz_data["full"])
+        print(f"📍 Определено местоположение: {user_tz_data['full']} (UTC{user_tz_data['offset']:+d})")
+    
+    # Берём время из памяти или используем Москву по умолчанию
+    tz_offset_str = get_memory(user_id, "tz_offset")
+    if tz_offset_str:
+        try:
+            offset_hours = int(tz_offset_str)
+        except:
+            offset_hours = 3
+    else:
+        offset_hours = 3
+    
+    now_utc = datetime.utcnow()
+    now = now_utc + timedelta(hours=offset_hours)
+    current_date = now.strftime("%d.%m.%Y")
+    current_day = now.strftime("%A")
+    current_time = now.strftime("%H:%M")
 
     # === КОМАНДЫ ===
     if "/задача" in lower or text.startswith("/task"):
@@ -612,11 +655,6 @@ async def process_message(user_id, text):
         else:
             reply = "Нет напоминаний."
     
-    elif "/очистить_память" in lower:
-        delete_memory(user_id, "city")
-        delete_memory(user_id, "timezone")
-        reply = "🗑️ Очистил память о городе и времени. Теперь время будет определяться заново!"
-    
     elif "/докупить" in lower:
         parts = text.split(" ")
         if len(parts) >= 2:
@@ -648,10 +686,6 @@ async def process_message(user_id, text):
 ⏰ **Напоминания:**
 /напомни ГГГГ-ММ-ДД ТЕКСТ — создать напоминание
 /моинапоминания — показать все напоминания
-
-🧹 **Память:**
-/очистить_память — сбросить настройки времени и города
-(Если бот ошибается во времени — просто скажи "Ты ошибся" или "Неправильное время", и он исправится сам!)
 
 💰 **Запросы:**
 /остаток — проверить остаток запросов
