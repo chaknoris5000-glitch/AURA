@@ -13,7 +13,6 @@ import re
 import os
 import requests
 import tempfile
-import pytz
 
 # === TAVILY ДЛЯ ПОИСКА ===
 try:
@@ -40,84 +39,6 @@ if TavilyClient and TAVILY_API_KEY:
         print("✅ Tavily инициализирован")
     except Exception as e:
         print(f"⚠️ Tavily: {e}")
-
-# === ЧАСОВОЙ ПОЯС ПО УМОЛЧАНИЮ (МОСКВА) ===
-DEFAULT_TZ = pytz.timezone('Europe/Moscow')
-
-# === ФУНКЦИЯ ДЛЯ ОПРЕДЕЛЕНИЯ ВРЕМЕНИ ПО ГОРОДУ ===
-def get_time_for_city(city_name):
-    city_lower = city_name.lower().strip()
-    
-    city_timezones = {
-        "москва": "Europe/Moscow",
-        "санкт-петербург": "Europe/Moscow",
-        "кемерово": "Asia/Novosibirsk",
-        "новосибирск": "Asia/Novosibirsk",
-        "белово": "Asia/Novosibirsk",
-        "екатеринбург": "Asia/Yekaterinburg",
-        "владивосток": "Asia/Vladivostok",
-        "иркутск": "Asia/Irkutsk",
-        "красноярск": "Asia/Krasnoyarsk",
-        "омск": "Asia/Omsk",
-        "новокузнецк": "Asia/Novosibirsk",
-        "прокопьевск": "Asia/Novosibirsk",
-        "киселевск": "Asia/Novosibirsk",
-        "казань": "Europe/Moscow",
-        "нижний новгород": "Europe/Moscow",
-        "челябинск": "Asia/Yekaterinburg",
-        "тюмень": "Asia/Yekaterinburg",
-        "уфа": "Asia/Yekaterinburg",
-        "пермь": "Asia/Yekaterinburg",
-        "самара": "Europe/Samara",
-        "волгоград": "Europe/Volgograd",
-        "сочи": "Europe/Moscow",
-        "калининград": "Europe/Kaliningrad",
-        "краснодар": "Europe/Moscow",
-        "ростов-на-дону": "Europe/Moscow",
-        "астрахань": "Europe/Moscow",
-        "саратов": "Europe/Saratov",
-        "тольятти": "Europe/Moscow",
-        "ярославль": "Europe/Moscow",
-        "рязань": "Europe/Moscow",
-        "липецк": "Europe/Moscow",
-        "воронеж": "Europe/Moscow",
-        "тула": "Europe/Moscow",
-        "калуга": "Europe/Moscow",
-        "тверь": "Europe/Moscow",
-        "владимир": "Europe/Moscow",
-        "смоленск": "Europe/Moscow",
-        "курск": "Europe/Moscow",
-        "орёл": "Europe/Moscow",
-        "белгород": "Europe/Moscow",
-        "ставрополь": "Europe/Moscow",
-        "грозный": "Europe/Moscow",
-        "махачкала": "Europe/Moscow",
-        "симферополь": "Europe/Moscow",
-        "севастополь": "Europe/Moscow",
-        "петрозаводск": "Europe/Moscow",
-        "мурманск": "Europe/Moscow",
-        "архангельск": "Europe/Moscow",
-        "сыктывкар": "Europe/Moscow",
-        "киров": "Europe/Moscow",
-        "ижевск": "Europe/Samara",
-        "ульяновск": "Europe/Moscow",
-        "чебоксары": "Europe/Moscow",
-        "йошкар-ола": "Europe/Moscow",
-        "саранск": "Europe/Moscow",
-        "пенза": "Europe/Moscow",
-        "барнаул": "Asia/Barnaul",
-        "томск": "Asia/Tomsk",
-        "кемерово": "Asia/Novosibirsk",
-    }
-    
-    for city, tz_str in city_timezones.items():
-        if city in city_lower:
-            try:
-                return pytz.timezone(tz_str)
-            except:
-                pass
-    
-    return None
 
 # === БАЗА ===
 def init_db():
@@ -591,22 +512,84 @@ async def process_message(user_id, text):
     city_match = re.search(r"(?:в|для|город|городе)\s+([а-яА-ЯёЁ\-]+)", lower)
     if city_match:
         city_name = city_match.group(1)
-        tz = get_time_for_city(city_name)
-        if tz:
-            save_memory(user_id, "city", city_name)
-            save_memory(user_id, "timezone", tz.zone)
+        save_memory(user_id, "city", city_name)
 
-    # === ОПРЕДЕЛЕНИЕ ВРЕМЕНИ ===
+    # === ОПРЕДЕЛЕНИЕ ВРЕМЕНИ С РУЧНЫМ СМЕЩЕНИЕМ ===
     user_city = get_memory(user_id, "city")
+    
+    # Смещение по городу (в часах от UTC)
+    city_offset = {
+        "москва": 3,
+        "санкт-петербург": 3,
+        "кемерово": 7,
+        "новосибирск": 7,
+        "белово": 7,
+        "екатеринбург": 5,
+        "владивосток": 10,
+        "иркутск": 8,
+        "красноярск": 7,
+        "омск": 6,
+        "новокузнецк": 7,
+        "прокопьевск": 7,
+        "киселевск": 7,
+        "казань": 3,
+        "нижний новгород": 3,
+        "челябинск": 5,
+        "тюмень": 5,
+        "уфа": 5,
+        "пермь": 5,
+        "самара": 4,
+        "волгоград": 3,
+        "сочи": 3,
+        "калининград": 2,
+        "краснодар": 3,
+        "ростов-на-дону": 3,
+        "астрахань": 3,
+        "саратов": 3,
+        "тольятти": 3,
+        "ярославль": 3,
+        "рязань": 3,
+        "липецк": 3,
+        "воронеж": 3,
+        "тула": 3,
+        "калуга": 3,
+        "тверь": 3,
+        "владимир": 3,
+        "смоленск": 3,
+        "курск": 3,
+        "орёл": 3,
+        "белгород": 3,
+        "ставрополь": 3,
+        "грозный": 3,
+        "махачкала": 3,
+        "симферополь": 3,
+        "севастополь": 3,
+        "петрозаводск": 3,
+        "мурманск": 3,
+        "архангельск": 3,
+        "сыктывкар": 3,
+        "киров": 3,
+        "ижевск": 4,
+        "ульяновск": 3,
+        "чебоксары": 3,
+        "йошкар-ола": 3,
+        "саранск": 3,
+        "пенза": 3,
+        "барнаул": 7,
+        "томск": 7,
+    }
+    
+    # Определяем смещение
+    offset_hours = 3  # По умолчанию Москва (UTC+3)
     if user_city:
-        tz = get_time_for_city(user_city)
-    else:
-        tz = DEFAULT_TZ
-
-    if not tz:
-        tz = DEFAULT_TZ
-
-    now = datetime.now(tz)
+        for city, offset in city_offset.items():
+            if city in user_city.lower():
+                offset_hours = offset
+                break
+    
+    # Получаем время с учётом смещения
+    now_utc = datetime.utcnow()
+    now = now_utc + timedelta(hours=offset_hours)
     current_date = now.strftime("%d.%m.%Y")
     current_day = now.strftime("%A")
     current_time = now.strftime("%H:%M")
