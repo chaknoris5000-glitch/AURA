@@ -13,6 +13,14 @@ import re
 import os
 import requests
 import tempfile
+import shutil
+import threading
+import time
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
+from email.mime.text import MIMEText
 
 # === TAVILY ДЛЯ ПОИСКА ===
 try:
@@ -23,6 +31,7 @@ except ImportError:
 
 # === КОНФИГ ===
 DB_NAME = "aura.db"
+BACKUP_NAME = "aura_backup.db"
 
 # === КЛЮЧИ ===
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-133c0d2bfc664d878ac8dcbc346ea3fc")
@@ -30,6 +39,11 @@ DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8774637081:AAGrAZI-umgkQXXulCulJVRWb8LmAp3Lua4")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+
+# === НАСТРОЙКИ ПОЧТЫ (GMAIL) ===
+EMAIL_SENDER = "chaknoris5000@gmail.com"
+EMAIL_PASSWORD = "fbcsjcmudqofmuya"  # ← Твой пароль приложения Google
+EMAIL_RECEIVER = "chaknoris5000@gmail.com"
 
 # === TAVILY ===
 tavily_client = None
@@ -39,6 +53,107 @@ if TavilyClient and TAVILY_API_KEY:
         print("✅ Tavily инициализирован")
     except Exception as e:
         print(f"⚠️ Tavily: {e}")
+
+# === ФУНКЦИЯ ОТПРАВКИ БЭКАПА НА ПОЧТУ ===
+def send_backup_email():
+    """Отправляет резервную копию базы данных на почту"""
+    try:
+        if not os.path.exists(DB_NAME):
+            print("⚠️ База данных не найдена для отправки")
+            return False
+        
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_SENDER
+        msg['To'] = EMAIL_RECEIVER
+        msg['Subject'] = f"💾 Бэкап AURA {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+        
+        body = f"""
+        🧠 Бэкап базы данных AURA
+        
+        📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
+        📁 Размер: {os.path.getsize(DB_NAME)} байт
+        
+        Файл бэкапа прикреплён к письму.
+        """
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+        
+        with open(DB_NAME, "rb") as attachment:
+            part = MIMEBase('application', 'octet-stream')
+            part.set_payload(attachment.read())
+            encoders.encode_base64(part)
+            part.add_header(
+                'Content-Disposition',
+                f'attachment; filename=aura_backup_{datetime.now().strftime("%Y%m%d_%H%M")}.db'
+            )
+            msg.attach(part)
+        
+        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
+        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+        server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
+        server.quit()
+        
+        print(f"✅ Бэкап отправлен на почту {EMAIL_RECEIVER}")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Ошибка отправки бэкапа на почту: {e}")
+        return False
+
+# === ФУНКЦИИ ДЛЯ БЭКАПА ===
+def backup_database():
+    """Создаёт резервную копию базы данных"""
+    try:
+        if os.path.exists(DB_NAME):
+            shutil.copy2(DB_NAME, BACKUP_NAME)
+            print(f"💾 Бэкап создан: {BACKUP_NAME} ({os.path.getsize(BACKUP_NAME)} байт)")
+            return True
+        else:
+            print("⚠️ База данных не найдена для бэкапа")
+            return False
+    except Exception as e:
+        print(f"❌ Ошибка создания бэкапа: {e}")
+        return False
+
+def restore_database():
+    """Восстанавливает базу из резервной копии"""
+    try:
+        if os.path.exists(BACKUP_NAME):
+            shutil.copy2(BACKUP_NAME, DB_NAME)
+            print(f"♻️ База восстановлена из бэкапа: {BACKUP_NAME}")
+            return True
+        else:
+            print("ℹ️ Резервная копия не найдена, создаю новую базу")
+            return False
+    except Exception as e:
+        print(f"❌ Ошибка восстановления: {e}")
+        return False
+
+def backup_scheduler():
+    """Фоновый поток для автоматического бэкапа каждый час + отправка на почту раз в день"""
+    hour_counter = 0
+    while True:
+        time.sleep(3600)  # 1 час
+        if backup_database():
+            hour_counter += 1
+            if hour_counter >= 24:  # Каждые 24 часа
+                send_backup_email()
+                hour_counter = 0
+
+# === ВОССТАНОВЛЕНИЕ ПРИ ЗАПУСКЕ ===
+print("🔄 Проверка базы данных...")
+if not os.path.exists(DB_NAME):
+    if restore_database():
+        print("✅ База восстановлена из резервной копии")
+    else:
+        print("📦 Создаю новую базу данных")
+else:
+    print("✅ База данных найдена")
+    backup_database()
+
+# Запускаем фоновый поток для бэкапа
+backup_thread = threading.Thread(target=backup_scheduler, daemon=True)
+backup_thread.start()
+print("🔄 Планировщик бэкапа запущен (каждый час, отправка на почту раз в сутки)")
 
 # === БАЗА ===
 def init_db():
@@ -450,7 +565,7 @@ AURA_PROMPT = """Ты — AURA. Ты живой собеседник, а не э
 
 ТЫ — ЧЕЛОВЕК, А НЕ РОБОТ.
 
-ВАЖНО: Ты умеешь считать время. Каждое сообщение пользователя имеет метку времени. Когда пользователь спрашивает "сколько прошло" или "когда я это писал" — ты можешь ответить, сравнивая временные метки. Используй эту информацию, чтобы давать точные ответы о времени.
+ВАЖНО: Ты умеешь считать время. Каждое сообщение пользователя имеет метку времени. Когда пользователь спрашивает "сколько прошло" или "когда я это писал" — ты можешь ответить, сравнивая временные метки.
 """
 
 # === ОСНОВНОЙ БОТ ===
@@ -521,7 +636,6 @@ async def process_message(user_id, text):
     else:
         log_request(user_id)
 
-    # Сохраняем сообщение с меткой времени
     save_message(user_id, "user", text)
     
     mood = analyze_mood(text)
@@ -672,7 +786,6 @@ async def process_message(user_id, text):
 ❓ Просто пиши, я отвечу! 😊"""
     
     else:
-        # === ЗАГРУЖАЕМ ВЫЖИМКУ И ИСТОРИЮ ===
         user_name = get_memory(user_id, "name")
         if not user_name:
             name_match = re.search(r"(?:меня зовут|зовут|я )(\w+)", text.lower())
@@ -685,10 +798,8 @@ async def process_message(user_id, text):
         summary = get_memory(user_id, "summary")
         summary_context = f"\n\nКраткая выжимка прошлых диалогов:\n{summary}" if summary else ""
         
-        # Формируем информацию о времени для бота
         history = get_history(user_id, limit=50)
         
-        # Собираем временные метки для контекста
         time_context = "Временные метки сообщений в этом диалоге:\n"
         for msg in history:
             if msg['time']:
@@ -708,7 +819,6 @@ async def process_message(user_id, text):
 
         reply = await get_ai_response(messages, model)
 
-        # === СОЗДАЁМ ВЫЖИМКУ КАЖДЫЕ 50 СООБЩЕНИЙ ===
         msg_count = get_message_count(user_id)
         if msg_count % 50 == 0 and msg_count > 0:
             recent_msgs = get_history(user_id, limit=20)
