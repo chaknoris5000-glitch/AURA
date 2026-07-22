@@ -543,7 +543,7 @@ AURA_PROMPT = """Ты — AURA. Ты живой собеседник, а не э
 
 ТЫ — ЧЕЛОВЕК, А НЕ РОБОТ.
 
-ВАЖНО: Ты умеешь считать время. Каждое сообщение пользователя имеет метку времени. Когда пользователь спрашивает "сколько прошло" или "когда я это писал" — ты можешь ответить, сравнивая временные метки.
+ВАЖНО: Текущее время всегда указано в промпте. Используй его для ответов на вопросы о времени. Не придумывай время сам.
 """
 
 # === ОСНОВНОЙ БОТ ===
@@ -640,7 +640,7 @@ async def process_message(user_id, text):
         else:
             print("❌ Ничего не найдено")
 
-    # === ВРЕМЯ ===
+    # === ВРЕМЯ (БЕРЁМ С СЕРВЕРА) ===
     now_utc = datetime.utcnow()
     moscow_now = now_utc + timedelta(hours=3)
     current_date = moscow_now.strftime("%d.%m.%Y")
@@ -785,7 +785,8 @@ async def process_message(user_id, text):
                 time_str = dt.strftime("%H:%M (%d.%m)")
                 time_context += f"- {msg['role']}: {msg['content'][:30]}... ({time_str})\n"
         
-        user_prompt = f"Сегодня {current_date} ({current_day}), сейчас {current_time}.\n\n{text}"
+        # === ОСНОВНОЕ ИЗМЕНЕНИЕ: ВРЕМЯ БЕРЁТСЯ С СЕРВЕРА ===
+        user_prompt = f"Сегодня {current_date} ({current_day}), сейчас {current_time} (по московскому времени).\n\n{text}"
 
         current_mood = get_user_mood(user_id)
         aura_prompt = AURA_PROMPT + name_context + summary_context + f"\n\n{time_context}\n\n{user_prompt}"
