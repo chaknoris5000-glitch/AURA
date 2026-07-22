@@ -42,7 +42,7 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 
 # === НАСТРОЙКИ ПОЧТЫ (GMAIL) ===
 EMAIL_SENDER = "chaknoris5000@gmail.com"
-EMAIL_PASSWORD = "fbcsjcmudqofmuya"  # ← Твой пароль приложения Google
+EMAIL_PASSWORD = "fbcsjcmudqofmuya"
 EMAIL_RECEIVER = "chaknoris5000@gmail.com"
 
 # === TAVILY ===
@@ -56,52 +56,34 @@ if TavilyClient and TAVILY_API_KEY:
 
 # === ФУНКЦИЯ ОТПРАВКИ БЭКАПА НА ПОЧТУ ===
 def send_backup_email():
-    """Отправляет резервную копию базы данных на почту"""
     try:
         if not os.path.exists(DB_NAME):
             print("⚠️ База данных не найдена для отправки")
             return False
-        
         msg = MIMEMultipart()
         msg['From'] = EMAIL_SENDER
         msg['To'] = EMAIL_RECEIVER
         msg['Subject'] = f"💾 Бэкап AURA {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-        
-        body = f"""
-        🧠 Бэкап базы данных AURA
-        
-        📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
-        📁 Размер: {os.path.getsize(DB_NAME)} байт
-        
-        Файл бэкапа прикреплён к письму.
-        """
+        body = f"🧠 Бэкап базы данных AURA\n📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n📁 Размер: {os.path.getsize(DB_NAME)} байт\nФайл бэкапа прикреплён к письму."
         msg.attach(MIMEText(body, 'plain', 'utf-8'))
-        
         with open(DB_NAME, "rb") as attachment:
             part = MIMEBase('application', 'octet-stream')
             part.set_payload(attachment.read())
             encoders.encode_base64(part)
-            part.add_header(
-                'Content-Disposition',
-                f'attachment; filename=aura_backup_{datetime.now().strftime("%Y%m%d_%H%M")}.db'
-            )
+            part.add_header('Content-Disposition', f'attachment; filename=aura_backup_{datetime.now().strftime("%Y%m%d_%H%M")}.db')
             msg.attach(part)
-        
         server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
         server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
         server.quit()
-        
         print(f"✅ Бэкап отправлен на почту {EMAIL_RECEIVER}")
         return True
-        
     except Exception as e:
         print(f"❌ Ошибка отправки бэкапа на почту: {e}")
         return False
 
 # === ФУНКЦИИ ДЛЯ БЭКАПА ===
 def backup_database():
-    """Создаёт резервную копию базы данных"""
     try:
         if os.path.exists(DB_NAME):
             shutil.copy2(DB_NAME, BACKUP_NAME)
@@ -115,7 +97,6 @@ def backup_database():
         return False
 
 def restore_database():
-    """Восстанавливает базу из резервной копии"""
     try:
         if os.path.exists(BACKUP_NAME):
             shutil.copy2(BACKUP_NAME, DB_NAME)
@@ -129,13 +110,12 @@ def restore_database():
         return False
 
 def backup_scheduler():
-    """Фоновый поток для автоматического бэкапа каждый час + отправка на почту раз в день"""
     hour_counter = 0
     while True:
-        time.sleep(3600)  # 1 час
+        time.sleep(3600)
         if backup_database():
             hour_counter += 1
-            if hour_counter >= 24:  # Каждые 24 часа
+            if hour_counter >= 24:
                 send_backup_email()
                 hour_counter = 0
 
@@ -150,7 +130,6 @@ else:
     print("✅ База данных найдена")
     backup_database()
 
-# Запускаем фоновый поток для бэкапа
 backup_thread = threading.Thread(target=backup_scheduler, daemon=True)
 backup_thread.start()
 print("🔄 Планировщик бэкапа запущен (каждый час, отправка на почту раз в сутки)")
@@ -531,7 +510,6 @@ def create_summary(user_id, messages):
 {messages}
 
 Выжимка:"""
-        
         response = client.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "user", "content": summary_prompt}],
