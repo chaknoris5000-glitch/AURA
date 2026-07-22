@@ -38,7 +38,7 @@ if TavilyClient and TAVILY_API_KEY:
         tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
         print("✅ Tavily инициализирован")
     except Exception as e:
-        print(f"❌ Tavily: {e}")
+        print(f"⚠️ Tavily: {e}")
 
 # === БАЗА ===
 def init_db():
