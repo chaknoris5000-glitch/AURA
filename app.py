@@ -249,6 +249,13 @@ def get_memory(user_id, key):
     conn.close()
     return row[0] if row else None
 
+def delete_memory(user_id, key):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("DELETE FROM user_memory WHERE user_id = ? AND key = ?", (user_id, key))
+    conn.commit()
+    conn.close()
+
 # === ЗАДАЧИ ===
 def add_task(user_id, text, priority="normal", due_date=None):
     conn = sqlite3.connect(DB_NAME)
@@ -508,8 +515,22 @@ async def process_message(user_id, text):
         else:
             print("❌ Ничего не найдено")
 
+    # === АВТОМАТИЧЕСКОЕ ИСПРАВЛЕНИЕ ОШИБОК ВРЕМЕНИ ===
+    error_phrases = ["ты ошибся", "неправильно", "не то время", "неверно", "ты перепутал", "не так", "показывает не то"]
+    if any(phrase in lower for phrase in error_phrases):
+        city_match = re.search(r"(?:в|для|город|городе)\s+([а-яА-ЯёЁ\-]+)", lower)
+        if city_match:
+            city_name = city_match.group(1)
+            save_memory(user_id, "city", city_name)
+            reply = f"🗑️ Извини, исправляю! Запомнил: твой город {city_name.capitalize()}. Теперь время будет правильным!"
+            save_message(user_id, "assistant", reply)
+            return {"reply": reply}
+        else:
+            reply = "🗑️ Извини, я ошибся! Напиши, в каком городе ты находишься, и я запомню правильное время."
+            save_message(user_id, "assistant", reply)
+            return {"reply": reply}
+
     # === ОПРЕДЕЛЕНИЕ ВРЕМЕНИ (ПРОСТОЙ СПОСОБ) ===
-    # Берём точное московское время с сервера Render
     moscow_now = datetime.utcnow() + timedelta(hours=3)
     current_date = moscow_now.strftime("%d.%m.%Y")
     current_day = moscow_now.strftime("%A")
@@ -591,6 +612,11 @@ async def process_message(user_id, text):
         else:
             reply = "Нет напоминаний."
     
+    elif "/очистить_память" in lower:
+        delete_memory(user_id, "city")
+        delete_memory(user_id, "timezone")
+        reply = "🗑️ Очистил память о городе и времени. Теперь время будет определяться заново!"
+    
     elif "/докупить" in lower:
         parts = text.split(" ")
         if len(parts) >= 2:
@@ -622,6 +648,10 @@ async def process_message(user_id, text):
 ⏰ **Напоминания:**
 /напомни ГГГГ-ММ-ДД ТЕКСТ — создать напоминание
 /моинапоминания — показать все напоминания
+
+🧹 **Память:**
+/очистить_память — сбросить настройки времени и города
+(Если бот ошибается во времени — просто скажи "Ты ошибся" или "Неправильное время", и он исправится сам!)
 
 💰 **Запросы:**
 /остаток — проверить остаток запросов
