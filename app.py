@@ -114,6 +114,7 @@ def init_db():
 
 init_db()
 
+# === ФУНКЦИИ ===
 def get_user(user_id):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -294,6 +295,7 @@ def get_task_count(user_id):
     conn.close()
     return count
 
+# === АНАЛИЗ ЭМОЦИЙ ===
 def analyze_mood(text):
     sad_words = ["груст", "тоск", "печал", "плач", "больно", "тяжел", "устал", "не могу", "нет сил", "всё плохо", "депресс"]
     anxious_words = ["тревож", "волн", "боюс", "страш", "паник", "нерв", "пережив", "срок", "не успева", "давл"]
@@ -506,40 +508,12 @@ async def process_message(user_id, text):
         else:
             print("❌ Ничего не найдено")
 
-    # === ОПРЕДЕЛЕНИЕ ВРЕМЕНИ ПО IP (СТАБИЛЬНО) ===
-    offset_hours = 3  # Москва по умолчанию
-    
-    # Пробуем получить реальный часовой пояс пользователя (только 1 раз)
-    user_tz = get_memory(user_id, "timezone_offset")
-    
-    if not user_tz:
-        try:
-            # Используем бесплатный API для определения времени по IP
-            # IP берем из заголовков запроса к Telegram
-            ip_response = requests.get("http://ip-api.com/json/", timeout=5)
-            if ip_response.status_code == 200:
-                ip_data = ip_response.json()
-                if ip_data.get('status') == 'success':
-                    # Сохраняем смещение в часах от UTC
-                    offset_hours = ip_data.get('offset', 0) // 3600  # переводим секунды в часы
-                    # Если смещение отрицательное, оставляем как есть
-                    save_memory(user_id, "timezone_offset", str(offset_hours))
-                    print(f"🌍 Определен часовой пояс: UTC{offset_hours:+d} ({ip_data.get('city', 'Неизвестно')})")
-        except Exception as e:
-            print(f"⚠️ Не удалось определить часовой пояс: {e}")
-            offset_hours = 3  # Fallback на Москву
-    else:
-        try:
-            offset_hours = int(user_tz)
-        except:
-            offset_hours = 3
-
-    # Получаем время с учётом смещения
-    now_utc = datetime.utcnow()
-    now = now_utc + timedelta(hours=offset_hours)
-    current_date = now.strftime("%d.%m.%Y")
-    current_day = now.strftime("%A")
-    current_time = now.strftime("%H:%M")
+    # === ОПРЕДЕЛЕНИЕ ВРЕМЕНИ (ПРОСТОЙ СПОСОБ) ===
+    # Берём точное московское время с сервера Render
+    moscow_now = datetime.utcnow() + timedelta(hours=3)
+    current_date = moscow_now.strftime("%d.%m.%Y")
+    current_day = moscow_now.strftime("%A")
+    current_time = moscow_now.strftime("%H:%M")
 
     # === КОМАНДЫ ===
     if "/задача" in lower or text.startswith("/task"):
