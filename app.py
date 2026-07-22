@@ -496,21 +496,18 @@ async def get_ai_response(messages, model):
         print("AI error:", e)
         return "Ошибка API. Попробуй позже."
 
-# === ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ ТОЧНОГО ВРЕМЕНИ ИЗ API ===
-def get_exact_time():
-    """Получает точное время из бесплатного API"""
+# === ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ ВРЕМЕНИ ИЗ API ===
+def get_current_time():
     try:
-        response = requests.get("http://worldtimeapi.org/api/timezone/Europe/Moscow", timeout=5)
+        response = requests.get("http://worldtimeapi.org/api/timezone/Europe/Moscow", timeout=3)
         if response.status_code == 200:
             data = response.json()
             dt_str = data.get("datetime")
             if dt_str:
                 dt = datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
                 return dt
-    except Exception as e:
-        print(f"⚠️ Ошибка получения времени из API: {e}")
-    
-    # Если API не ответил — используем серверное время
+    except:
+        pass
     return datetime.utcnow() + timedelta(hours=3)
 
 # === ФУНКЦИЯ ДЛЯ СОЗДАНИЯ ВЫЖИМКИ ===
@@ -559,8 +556,6 @@ AURA_PROMPT = """Ты — AURA. Ты живой собеседник, а не э
 - Будь вовлечённым, как друг, который всегда рядом.
 
 ТЫ — ЧЕЛОВЕК, А НЕ РОБОТ.
-
-ВАЖНО: Текущее время берётся из внешнего API и передаётся в начале промпта. Отвечая на вопросы о времени, просто бери его оттуда. НЕ ПРИБАВЛЯЙ И НЕ ВЫЧИТАЙ ЧАСЫ.
 """
 
 # === ОСНОВНОЙ БОТ ===
@@ -657,23 +652,12 @@ async def process_message(user_id, text):
         else:
             print("❌ Ничего не найдено")
 
-    # === ВРЕМЯ (БЕРЁМ ИЗ API) ===
-    try:
-        # Пробуем получить точное время из API
-        now = get_exact_time()
-        current_date = now.strftime("%d.%m.%Y")
-        current_day = now.strftime("%A")
-        current_time = now.strftime("%H:%M")
-        print(f"🕐 Точное время из API: {current_time} {current_date}")
-    except Exception as e:
-        # Если API не ответил — используем серверное время
-        print(f"⚠️ Использую серверное время: {e}")
-        now_utc = datetime.utcnow()
-        moscow_now = now_utc + timedelta(hours=3)
-        current_date = moscow_now.strftime("%d.%m.%Y")
-        current_day = moscow_now.strftime("%A")
-        current_time = moscow_now.strftime("%H:%M")
-
+    # === ВРЕМЯ (ИЗ API) ===
+    now = get_current_time()
+    current_date = now.strftime("%d.%m.%Y")
+    current_day = now.strftime("%A")
+    current_time = now.strftime("%H:%M")
+    
     # === КОМАНДЫ ===
     if "/задача" in lower or text.startswith("/task"):
         parts = text.split(" ", 1)
