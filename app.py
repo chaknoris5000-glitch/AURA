@@ -73,6 +73,7 @@ def init_db():
         user_id TEXT,
         text TEXT,
         remind_date TEXT,
+        remind_time TEXT,
         created_at TEXT
     )""")
     c.execute("""CREATE TABLE IF NOT EXISTS requests (
@@ -161,10 +162,10 @@ def save_message(user_id, role, content):
 def get_history(user_id, limit=50):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute("SELECT role, content FROM history WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", (user_id, limit))
+    c.execute("SELECT role, content, created_at FROM history WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", (user_id, limit))
     rows = c.fetchall()
     conn.close()
-    return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+    return [{"role": r[0], "content": r[1], "time": r[2]} for r in reversed(rows)]
 
 def get_message_count(user_id):
     conn = sqlite3.connect(DB_NAME)
@@ -174,11 +175,11 @@ def get_message_count(user_id):
     conn.close()
     return count
 
-def save_reminder(user_id, text, remind_date):
+def save_reminder(user_id, text, remind_date, remind_time):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute("INSERT INTO reminders (user_id, text, remind_date, created_at) VALUES (?, ?, ?, ?)",
-              (user_id, text, remind_date, datetime.now().isoformat()))
+    c.execute("INSERT INTO reminders (user_id, text, remind_date, remind_time, created_at) VALUES (?, ?, ?, ?, ?)",
+              (user_id, text, remind_date, remind_time, datetime.now().isoformat()))
     conn.commit()
     conn.close()
 
@@ -186,7 +187,7 @@ def get_reminders(user_id):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     today = datetime.now().date().isoformat()
-    c.execute("SELECT text, remind_date FROM reminders WHERE user_id = ? AND remind_date >= ? ORDER BY remind_date", (user_id, today))
+    c.execute("SELECT text, remind_date, remind_time FROM reminders WHERE user_id = ? AND remind_date >= ? ORDER BY remind_date, remind_time", (user_id, today))
     rows = c.fetchall()
     conn.close()
     return rows
@@ -403,7 +404,6 @@ async def get_ai_response(messages, model):
 
 # === ФУНКЦИЯ ДЛЯ СОЗДАНИЯ ВЫЖИМКИ ===
 def create_summary(user_id, messages):
-    """Создает краткую выжимку диалога через DeepSeek"""
     try:
         summary_prompt = f"""Ты — AURA. Сделай краткую выжимку этого диалога (максимум 300 символов). 
 Выдели:
@@ -449,6 +449,8 @@ AURA_PROMPT = """Ты — AURA. Ты живой собеседник, а не э
 - Будь вовлечённым, как друг, который всегда рядом.
 
 ТЫ — ЧЕЛОВЕК, А НЕ РОБОТ.
+
+ВАЖНО: Ты умеешь считать время. Каждое сообщение пользователя имеет метку времени. Когда пользователь спрашивает "сколько прошло" или "когда я это писал" — ты можешь ответить, сравнивая временные метки. Используй эту информацию, чтобы давать точные ответы о времени.
 """
 
 # === ОСНОВНОЙ БОТ ===
@@ -519,6 +521,7 @@ async def process_message(user_id, text):
     else:
         log_request(user_id)
 
+    # Сохраняем сообщение с меткой времени
     save_message(user_id, "user", text)
     
     mood = analyze_mood(text)
@@ -545,7 +548,7 @@ async def process_message(user_id, text):
         else:
             print("❌ Ничего не найдено")
 
-    # === ВРЕМЯ (ПРОСТОЕ) ===
+    # === ВРЕМЯ ===
     now_utc = datetime.utcnow()
     moscow_now = now_utc + timedelta(hours=3)
     current_date = moscow_now.strftime("%d.%m.%Y")
@@ -605,25 +608,27 @@ async def process_message(user_id, text):
             reply = "Формат: /удалить [ID задачи]"
     
     elif "/напомни" in lower:
-        parts = text.split(" ", 2)
-        if len(parts) >= 3:
+        parts = text.split(" ", 3)
+        if len(parts) >= 4:
             date_str = parts[1]
-            reminder_text = parts[2]
+            time_str = parts[2]
+            reminder_text = parts[3]
             try:
-                remind_date = datetime.strptime(date_str, "%Y-%m-%d").date().isoformat()
-                save_reminder(user_id, reminder_text, remind_date)
-                reply = f"⏰ Запомнил: {reminder_text} на {date_str}."
+                datetime.strptime(date_str, "%Y-%m-%d")
+                datetime.strptime(time_str, "%H:%M")
+                save_reminder(user_id, reminder_text, date_str, time_str)
+                reply = f"⏰ Запомнил: {reminder_text} на {date_str} в {time_str}."
             except:
-                reply = "❌ Неверный формат даты. Используй /напомни ГГГГ-ММ-ДД ТЕКСТ."
+                reply = "❌ Неверный формат. Используй /напомни ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ"
         else:
-            reply = "Формат: /напомни ГГГГ-ММ-ДД ТЕКСТ."
+            reply = "Формат: /напомни ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ"
     
     elif "/моинапоминания" in lower:
         reminders = get_reminders(user_id)
         if reminders:
             lines = ["⏰ Твои напоминания:"]
             for r in reminders:
-                lines.append(f"- {r[0]} ({r[1]})")
+                lines.append(f"- {r[0]} ({r[1]} в {r[2]})")
             reply = "\n".join(lines)
         else:
             reply = "Нет напоминаний."
@@ -657,7 +662,7 @@ async def process_message(user_id, text):
 /удалить [ID] — удалить задачу
 
 ⏰ **Напоминания:**
-/напомни ГГГГ-ММ-ДД ТЕКСТ — создать напоминание
+/напомни ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ — создать напоминание
 /моинапоминания — показать все напоминания
 
 💰 **Запросы:**
@@ -677,17 +682,25 @@ async def process_message(user_id, text):
         
         name_context = f"\n\nИмя пользователя: {user_name}" if user_name else ""
         
-        # Получаем выжимку из базы
         summary = get_memory(user_id, "summary")
         summary_context = f"\n\nКраткая выжимка прошлых диалогов:\n{summary}" if summary else ""
+        
+        # Формируем информацию о времени для бота
+        history = get_history(user_id, limit=50)
+        
+        # Собираем временные метки для контекста
+        time_context = "Временные метки сообщений в этом диалоге:\n"
+        for msg in history:
+            if msg['time']:
+                dt = datetime.fromisoformat(msg['time'])
+                time_str = dt.strftime("%H:%M (%d.%m)")
+                time_context += f"- {msg['role']}: {msg['content'][:30]}... ({time_str})\n"
         
         user_prompt = f"Сегодня {current_date} ({current_day}), сейчас {current_time}.\n\n{text}"
 
         current_mood = get_user_mood(user_id)
-        aura_prompt = AURA_PROMPT + name_context + summary_context + f"\n\n{user_prompt}"
+        aura_prompt = AURA_PROMPT + name_context + summary_context + f"\n\n{time_context}\n\n{user_prompt}"
 
-        # Загружаем последние 50 сообщений из БД
-        history = get_history(user_id, limit=50)
         messages = [{"role": "system", "content": aura_prompt}]
         for msg in history:
             messages.append({"role": msg["role"], "content": msg["content"]})
@@ -698,17 +711,14 @@ async def process_message(user_id, text):
         # === СОЗДАЁМ ВЫЖИМКУ КАЖДЫЕ 50 СООБЩЕНИЙ ===
         msg_count = get_message_count(user_id)
         if msg_count % 50 == 0 and msg_count > 0:
-            # Собираем последние 20 сообщений для выжимки
             recent_msgs = get_history(user_id, limit=20)
             dialog_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent_msgs])
             
             new_summary = create_summary(user_id, dialog_text)
             if new_summary:
-                # Если выжимка уже есть — объединяем
                 old_summary = get_memory(user_id, "summary")
                 if old_summary:
                     combined = f"{old_summary}\n\nНовое:\n{new_summary}"
-                    # Ограничиваем длину (не более 3000 символов)
                     if len(combined) > 3000:
                         combined = combined[-3000:]
                     save_memory(user_id, "summary", combined)
