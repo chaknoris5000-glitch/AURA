@@ -13,6 +13,7 @@ import re
 import os
 import requests
 import tempfile
+import pytz
 
 # === TAVILY ДЛЯ ПОИСКА ===
 try:
@@ -40,6 +41,84 @@ if TavilyClient and TAVILY_API_KEY:
     except Exception as e:
         print(f"⚠️ Tavily: {e}")
 
+# === ЧАСОВОЙ ПОЯС ПО УМОЛЧАНИЮ (МОСКВА) ===
+DEFAULT_TZ = pytz.timezone('Europe/Moscow')
+
+# === ФУНКЦИЯ ДЛЯ ОПРЕДЕЛЕНИЯ ВРЕМЕНИ ПО ГОРОДУ ===
+def get_time_for_city(city_name):
+    city_lower = city_name.lower().strip()
+    
+    city_timezones = {
+        "москва": "Europe/Moscow",
+        "санкт-петербург": "Europe/Moscow",
+        "кемерово": "Asia/Novosibirsk",
+        "новосибирск": "Asia/Novosibirsk",
+        "белово": "Asia/Novosibirsk",
+        "екатеринбург": "Asia/Yekaterinburg",
+        "владивосток": "Asia/Vladivostok",
+        "иркутск": "Asia/Irkutsk",
+        "красноярск": "Asia/Krasnoyarsk",
+        "омск": "Asia/Omsk",
+        "новокузнецк": "Asia/Novosibirsk",
+        "прокопьевск": "Asia/Novosibirsk",
+        "киселевск": "Asia/Novosibirsk",
+        "казань": "Europe/Moscow",
+        "нижний новгород": "Europe/Moscow",
+        "челябинск": "Asia/Yekaterinburg",
+        "тюмень": "Asia/Yekaterinburg",
+        "уфа": "Asia/Yekaterinburg",
+        "пермь": "Asia/Yekaterinburg",
+        "самара": "Europe/Samara",
+        "волгоград": "Europe/Volgograd",
+        "сочи": "Europe/Moscow",
+        "калининград": "Europe/Kaliningrad",
+        "краснодар": "Europe/Moscow",
+        "ростов-на-дону": "Europe/Moscow",
+        "астрахань": "Europe/Moscow",
+        "саратов": "Europe/Saratov",
+        "тольятти": "Europe/Moscow",
+        "ярославль": "Europe/Moscow",
+        "рязань": "Europe/Moscow",
+        "липецк": "Europe/Moscow",
+        "воронеж": "Europe/Moscow",
+        "тула": "Europe/Moscow",
+        "калуга": "Europe/Moscow",
+        "тверь": "Europe/Moscow",
+        "владимир": "Europe/Moscow",
+        "смоленск": "Europe/Moscow",
+        "курск": "Europe/Moscow",
+        "орёл": "Europe/Moscow",
+        "белгород": "Europe/Moscow",
+        "ставрополь": "Europe/Moscow",
+        "грозный": "Europe/Moscow",
+        "махачкала": "Europe/Moscow",
+        "симферополь": "Europe/Moscow",
+        "севастополь": "Europe/Moscow",
+        "петрозаводск": "Europe/Moscow",
+        "мурманск": "Europe/Moscow",
+        "архангельск": "Europe/Moscow",
+        "сыктывкар": "Europe/Moscow",
+        "киров": "Europe/Moscow",
+        "ижевск": "Europe/Samara",
+        "ульяновск": "Europe/Moscow",
+        "чебоксары": "Europe/Moscow",
+        "йошкар-ола": "Europe/Moscow",
+        "саранск": "Europe/Moscow",
+        "пенза": "Europe/Moscow",
+        "барнаул": "Asia/Barnaul",
+        "томск": "Asia/Tomsk",
+        "кемерово": "Asia/Novosibirsk",
+    }
+    
+    for city, tz_str in city_timezones.items():
+        if city in city_lower:
+            try:
+                return pytz.timezone(tz_str)
+            except:
+                pass
+    
+    return None
+
 # === БАЗА ===
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -55,10 +134,12 @@ def init_db():
     )""")
     try:
         c.execute("ALTER TABLE users ADD COLUMN mood TEXT DEFAULT 'neutral'")
-    except: pass
+    except:
+        pass
     try:
         c.execute("ALTER TABLE users ADD COLUMN style TEXT DEFAULT 'neutral'")
-    except: pass
+    except:
+        pass
     c.execute("""CREATE TABLE IF NOT EXISTS history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id TEXT,
@@ -506,6 +587,30 @@ async def process_message(user_id, text):
         else:
             print("❌ Ничего не найдено")
 
+    # === ОПРЕДЕЛЕНИЕ ГОРОДА ДЛЯ ВРЕМЕНИ ===
+    city_match = re.search(r"(?:в|для|город|городе)\s+([а-яА-ЯёЁ\-]+)", lower)
+    if city_match:
+        city_name = city_match.group(1)
+        tz = get_time_for_city(city_name)
+        if tz:
+            save_memory(user_id, "city", city_name)
+            save_memory(user_id, "timezone", tz.zone)
+
+    # === ОПРЕДЕЛЕНИЕ ВРЕМЕНИ ===
+    user_city = get_memory(user_id, "city")
+    if user_city:
+        tz = get_time_for_city(user_city)
+    else:
+        tz = DEFAULT_TZ
+
+    if not tz:
+        tz = DEFAULT_TZ
+
+    now = datetime.now(tz)
+    current_date = now.strftime("%d.%m.%Y")
+    current_day = now.strftime("%A")
+    current_time = now.strftime("%H:%M")
+
     # === КОМАНДЫ ===
     if "/задача" in lower or text.startswith("/task"):
         parts = text.split(" ", 1)
@@ -630,11 +735,6 @@ async def process_message(user_id, text):
         
         name_context = f"\n\nИмя пользователя: {user_name}" if user_name else ""
         
-        # Простое время (без pytz)
-        now = datetime.now()
-        current_date = now.strftime("%d.%m.%Y")
-        current_day = now.strftime("%A")
-        current_time = now.strftime("%H:%M")
         user_prompt = f"Сегодня {current_date} ({current_day}), сейчас {current_time}.\n\n{text}"
 
         current_mood = get_user_mood(user_id)
