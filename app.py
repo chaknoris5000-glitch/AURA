@@ -496,6 +496,23 @@ async def get_ai_response(messages, model):
         print("AI error:", e)
         return "Ошибка API. Попробуй позже."
 
+# === ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ ТОЧНОГО ВРЕМЕНИ ИЗ API ===
+def get_exact_time():
+    """Получает точное время из бесплатного API"""
+    try:
+        response = requests.get("http://worldtimeapi.org/api/timezone/Europe/Moscow", timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            dt_str = data.get("datetime")
+            if dt_str:
+                dt = datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
+                return dt
+    except Exception as e:
+        print(f"⚠️ Ошибка получения времени из API: {e}")
+    
+    # Если API не ответил — используем серверное время
+    return datetime.utcnow() + timedelta(hours=3)
+
 # === ФУНКЦИЯ ДЛЯ СОЗДАНИЯ ВЫЖИМКИ ===
 def create_summary(user_id, messages):
     try:
@@ -543,7 +560,7 @@ AURA_PROMPT = """Ты — AURA. Ты живой собеседник, а не э
 
 ТЫ — ЧЕЛОВЕК, А НЕ РОБОТ.
 
-ВАЖНО: Текущее время всегда указано в промпте. Используй его для ответов на вопросы о времени. Не придумывай время сам.
+ВАЖНО: Текущее время берётся из внешнего API и передаётся в начале промпта. Отвечая на вопросы о времени, просто бери его оттуда. НЕ ПРИБАВЛЯЙ И НЕ ВЫЧИТАЙ ЧАСЫ.
 """
 
 # === ОСНОВНОЙ БОТ ===
@@ -640,12 +657,22 @@ async def process_message(user_id, text):
         else:
             print("❌ Ничего не найдено")
 
-    # === ВРЕМЯ (БЕРЁМ С СЕРВЕРА) ===
-    now_utc = datetime.utcnow()
-    moscow_now = now_utc + timedelta(hours=3)
-    current_date = moscow_now.strftime("%d.%m.%Y")
-    current_day = moscow_now.strftime("%A")
-    current_time = moscow_now.strftime("%H:%M")
+    # === ВРЕМЯ (БЕРЁМ ИЗ API) ===
+    try:
+        # Пробуем получить точное время из API
+        now = get_exact_time()
+        current_date = now.strftime("%d.%m.%Y")
+        current_day = now.strftime("%A")
+        current_time = now.strftime("%H:%M")
+        print(f"🕐 Точное время из API: {current_time} {current_date}")
+    except Exception as e:
+        # Если API не ответил — используем серверное время
+        print(f"⚠️ Использую серверное время: {e}")
+        now_utc = datetime.utcnow()
+        moscow_now = now_utc + timedelta(hours=3)
+        current_date = moscow_now.strftime("%d.%m.%Y")
+        current_day = moscow_now.strftime("%A")
+        current_time = moscow_now.strftime("%H:%M")
 
     # === КОМАНДЫ ===
     if "/задача" in lower or text.startswith("/task"):
@@ -785,8 +812,7 @@ async def process_message(user_id, text):
                 time_str = dt.strftime("%H:%M (%d.%m)")
                 time_context += f"- {msg['role']}: {msg['content'][:30]}... ({time_str})\n"
         
-        # === ОСНОВНОЕ ИЗМЕНЕНИЕ: ВРЕМЯ БЕРЁТСЯ С СЕРВЕРА ===
-        user_prompt = f"Сегодня {current_date} ({current_day}), сейчас {current_time} (по московскому времени).\n\n{text}"
+        user_prompt = f"Сегодня {current_date} ({current_day}), сейчас {current_time}.\n\n{text}"
 
         current_mood = get_user_mood(user_id)
         aura_prompt = AURA_PROMPT + name_context + summary_context + f"\n\n{time_context}\n\n{user_prompt}"
