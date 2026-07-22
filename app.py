@@ -249,13 +249,6 @@ def get_memory(user_id, key):
     conn.close()
     return row[0] if row else None
 
-def delete_memory(user_id, key):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("DELETE FROM user_memory WHERE user_id = ? AND key = ?", (user_id, key))
-    conn.commit()
-    conn.close()
-
 # === ЗАДАЧИ ===
 def add_task(user_id, text, priority="normal", due_date=None):
     conn = sqlite3.connect(DB_NAME)
@@ -429,30 +422,27 @@ app = FastAPI()
 def get_user_timezone(request: Request):
     """Определяет часовой пояс пользователя по его IP через ip-api.com"""
     try:
-        # Получаем IP из заголовков (Render проксирует запросы)
         forwarded = request.headers.get("X-Forwarded-For")
         if forwarded:
             ip = forwarded.split(",")[0].strip()
         else:
             ip = request.client.host if request.client else "127.0.0.1"
         
-        # Не определяем для локальных IP
         if ip.startswith(("127.", "192.168.", "10.", "172.")):
             return None
         
-        # Запрос к ip-api.com
         response = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,regionName,city,timezone,offset", timeout=5)
         if response.status_code == 200:
             data = response.json()
             if data.get("status") == "success":
                 timezone = data.get("timezone")
-                offset = data.get("offset", 0)  # в секундах
+                offset = data.get("offset", 0)
                 city = data.get("city", "")
                 region = data.get("regionName", "")
                 country = data.get("country", "")
                 return {
                     "timezone": timezone,
-                    "offset": offset // 3600,  # переводим в часы
+                    "offset": offset // 3600,
                     "city": city,
                     "region": region,
                     "country": country,
@@ -552,22 +542,46 @@ async def process_message(request: Request, user_id, text):
         else:
             print("❌ Ничего не найдено")
 
-    # === ОПРЕДЕЛЕНИЕ ВРЕМЕНИ ПО IP ===
-    user_tz_data = get_user_timezone(request)
+    # === ОПРЕДЕЛЕНИЕ ВРЕМЕНИ ===
+    # Проверяем, есть ли в памяти город
+    saved_city = get_memory(user_id, "city")
+    saved_offset = get_memory(user_id, "tz_offset")
     
-    # Если получили данные по IP — сохраняем в память
-    if user_tz_data:
-        save_memory(user_id, "city", user_tz_data["city"])
-        save_memory(user_id, "timezone", user_tz_data["timezone"])
-        save_memory(user_id, "tz_offset", str(user_tz_data["offset"]))
-        save_memory(user_id, "location", user_tz_data["full"])
-        print(f"📍 Определено местоположение: {user_tz_data['full']} (UTC{user_tz_data['offset']:+d})")
+    # Если город не сохранён — пробуем определить по IP
+    if not saved_city or not saved_offset:
+        tz_data = get_user_timezone(request)
+        if tz_data:
+            save_memory(user_id, "city", tz_data["city"])
+            save_memory(user_id, "timezone", tz_data["timezone"])
+            save_memory(user_id, "tz_offset", str(tz_data["offset"]))
+            save_memory(user_id, "location", tz_data["full"])
+            saved_offset = str(tz_data["offset"])
+            saved_city = tz_data["city"]
+            print(f"📍 Определено местоположение: {tz_data['full']} (UTC{tz_data['offset']:+d})")
     
-    # Берём время из памяти или используем Москву по умолчанию
-    tz_offset_str = get_memory(user_id, "tz_offset")
-    if tz_offset_str:
+    # Если в запросе есть упоминание города — запоминаем его
+    city_match = re.search(r"(?:в|для|город|городе)\s+([а-яА-ЯёЁ\-]+)", lower)
+    if city_match:
+        city_name = city_match.group(1).capitalize()
+        save_memory(user_id, "city", city_name)
+        # Пробуем определить смещение для города
+        city_offset_map = {
+            "москва": 3, "санкт-петербург": 3, "казань": 3,
+            "кемерово": 7, "новосибирск": 7, "белово": 7,
+            "екатеринбург": 5, "челябинск": 5, "тюмень": 5,
+            "владивосток": 10, "иркутск": 8, "красноярск": 7,
+            "омск": 6, "самара": 4, "калининград": 2
+        }
+        for city, offset in city_offset_map.items():
+            if city in city_name.lower():
+                save_memory(user_id, "tz_offset", str(offset))
+                saved_offset = str(offset)
+                break
+    
+    # Берём смещение из памяти или Москву по умолчанию
+    if saved_offset:
         try:
-            offset_hours = int(tz_offset_str)
+            offset_hours = int(saved_offset)
         except:
             offset_hours = 3
     else:
@@ -703,7 +717,8 @@ async def process_message(request: Request, user_id, text):
         
         name_context = f"\n\nИмя пользователя: {user_name}" if user_name else ""
         
-        user_prompt = f"Сегодня {current_date} ({current_day}), сейчас {current_time}.\n\n{text}"
+        city_name = get_memory(user_id, "city") or "вашем городе"
+        user_prompt = f"Сегодня {current_date} ({current_day}), сейчас {current_time} (в {city_name}).\n\n{text}"
 
         current_mood = get_user_mood(user_id)
         aura_prompt = AURA_PROMPT + name_context + f"\n\n{user_prompt}"
