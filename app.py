@@ -114,7 +114,7 @@ def init_db():
 
 init_db()
 
-# === ФУНКЦИИ ===
+# === ФУНКЦИИ БАЗЫ ===
 def get_user(user_id):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -158,13 +158,21 @@ def save_message(user_id, role, content):
     conn.commit()
     conn.close()
 
-def get_history(user_id, limit=30):
+def get_history(user_id, limit=50):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("SELECT role, content FROM history WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", (user_id, limit))
     rows = c.fetchall()
     conn.close()
     return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+
+def get_message_count(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM history WHERE user_id = ?", (user_id,))
+    count = c.fetchone()[0]
+    conn.close()
+    return count
 
 def save_reminder(user_id, text, remind_date):
     conn = sqlite3.connect(DB_NAME)
@@ -393,6 +401,34 @@ async def get_ai_response(messages, model):
         print("AI error:", e)
         return "Ошибка API. Попробуй позже."
 
+# === ФУНКЦИЯ ДЛЯ СОЗДАНИЯ ВЫЖИМКИ ===
+def create_summary(user_id, messages):
+    """Создает краткую выжимку диалога через DeepSeek"""
+    try:
+        summary_prompt = f"""Ты — AURA. Сделай краткую выжимку этого диалога (максимум 300 символов). 
+Выдели:
+1. О чём говорили (основные темы)
+2. Какие планы, задачи, интересы у пользователя
+3. Что пользователь любит/не любит
+4. Важные детали, которые стоит запомнить
+
+Диалог:
+{messages}
+
+Выжимка:"""
+        
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "user", "content": summary_prompt}],
+            temperature=0.7,
+            max_tokens=200
+        )
+        summary = response.choices[0].message.content
+        return summary
+    except Exception as e:
+        print(f"❌ Ошибка создания выжимки: {e}")
+        return None
+
 # === ТАРИФЫ ===
 TARIFFS = {
     "Sapphire": {"price": 10000, "daily_limit": 100, "model": "deepseek-chat"},
@@ -417,40 +453,6 @@ AURA_PROMPT = """Ты — AURA. Ты живой собеседник, а не э
 
 # === ОСНОВНОЙ БОТ ===
 app = FastAPI()
-
-# === ФУНКЦИЯ ОПРЕДЕЛЕНИЯ ВРЕМЕНИ ПО IP ===
-def get_user_timezone(request: Request):
-    """Определяет часовой пояс пользователя по его IP через ip-api.com"""
-    try:
-        forwarded = request.headers.get("X-Forwarded-For")
-        if forwarded:
-            ip = forwarded.split(",")[0].strip()
-        else:
-            ip = request.client.host if request.client else "127.0.0.1"
-        
-        if ip.startswith(("127.", "192.168.", "10.", "172.")):
-            return None
-        
-        response = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,regionName,city,timezone,offset", timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            if data.get("status") == "success":
-                timezone = data.get("timezone")
-                offset = data.get("offset", 0)
-                city = data.get("city", "")
-                region = data.get("regionName", "")
-                country = data.get("country", "")
-                return {
-                    "timezone": timezone,
-                    "offset": offset // 3600,
-                    "city": city,
-                    "region": region,
-                    "country": country,
-                    "full": f"{city}, {region}, {country}"
-                }
-    except Exception as e:
-        print(f"⚠️ Ошибка определения времени по IP: {e}")
-    return None
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -480,7 +482,7 @@ async def webhook(request: Request):
             text = message["text"].strip()
         
         if text:
-            result = await process_message(request, chat_id, text)
+            result = await process_message(chat_id, text)
             send_message(chat_id, result["reply"])
         return JSONResponse({"ok": True})
     except Exception as e:
@@ -497,7 +499,7 @@ def send_message(chat_id, text):
         print(f"❌ Отправка: {e}")
         return False
 
-async def process_message(request: Request, user_id, text):
+async def process_message(user_id, text):
     user = get_user(user_id)
     if not user:
         save_user(user_id, level="Sapphire")
@@ -518,6 +520,7 @@ async def process_message(request: Request, user_id, text):
         log_request(user_id)
 
     save_message(user_id, "user", text)
+    
     mood = analyze_mood(text)
     if mood != "neutral":
         update_user_mood(user_id, mood)
@@ -542,56 +545,12 @@ async def process_message(request: Request, user_id, text):
         else:
             print("❌ Ничего не найдено")
 
-    # === ОПРЕДЕЛЕНИЕ ВРЕМЕНИ ===
-    # Проверяем, есть ли в памяти город
-    saved_city = get_memory(user_id, "city")
-    saved_offset = get_memory(user_id, "tz_offset")
-    
-    # Если город не сохранён — пробуем определить по IP
-    if not saved_city or not saved_offset:
-        tz_data = get_user_timezone(request)
-        if tz_data:
-            save_memory(user_id, "city", tz_data["city"])
-            save_memory(user_id, "timezone", tz_data["timezone"])
-            save_memory(user_id, "tz_offset", str(tz_data["offset"]))
-            save_memory(user_id, "location", tz_data["full"])
-            saved_offset = str(tz_data["offset"])
-            saved_city = tz_data["city"]
-            print(f"📍 Определено местоположение: {tz_data['full']} (UTC{tz_data['offset']:+d})")
-    
-    # Если в запросе есть упоминание города — запоминаем его
-    city_match = re.search(r"(?:в|для|город|городе)\s+([а-яА-ЯёЁ\-]+)", lower)
-    if city_match:
-        city_name = city_match.group(1).capitalize()
-        save_memory(user_id, "city", city_name)
-        # Пробуем определить смещение для города
-        city_offset_map = {
-            "москва": 3, "санкт-петербург": 3, "казань": 3,
-            "кемерово": 7, "новосибирск": 7, "белово": 7,
-            "екатеринбург": 5, "челябинск": 5, "тюмень": 5,
-            "владивосток": 10, "иркутск": 8, "красноярск": 7,
-            "омск": 6, "самара": 4, "калининград": 2
-        }
-        for city, offset in city_offset_map.items():
-            if city in city_name.lower():
-                save_memory(user_id, "tz_offset", str(offset))
-                saved_offset = str(offset)
-                break
-    
-    # Берём смещение из памяти или Москву по умолчанию
-    if saved_offset:
-        try:
-            offset_hours = int(saved_offset)
-        except:
-            offset_hours = 3
-    else:
-        offset_hours = 3
-    
+    # === ВРЕМЯ (ПРОСТОЕ) ===
     now_utc = datetime.utcnow()
-    now = now_utc + timedelta(hours=offset_hours)
-    current_date = now.strftime("%d.%m.%Y")
-    current_day = now.strftime("%A")
-    current_time = now.strftime("%H:%M")
+    moscow_now = now_utc + timedelta(hours=3)
+    current_date = moscow_now.strftime("%d.%m.%Y")
+    current_day = moscow_now.strftime("%A")
+    current_time = moscow_now.strftime("%H:%M")
 
     # === КОМАНДЫ ===
     if "/задача" in lower or text.startswith("/task"):
@@ -708,6 +667,7 @@ async def process_message(request: Request, user_id, text):
 ❓ Просто пиши, я отвечу! 😊"""
     
     else:
+        # === ЗАГРУЖАЕМ ВЫЖИМКУ И ИСТОРИЮ ===
         user_name = get_memory(user_id, "name")
         if not user_name:
             name_match = re.search(r"(?:меня зовут|зовут|я )(\w+)", text.lower())
@@ -717,19 +677,44 @@ async def process_message(request: Request, user_id, text):
         
         name_context = f"\n\nИмя пользователя: {user_name}" if user_name else ""
         
-        city_name = get_memory(user_id, "city") or "вашем городе"
-        user_prompt = f"Сегодня {current_date} ({current_day}), сейчас {current_time} (в {city_name}).\n\n{text}"
+        # Получаем выжимку из базы
+        summary = get_memory(user_id, "summary")
+        summary_context = f"\n\nКраткая выжимка прошлых диалогов:\n{summary}" if summary else ""
+        
+        user_prompt = f"Сегодня {current_date} ({current_day}), сейчас {current_time}.\n\n{text}"
 
         current_mood = get_user_mood(user_id)
-        aura_prompt = AURA_PROMPT + name_context + f"\n\n{user_prompt}"
+        aura_prompt = AURA_PROMPT + name_context + summary_context + f"\n\n{user_prompt}"
 
-        history = get_history(user_id, limit=30)
+        # Загружаем последние 50 сообщений из БД
+        history = get_history(user_id, limit=50)
         messages = [{"role": "system", "content": aura_prompt}]
         for msg in history:
             messages.append({"role": msg["role"], "content": msg["content"]})
         messages.append({"role": "user", "content": text})
 
         reply = await get_ai_response(messages, model)
+
+        # === СОЗДАЁМ ВЫЖИМКУ КАЖДЫЕ 50 СООБЩЕНИЙ ===
+        msg_count = get_message_count(user_id)
+        if msg_count % 50 == 0 and msg_count > 0:
+            # Собираем последние 20 сообщений для выжимки
+            recent_msgs = get_history(user_id, limit=20)
+            dialog_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent_msgs])
+            
+            new_summary = create_summary(user_id, dialog_text)
+            if new_summary:
+                # Если выжимка уже есть — объединяем
+                old_summary = get_memory(user_id, "summary")
+                if old_summary:
+                    combined = f"{old_summary}\n\nНовое:\n{new_summary}"
+                    # Ограничиваем длину (не более 3000 символов)
+                    if len(combined) > 3000:
+                        combined = combined[-3000:]
+                    save_memory(user_id, "summary", combined)
+                else:
+                    save_memory(user_id, "summary", new_summary)
+                print(f"📝 Создана выжимка для {user_id}")
 
     save_message(user_id, "assistant", reply)
     return {"reply": reply}
