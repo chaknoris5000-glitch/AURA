@@ -23,6 +23,7 @@ from email import encoders
 from email.mime.text import MIMEText
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
+import base64
 
 # === ЗАГРУЗКА КЛЮЧЕЙ ИЗ .env ===
 load_dotenv()
@@ -58,7 +59,9 @@ if not TELEGRAM_TOKEN:
 if not TAVILY_API_KEY:
     print("⚠️ НЕТ КЛЮЧА TAVILY (поиск может не работать)")
 if not YANDEX_API_KEY:
-    print("⚠️ НЕТ КЛЮЧА YANDEX TTS (голос не будет работать)")
+    print("⚠️ НЕТ КЛЮЧА YANDEX (OCR и TTS не будут работать)")
+else:
+    print("✅ YANDEX_API_KEY найден!")
 
 # === TAVILY ===
 tavily_client = None
@@ -69,7 +72,7 @@ if TavilyClient and TAVILY_API_KEY:
     except Exception as e:
         print(f"⚠️ Tavily: {e}")
 
-# === ФУНКЦИЯ НОРМАЛИЗАЦИИ ===
+# === НОРМАЛИЗАЦИЯ ===
 def normalize_query(text):
     corrections = {
         r"валдберис": "Wildberries",
@@ -108,54 +111,36 @@ def normalize_query(text):
         print(f"🔧 Нормализация: '{text}' → '{normalized}'")
     return normalized
 
-# === ФУНКЦИЯ ДЛЯ ПАРСИНГА САЙТОВ (ИЩЕТ ТЕЛЕФОНЫ, АДРЕСА, ЦЕНЫ) ===
+# === ПАРСИНГ САЙТОВ (телефоны, адреса, цены) ===
 def parse_site_for_info(url):
-    """Открывает сайт и ищет телефоны, адреса, цены, email"""
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         response = requests.get(url, headers=headers, timeout=15)
         soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Удаляем скрипты и стили
         for script in soup(["script", "style"]):
             script.decompose()
-        
         text = soup.get_text(separator="\n", strip=True)
-        
         result = {}
         
-        # Поиск телефонов (формат +7 XXX XXX XX XX и 8 XXX XXX XX XX)
-        phone_patterns = [
-            r'\+7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}',
-            r'8\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}',
-            r'7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}',
-        ]
+        phone_patterns = [r'\+7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'8\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}']
         phones = []
         for pattern in phone_patterns:
             phones.extend(re.findall(pattern, text))
-        
-        # Очищаем от лишних пробелов
         phones = [re.sub(r'\s+', ' ', p).strip() for p in phones]
-        phones = list(set(phones))[:5]  # не больше 5 номеров
-        
+        phones = list(set(phones))[:5]
         if phones:
             result["phones"] = phones
         
-        # Поиск email
         email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
         emails = list(set(re.findall(email_pattern, text)))[:3]
         if emails:
             result["emails"] = emails
         
-        # Поиск адресов (ищем слова "ул.", "проспект", "переулок" и т.д.)
         address_pattern = r'(?:ул\.|улица|проспект|пр\.|переулок|пер\.|площадь|пл\.)\s+[А-Яа-я0-9\-\.\s,]+'
         addresses = list(set(re.findall(address_pattern, text)))[:3]
         if addresses:
             result["addresses"] = addresses
         
-        # Поиск цен (ищем числа с "₽", "руб", "$")
         price_pattern = r'(\d+[\s,.]*\d*)\s*(?:₽|руб|рублей|\$|€)'
         prices = list(set(re.findall(price_pattern, text)))[:3]
         if prices:
@@ -166,7 +151,79 @@ def parse_site_for_info(url):
         print(f"❌ Ошибка парсинга: {e}")
         return None
 
-# === ФУНКЦИЯ ОТПРАВКИ БЭКАПА ===
+# === VISION (РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ ЧЕРЕЗ GROQ) ===
+def describe_image_with_groq(image_data):
+    """Отправляет изображение в Groq Vision и получает описание"""
+    try:
+        import groq
+        client = groq.Groq(api_key=GROQ_API_KEY)
+        
+        # Кодируем изображение в base64
+        if isinstance(image_data, bytes):
+            base64_image = base64.b64encode(image_data).decode('utf-8')
+        else:
+            base64_image = image_data
+        
+        response = client.chat.completions.create(
+            model="llama-3.2-90b-vision-preview",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Опиши, что ты видишь на этой картинке. Если там есть текст, тоже напиши его. Ответ дай на русском, кратко, но с деталями."},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                    ]
+                }
+            ],
+            temperature=0.7,
+            max_tokens=300
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"❌ Groq Vision ошибка: {e}")
+        return None
+
+# === OCR (РАСПОЗНАВАНИЕ ТЕКСТА С КАРТИНКИ ЧЕРЕЗ YANDEX) ===
+def ocr_yandex(image_data):
+    """Распознаёт текст с картинки через Yandex Vision OCR"""
+    if not YANDEX_API_KEY:
+        print("❌ YANDEX_API_KEY не найден для OCR")
+        return None
+    try:
+        url = "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze"
+        headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}"}
+        
+        # Конвертируем в base64
+        if isinstance(image_data, bytes):
+            base64_image = base64.b64encode(image_data).decode('utf-8')
+        else:
+            base64_image = image_data
+        
+        payload = {
+            "analyze_specs": [{
+                "content": base64_image,
+                "features": [{"type": "TEXT_DETECTION"}]
+            }]
+        }
+        
+        response = requests.post(url, headers=headers, json=payload, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            # Извлекаем текст из ответа
+            text_blocks = []
+            for result in data.get("results", []):
+                for block in result.get("textDetection", {}).get("blocks", []):
+                    for line in block.get("lines", []):
+                        text_blocks.append(line.get("text", ""))
+            return "\n".join(text_blocks) if text_blocks else "Текст на картинке не обнаружен"
+        else:
+            print(f"❌ Yandex OCR ошибка: {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"❌ Yandex OCR: {e}")
+        return None
+
+# === БЭКАП ===
 def send_backup_email():
     try:
         if not os.path.exists(DB_NAME):
@@ -194,7 +251,6 @@ def send_backup_email():
         print(f"❌ Ошибка отправки бэкапа на почту: {e}")
         return False
 
-# === ФУНКЦИИ ДЛЯ БЭКАПА ===
 def backup_database():
     try:
         if os.path.exists(DB_NAME):
@@ -231,7 +287,6 @@ def backup_scheduler():
                 send_backup_email()
                 hour_counter = 0
 
-# === ВОССТАНОВЛЕНИЕ ПРИ ЗАПУСКЕ ===
 print("🔄 Проверка базы данных...")
 if not os.path.exists(DB_NAME):
     if restore_database():
@@ -481,6 +536,25 @@ def get_memory(user_id, key):
     conn.close()
     return row[0] if row else None
 
+# === ВЕЧНАЯ ПАМЯТЬ: ПОЛУЧАЕМ ТЕМЫ ИЗ ПРОШЛЫХ ДИАЛОГОВ ===
+def get_user_topics_summary(user_id):
+    """Возвращает краткую выжимку тем, которые обсуждал пользователь"""
+    topics = get_topics(user_id, days=365)  # за последний год
+    if not topics:
+        return None
+    
+    # Убираем дубликаты и сортируем по частоте
+    topic_counts = {}
+    for t in topics:
+        topic_counts[t] = topic_counts.get(t, 0) + 1
+    
+    sorted_topics = sorted(topic_counts.items(), key=lambda x: x[1], reverse=True)
+    top_topics = [t[0] for t in sorted_topics[:5]]
+    
+    if top_topics:
+        return f"📚 Из прошлых диалогов я помню, что мы обсуждали: {', '.join(top_topics)}."
+    return None
+
 # === ЗАДАЧИ ===
 def add_task(user_id, text, priority="normal", due_date=None):
     conn = sqlite3.connect(DB_NAME)
@@ -544,7 +618,7 @@ def analyze_mood(text):
         return "tired"
     return "neutral"
 
-# === ОПРЕДЕЛЕНИЕ ГОРОДА ПО IP ===
+# === ОПРЕДЕЛЕНИЕ ГОРОДА ===
 def get_city_by_ip(ip):
     try:
         response = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,regionName,city,timezone,offset", timeout=3)
@@ -562,44 +636,25 @@ def get_city_by_ip(ip):
         pass
     return None
 
-# === ОПРЕДЕЛЕНИЕ ЧАСОВОГО ПОЯСА ===
 def get_timezone_offset(city_name):
     timezones = {
-        "белово": 7,
-        "кемерово": 7,
-        "новокузнецк": 7,
-        "прокопьевск": 7,
-        "киселёвск": 7,
-        "междуреченск": 7,
-        "инской": 7,
-        "москва": 3,
-        "санкт-петербург": 3,
-        "екатеринбург": 5,
-        "новосибирск": 7,
-        "омск": 6,
-        "красноярск": 7,
-        "иркутск": 8,
-        "владивосток": 10,
-        "хабаровск": 10,
-        "алматы": 5,
-        "астана": 5,
-        "минск": 3,
-        "киев": 2,
-        "рига": 2,
-        "лондон": 0,
-        "берлин": 1,
-        "париж": 1,
-        "нью-йорк": -4,
-        "лос-анджелес": -7
+        "белово": 7, "кемерово": 7, "новокузнецк": 7, "прокопьевск": 7,
+        "киселёвск": 7, "междуреченск": 7, "инской": 7,
+        "москва": 3, "санкт-петербург": 3, "екатеринбург": 5, "новосибирск": 7,
+        "омск": 6, "красноярск": 7, "иркутск": 8, "владивосток": 10,
+        "хабаровск": 10, "алматы": 5, "астана": 5, "минск": 3,
+        "киев": 2, "рига": 2, "лондон": 0, "берлин": 1,
+        "париж": 1, "нью-йорк": -4, "лос-анджелес": -7
     }
     for city, offset in timezones.items():
         if city in city_name.lower():
             return offset
     return 3
 
-# === YANDEX TTS ===
+# === YANDEX TTS (ГОЛОСОВЫЕ ОТВЕТЫ) ===
 def yandex_tts(text):
     if not YANDEX_API_KEY:
+        print("❌ YANDEX_API_KEY не найден для TTS")
         return None
     try:
         url = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
@@ -618,17 +673,34 @@ def yandex_tts(text):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
                 tmp.write(response.content)
                 return tmp.name
-        return None
+        else:
+            print(f"❌ Yandex TTS ошибка: {response.status_code}")
+            return None
     except Exception as e:
         print(f"❌ Yandex TTS: {e}")
         return None
 
 async def send_voice_reply(chat_id, text):
     if not YANDEX_API_KEY:
+        print("❌ YANDEX_API_KEY отсутствует, голос не отправлен")
         return False
+    
+    if not text or len(text.strip()) == 0:
+        print("⚠️ Текст пустой, голос не отправлен")
+        return False
+    
+    # Обрезаем слишком длинный текст (500 символов)
+    if len(text) > 500:
+        text = text[:500]
+        print("⚠️ Текст обрезан до 500 символов")
+    
+    print(f"🎤 Генерирую голос для: {text[:50]}...")
+    
     audio_path = yandex_tts(text)
     if not audio_path:
+        print("❌ Не удалось синтезировать голос")
         return False
+    
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
         with open(audio_path, 'rb') as f:
@@ -636,15 +708,19 @@ async def send_voice_reply(chat_id, text):
             data = {'chat_id': chat_id}
             response = requests.post(url, files=files, data=data, timeout=30)
         os.unlink(audio_path)
-        return response.status_code == 200
+        if response.status_code == 200:
+            print("✅ Голосовое сообщение отправлено!")
+            return True
+        else:
+            print(f"❌ Ошибка отправки голоса: {response.status_code}")
+            return False
     except Exception as e:
         print(f"❌ Отправка голоса: {e}")
         return False
 
-# === ПОИСК С ПАРСИНГОМ САЙТОВ ===
+# === ПОИСК С ПАРСИНГОМ ===
 async def search_duckduckgo(query):
     try:
-        from bs4 import BeautifulSoup
         url = f"https://html.duckduckgo.com/html/?q={query}"
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers, timeout=10)
@@ -656,13 +732,10 @@ async def search_duckduckgo(query):
                 link = result.select_one('.result__url')
                 text_elem = result.select_one('.result__snippet')
                 if text_elem and link:
-                    title_text = title.text.strip()
-                    snippet = text_elem.text.strip()[:300]
-                    url_text = link.text.strip()
                     results.append({
-                        "title": title_text,
-                        "snippet": snippet,
-                        "url": url_text
+                        "title": title.text.strip(),
+                        "snippet": text_elem.text.strip()[:300],
+                        "url": link.text.strip()
                     })
         return results if results else None
     except Exception as e:
@@ -670,14 +743,10 @@ async def search_duckduckgo(query):
         return None
 
 async def search_web(query, need_links=False, is_image_search=False):
-    """Поиск с парсингом сайтов для получения детальной информации"""
-    
-    # Если это поиск картинок — сразу даём ссылку
     if is_image_search:
         encoded_query = query.replace(" ", "%20")
         return f"Вот ссылка на картинки по запросу '{query}':\nhttps://yandex.ru/images/search?text={encoded_query}"
     
-    # Обычный поиск через Tavily
     if tavily_client:
         try:
             response = tavily_client.search(
@@ -687,14 +756,10 @@ async def search_web(query, need_links=False, is_image_search=False):
                 include_answer=True,
                 include_images=False
             )
-            
-            # Собираем результаты
             results = []
             urls = []
-            
             if response.get('answer'):
                 results.append(response['answer'])
-            
             if response.get('results'):
                 for r in response['results'][:5]:
                     title = r.get('title', '')
@@ -706,12 +771,10 @@ async def search_web(query, need_links=False, is_image_search=False):
                             results.append(f"{title}\n{content}...\nСсылка: {url}")
                         else:
                             results.append(f"{title}\n{content}...")
-            
-            # Если нужно найти телефоны или адреса — парсим сайты
             if "телефон" in query.lower() or "адрес" in query.lower() or "номер" in query.lower() or "контакт" in query.lower():
                 print("📞 Ищем контакты через парсинг сайтов...")
                 parsed_info = []
-                for url in urls[:3]:  # парсим не больше 3 сайтов
+                for url in urls[:3]:
                     info = parse_site_for_info(url)
                     if info:
                         info_text = f"🔗 {url}\n"
@@ -724,16 +787,12 @@ async def search_web(query, need_links=False, is_image_search=False):
                         if info.get("prices"):
                             info_text += f"💰 Цены: {', '.join(info['prices'])}\n"
                         parsed_info.append(info_text)
-                
                 if parsed_info:
                     results.append("\n\n--- ДЕТАЛЬНАЯ ИНФОРМАЦИЯ СО СТРАНИЦ ---\n" + "\n".join(parsed_info))
-            
             return "\n\n---\n\n".join(results) if results else None
-            
         except Exception as e:
             print(f"❌ Tavily: {e}")
     
-    # Если Tavily не работает — пробуем DuckDuckGo
     duck_results = await search_duckduckgo(query)
     if duck_results:
         results = []
@@ -744,8 +803,6 @@ async def search_web(query, need_links=False, is_image_search=False):
                 results.append(f"{r['title']}\n{r['snippet']}...\nСсылка: {r['url']}")
             else:
                 results.append(f"{r['title']}\n{r['snippet']}...")
-        
-        # Ищем контакты через парсинг
         if "телефон" in query.lower() or "адрес" in query.lower():
             parsed_info = []
             for url in urls[:3]:
@@ -759,12 +816,10 @@ async def search_web(query, need_links=False, is_image_search=False):
                     parsed_info.append(info_text)
             if parsed_info:
                 results.append("\n\n--- ДЕТАЛЬНАЯ ИНФОРМАЦИЯ СО СТРАНИЦ ---\n" + "\n".join(parsed_info))
-        
         return "\n\n---\n\n".join(results) if results else None
-    
     return None
 
-# === ГОЛОС ===
+# === ГОЛОС (ВХОД) ===
 def transcribe_audio_with_groq(audio_url):
     try:
         from groq import Groq
@@ -857,7 +912,9 @@ async def webhook(request: Request):
         message = body["message"]
         chat_id = str(message["chat"]["id"])
         text = None
+        image_data = None
         
+        # === ОБРАБОТКА ГОЛОСА ===
         if "voice" in message:
             file_id = message["voice"]["file_id"]
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
@@ -872,14 +929,56 @@ async def webhook(request: Request):
                 else:
                     send_message(chat_id, "⚠️ Не удалось распознать голос")
                     return JSONResponse({"ok": True})
+        
+        # === ОБРАБОТКА ИЗОБРАЖЕНИЙ ===
+        elif "photo" in message:
+            # Берём самое большое фото (последнее в списке)
+            photo = message["photo"][-1]
+            file_id = photo["file_id"]
+            file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
+            file_response = requests.get(file_url)
+            file_data = file_response.json()
+            if file_data.get("ok"):
+                file_path = file_data["result"]["file_path"]
+                image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+                image_response = requests.get(image_url, timeout=30)
+                if image_response.status_code == 200:
+                    image_data = image_response.content
+                    send_message(chat_id, "🖼️ Получил изображение, обрабатываю...")
+                    
+                    # Пытаемся распознать через Vision (умное описание)
+                    vision_result = describe_image_with_groq(image_data)
+                    
+                    # Пытаемся распознать текст через OCR
+                    ocr_result = ocr_yandex(image_data)
+                    
+                    # Формируем ответ
+                    result_text = "📸 Результаты анализа изображения:\n\n"
+                    if vision_result:
+                        result_text += f"🔍 **Описание:**\n{vision_result}\n\n"
+                    else:
+                        result_text += "⚠️ Не удалось получить описание изображения.\n\n"
+                    
+                    if ocr_result and ocr_result != "Текст на картинке не обнаружен":
+                        result_text += f"📝 **Распознанный текст:**\n{ocr_result}"
+                    elif ocr_result == "Текст на картинке не обнаружен":
+                        result_text += "📝 Текст на картинке не обнаружен."
+                    else:
+                        result_text += "⚠️ Не удалось распознать текст на изображении."
+                    
+                    send_message(chat_id, result_text)
+                    return JSONResponse({"ok": True})
+                else:
+                    send_message(chat_id, "⚠️ Не удалось загрузить изображение")
+                    return JSONResponse({"ok": True})
+        
+        # === ОБРАБОТКА ТЕКСТА ===
         elif "text" in message:
             text = message["text"].strip()
         
         if text:
             result = await process_message(request, chat_id, text)
-            
             send_message(chat_id, result["reply"])
-            
             if YANDEX_API_KEY and result["reply"]:
                 await send_voice_reply(chat_id, result["reply"])
                 
@@ -927,6 +1026,12 @@ async def process_message(request: Request, user_id, text):
     lower = text.lower()
     normalized_text = normalize_query(text)
     search_text = normalized_text if normalized_text != lower else lower
+
+    # === ВЕЧНАЯ ПАМЯТЬ: ПРОВЕРЯЕМ, ЕСТЬ ЛИ ПРОШЛЫЕ ТЕМЫ ===
+    memory_check = get_user_topics_summary(user_id)
+    if memory_check and get_message_count(user_id) <= 2:
+        # Если у пользователя мало сообщений, напоминаем о прошлых темах
+        save_message(user_id, "assistant", memory_check)
 
     # === ОПРЕДЕЛЕНИЕ ГОРОДА ===
     city_info = get_user_city(user_id)
@@ -1087,6 +1192,10 @@ async def process_message(request: Request, user_id, text):
 /удалить [ID] - удалить задачу
 /напомни ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ - напоминание
 /моинапоминания - список напоминаний
+
+📸 Просто отправь фото - я опишу его и распознаю текст!
+🎤 Отправь голосовое - я услышу и отвечу!
+🌍 Скажи "Мой город ..." - я запомню время!
 
 Просто пиши вопросы - я отвечу!"""
     
