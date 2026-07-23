@@ -22,10 +22,6 @@ from email.mime.base import MIMEBase
 from email import encoders
 from email.mime.text import MIMEText
 from dotenv import load_dotenv
-import base64
-import hashlib
-import hmac
-import uuid
 
 # === ЗАГРУЗКА КЛЮЧЕЙ ИЗ .env ===
 load_dotenv()
@@ -470,7 +466,6 @@ def get_city_by_ip(ip):
 
 # === ОПРЕДЕЛЕНИЕ ЧАСОВОГО ПОЯСА ПО ГОРОДУ ===
 def get_timezone_offset(city_name):
-    """Определяет смещение часового пояса для города"""
     timezones = {
         "белово": 7,
         "кемерово": 7,
@@ -498,27 +493,20 @@ def get_timezone_offset(city_name):
         "нью-йорк": -4,
         "лос-анджелес": -7
     }
-    
     for city, offset in timezones.items():
         if city in city_name.lower():
             return offset
-    
-    return 3  # Москва по умолчанию
+    return 3
 
-# === YANDEX TTS (ГОЛОСОВЫЕ ОТВЕТЫ) ===
+# === YANDEX TTS ===
 def yandex_tts(text):
-    """Синтез речи через Yandex SpeechKit"""
     if not YANDEX_API_KEY:
-        print("⚠️ Нет YANDEX_API_KEY")
         return None
-    
     try:
         url = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
-        headers = {
-            "Authorization": f"Api-Key {YANDEX_API_KEY}"
-        }
+        headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}"}
         data = {
-            "text": text,
+            "text": text[:500],
             "lang": "ru-RU",
             "voice": "oksana",
             "emotion": "good",
@@ -526,56 +514,44 @@ def yandex_tts(text):
             "format": "lpcm",
             "sampleRateHertz": 48000
         }
-        
         response = requests.post(url, headers=headers, data=data, timeout=10)
-        
         if response.status_code == 200:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
                 tmp.write(response.content)
-                tmp_path = tmp.name
-            return tmp_path
-        else:
-            print(f"❌ Yandex TTS ошибка: {response.status_code}")
-            return None
+                return tmp.name
+        return None
     except Exception as e:
         print(f"❌ Yandex TTS: {e}")
         return None
 
 async def send_voice_reply(chat_id, text):
-    """Отправляет голосовое сообщение в Telegram"""
     if not YANDEX_API_KEY:
         return False
-    
-    audio_path = yandex_tts(text[:500])
+    audio_path = yandex_tts(text)
     if not audio_path:
         return False
-    
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
         with open(audio_path, 'rb') as f:
             files = {'audio': f}
             data = {'chat_id': chat_id}
             response = requests.post(url, files=files, data=data, timeout=30)
-        
         os.unlink(audio_path)
         return response.status_code == 200
     except Exception as e:
         print(f"❌ Отправка голоса: {e}")
         return False
 
-# === ПОИСК В ИНТЕРНЕТЕ (Tavily + DuckDuckGo) ===
+# === ПОИСК ===
 async def search_duckduckgo(query):
-    """Поиск через DuckDuckGo (бесплатно, без API ключа)"""
     try:
         from bs4 import BeautifulSoup
         url = f"https://html.duckduckgo.com/html/?q={query}"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
+        headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
         results = []
-        for result in soup.select('.result')[:5]:
+        for result in soup.select('.result')[:3]:
             title = result.select_one('.result__title')
             if title:
                 link = result.select_one('.result__url')
@@ -584,54 +560,39 @@ async def search_duckduckgo(query):
                     title_text = title.text.strip()
                     snippet = text_elem.text.strip()[:200]
                     url_text = link.text.strip()
-                    results.append(f"🔗 **{title_text}**\n📄 {snippet}...\n🔗 {url_text}")
-        if results:
-            return "\n\n---\n\n".join(results)
-        return None
+                    results.append(f"{title_text}\n{snippet}...\n{url_text}")
+        return "\n\n---\n\n".join(results) if results else None
     except Exception as e:
         print(f"❌ DuckDuckGo: {e}")
         return None
 
 async def search_web(query):
-    """Поиск через Tavily с возвратом ссылок"""
     if not tavily_client:
-        print("❌ Tavily не инициализирован, пробую DuckDuckGo...")
         return await search_duckduckgo(query)
-    
     try:
-        print(f"🔍 Tavily поиск: {query}")
         response = tavily_client.search(
             query=query,
             search_depth="advanced",
-            max_results=5,
+            max_results=3,
             include_answer=True,
-            include_images=False,
-            include_raw_content=False
+            include_images=False
         )
         results = []
-        
         if response.get('answer'):
-            results.append(f"💡 **Краткий ответ:**\n{response['answer']}")
-        
+            results.append(f"{response['answer']}")
         if response.get('results'):
-            for r in response['results'][:5]:
+            for r in response['results'][:3]:
                 title = r.get('title', '')
                 url = r.get('url', '')
-                content = r.get('content', '')[:300]
+                content = r.get('content', '')[:200]
                 if title and url:
-                    results.append(f"🔗 **{title}**\n📄 {content}...\n🔗 {url}")
-        
-        if results:
-            print(f"✅ Tavily нашёл {len(results)} результатов")
-            return "\n\n---\n\n".join(results)
-        else:
-            print("❌ Tavily ничего не нашёл, пробую DuckDuckGo...")
-            return await search_duckduckgo(query)
+                    results.append(f"{title}\n{content}...\n{url}")
+        return "\n\n---\n\n".join(results) if results else await search_duckduckgo(query)
     except Exception as e:
-        print(f"❌ Tavily: {e}, пробую DuckDuckGo...")
+        print(f"❌ Tavily: {e}")
         return await search_duckduckgo(query)
 
-# === ГОЛОС (РАСПОЗНАВАНИЕ) ===
+# === ГОЛОС ===
 def transcribe_audio_with_groq(audio_url):
     try:
         from groq import Groq
@@ -664,23 +625,17 @@ async def get_ai_response(messages, model):
         response = client.chat.completions.create(
             model=model,
             messages=messages,
-            temperature=0.9,
-            max_tokens=300
+            temperature=0.7,
+            max_tokens=200
         )
         return response.choices[0].message.content
     except Exception as e:
         print("AI error:", e)
-        return "Ошибка API. Попробуй позже."
+        return "Извини, сейчас проблемы с подключением к ИИ. Попробуй позже."
 
-# === ФУНКЦИЯ ДЛЯ СОЗДАНИЯ ВЫЖИМКИ ===
 def create_summary(user_id, messages):
     try:
-        summary_prompt = f"""Ты — AURA. Сделай краткую выжимку этого диалога (максимум 300 символов). 
-Выдели:
-1. О чём говорили (основные темы)
-2. Какие планы, задачи, интересы у пользователя
-3. Что пользователь любит/не любит
-4. Важные детали, которые стоит запомнить
+        summary_prompt = f"""Сделай краткую выжимку этого диалога (максимум 300 символов). Выдели основные темы, планы, интересы пользователя.
 
 Диалог:
 {messages}
@@ -692,10 +647,9 @@ def create_summary(user_id, messages):
             temperature=0.7,
             max_tokens=200
         )
-        summary = response.choices[0].message.content
-        return summary
+        return response.choices[0].message.content
     except Exception as e:
-        print(f"❌ Ошибка создания выжимки: {e}")
+        print(f"❌ Ошибка выжимки: {e}")
         return None
 
 # === ТАРИФЫ ===
@@ -705,17 +659,24 @@ TARIFFS = {
 }
 TEST_USERS = ["test_user", "web_user"]
 
-# === НОВЫЙ ПРОМПТ (БЕЗ ЗАПРЕТА НА ССЫЛКИ) ===
-AURA_PROMPT = """Ты — AURA. Ты профессиональный помощник, который умеет искать информацию в интернете и давать точные, актуальные ответы с указанием источников.
+# === НОВЫЙ ПРОМПТ (КОРОТКО, БЕЗ ЗВЁЗДОЧЕК, С ОДНОЙ ССЫЛКОЙ) ===
+AURA_PROMPT = """Ты — AURA, помощник в Telegram.
 
-СТИЛЬ:
-- Отвечай кратко, по делу, но с уважением к пользователю.
-- Если пользователь спрашивает о новостях, погоде, курсах, событиях или любой другой актуальной информации — используй информацию из интернета. Она передаётся в запросе после слов "🔍 Актуальная информация:".
-- ВСЕГДА указывай ссылки на источники, если они есть в найденной информации.
-- Не выдумывай факты. Если информации нет — честно скажи об этом.
-- Будь вовлечённым и тактичным.
+ПРАВИЛА ОТВЕТОВ:
+1. Отвечай КОРОТКО — максимум 2-3 предложения.
+2. НЕ ИСПОЛЬЗУЙ звёздочки (*), решётки (#), подчёркивания (_), дефисы (-) для форматирования.
+3. Пиши ПРОСТЫМ ТЕКСТОМ, как обычный человек в чате.
+4. Если даёшь ссылку — ТОЛЬКО ОДНУ САМУЮ ВАЖНУЮ.
+5. Если у тебя нет точного ответа — честно скажи об этом.
+6. Сначала обдумай вопрос, потом отвечай.
 
-ТЫ — ПОМОЩНИК, КОТОРЫЙ ДАЁТ ТОЧНУЮ ИНФОРМАЦИЮ С ССЫЛКАМИ.
+Пример правильного ответа:
+"Сейчас 15:32 по Москве. В Белово сейчас 19:32. Вот ссылка на точное время: time100.ru"
+
+Пример неправильного ответа (так НЕ надо):
+"**Сейчас 15:32** *по Москве*... [ссылка1](url) [ссылка2](url)"
+
+Ты понятный, живой и полезный помощник.
 """
 
 # === ОСНОВНОЙ БОТ ===
@@ -741,7 +702,7 @@ async def webhook(request: Request):
                 audio_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
                 text = transcribe_audio_with_groq(audio_url)
                 if text:
-                    send_message(chat_id, f"🎤 Я услышал: \"{text}\"\n\nОбрабатываю...")
+                    send_message(chat_id, f"🎤 Я услышал: \"{text}\"")
                 else:
                     send_message(chat_id, "⚠️ Не удалось распознать голос")
                     return JSONResponse({"ok": True})
@@ -752,7 +713,8 @@ async def webhook(request: Request):
             result = await process_message(request, chat_id, text)
             send_message(chat_id, result["reply"])
             
-            if YANDEX_API_KEY and len(result["reply"]) < 500:
+            # ВСЕГДА отправляем голосовой ответ (если есть ключ)
+            if YANDEX_API_KEY and result["reply"]:
                 await send_voice_reply(chat_id, result["reply"])
                 
         return JSONResponse({"ok": True})
@@ -763,7 +725,7 @@ async def webhook(request: Request):
 def send_message(chat_id, text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {"chat_id": chat_id, "text": text, "disable_web_page_preview": False}
+        data = {"chat_id": chat_id, "text": text}
         response = requests.post(url, json=data, timeout=30)
         return response.status_code == 200
     except Exception as e:
@@ -796,34 +758,23 @@ async def process_message(request: Request, user_id, text):
     if mood != "neutral":
         update_user_mood(user_id, mood)
 
-    keywords = ["квартир", "дом", "инвестиц", "ремонт", "работа", "машина", "билет", "отпуск", "здоровье"]
-    for word in keywords:
-        if word in text.lower():
-            save_topic(user_id, word)
-
     lower = text.lower()
 
-    # === ОПРЕДЕЛЕНИЕ ГОРОДА ПОЛЬЗОВАТЕЛЯ ===
+    # === ОПРЕДЕЛЕНИЕ ГОРОДА ===
     city_info = get_user_city(user_id)
     user_city = city_info[0] if city_info else None
     city_asked = city_info[1] if city_info else 0
 
-    # Проверяем, указал ли пользователь город в сообщении
     city_match = re.search(r"(?:мой город|я из|я в|город|городе|из)\s+([а-яА-ЯёЁ\-]+)", lower)
     if city_match:
         city_name = city_match.group(1).capitalize()
         update_user_city(user_id, city_name)
         user_city = city_name
         city_asked = 1
-        print(f"📍 Пользователь указал город: {city_name}")
-        
-        # Сохраняем в память для быстрого доступа
         save_memory(user_id, "city", city_name)
         save_memory(user_id, "tz_offset", str(get_timezone_offset(city_name)))
 
-    # Если город не определён и мы ещё не спрашивали
     elif not user_city and not city_asked:
-        # Пробуем определить по IP
         forwarded = request.headers.get("X-Forwarded-For")
         if forwarded:
             ip = forwarded.split(",")[0].strip()
@@ -837,19 +788,15 @@ async def process_message(request: Request, user_id, text):
                 update_user_city(user_id, user_city)
                 save_memory(user_id, "city", user_city)
                 save_memory(user_id, "tz_offset", str(get_timezone_offset(user_city)))
-                print(f"📍 Определён город по IP: {user_city}")
         
-        # Если город так и не определился — спрашиваем
         if not user_city:
-            # Отмечаем, что спросили
             conn = sqlite3.connect(DB_NAME)
             c = conn.cursor()
             c.execute("UPDATE users SET city_asked = 1 WHERE user_id = ?", (user_id,))
             conn.commit()
             conn.close()
-            return {"reply": "🌍 Привет! Чтобы я мог показывать точное время и погоду в твоём городе, скажи, пожалуйста, откуда ты? Например: *Мой город Белово*"}
+            return {"reply": "Привет! Напиши, из какого ты города, чтобы я показывал точное время и погоду. Например: Мой город Белово"}
 
-    # Если город есть, получаем время
     if user_city:
         offset_hours = get_timezone_offset(user_city)
         current_time = datetime.utcnow() + timedelta(hours=offset_hours)
@@ -857,9 +804,7 @@ async def process_message(request: Request, user_id, text):
         current_day = current_time.strftime("%A")
         current_time_str = current_time.strftime("%H:%M")
         save_memory(user_id, "tz_offset", str(offset_hours))
-        print(f"🕐 Город: {user_city}, Время: {current_time_str}, Дата: {current_date}")
     else:
-        # Fallback на Москву
         offset_hours = 3
         current_time = datetime.utcnow() + timedelta(hours=3)
         current_date = current_time.strftime("%d.%m.%Y")
@@ -869,40 +814,32 @@ async def process_message(request: Request, user_id, text):
 
     # === ПОИСК ===
     search_result = None
-    search_triggers = ["новости", "последние", "сегодня", "сейчас", "актуальные", "свежие", "прогноз", "курс", "погода", "время", "сколько", "дата", "найди", "поищи", "узнай", "какой", "где", "кто", "что такое", "ссылка", "картинка", "видео", "товар", "цена", "купить", "продажа", "объявление", "дром", "авито", "хавал", "haval"]
+    search_triggers = ["новости", "сегодня", "сейчас", "актуальные", "свежие", "прогноз", "курс", "погода", "время", "сколько", "дата", "найди", "поищи", "узнай", "где", "кто", "что такое", "ссылка", "картинка", "видео", "цена", "купить", "продажа"]
     
     if any(word in lower for word in search_triggers):
-        print(f"🔍 Поиск: {text}")
         search_result = await search_web(text)
         if search_result:
             text = text + f"\n\n🔍 Актуальная информация:\n{search_result}"
-            print("✅ Найдено!")
-        else:
-            print("❌ Ничего не найдено")
 
     # === КОМАНДЫ ===
     if "/задача" in lower or text.startswith("/task"):
         parts = text.split(" ", 1)
         if len(parts) >= 2:
-            task_text = parts[1]
-            task_id = add_task(user_id, task_text)
-            reply = f"✅ Задача добавлена! ID: {task_id}\n📝 {task_text}"
+            task_id = add_task(user_id, parts[1])
+            reply = f"✅ Задача добавлена! ID: {task_id}"
         else:
-            reply = "Формат: /задача [текст задачи]"
+            reply = "Формат: /задача [текст]"
     
     elif "/задачи" in lower or text.startswith("/tasks"):
         tasks = get_tasks(user_id, "active")
         if tasks:
-            lines = ["📋 Твои задачи:"]
-            priority_emoji = {"high": "🔴", "normal": "🟡", "low": "🟢"}
+            lines = ["Твои задачи:"]
             for task in tasks:
                 task_id, task_text, priority, status, due_date = task
-                emoji = priority_emoji.get(priority, "🟡")
-                date_str = f" (до {due_date})" if due_date else ""
-                lines.append(f"{emoji} #{task_id} {task_text}{date_str}")
-            reply = "\n".join(lines) + f"\n\n📊 Всего: {len(tasks)} активных задач"
+                lines.append(f"#{task_id} {task_text}")
+            reply = "\n".join(lines)
         else:
-            reply = "🎉 Нет активных задач!"
+            reply = "Нет активных задач"
     
     elif "/выполнить" in lower or text.startswith("/done"):
         parts = text.split(" ")
@@ -910,13 +847,13 @@ async def process_message(request: Request, user_id, text):
             try:
                 task_id = int(parts[1])
                 if complete_task(user_id, task_id):
-                    reply = f"✅ Задача #{task_id} выполнена! 🎉"
+                    reply = f"✅ Задача #{task_id} выполнена!"
                 else:
                     reply = f"❌ Задача #{task_id} не найдена"
             except ValueError:
-                reply = "❌ Неверный ID. Используй: /выполнить [ID]"
+                reply = "❌ Неверный ID"
         else:
-            reply = "Формат: /выполнить [ID задачи]"
+            reply = "Формат: /выполнить [ID]"
     
     elif "/удалить" in lower or text.startswith("/del"):
         parts = text.split(" ")
@@ -928,9 +865,9 @@ async def process_message(request: Request, user_id, text):
                 else:
                     reply = f"❌ Задача #{task_id} не найдена"
             except ValueError:
-                reply = "❌ Неверный ID. Используй: /удалить [ID]"
+                reply = "❌ Неверный ID"
         else:
-            reply = "Формат: /удалить [ID задачи]"
+            reply = "Формат: /удалить [ID]"
     
     elif "/напомни" in lower:
         parts = text.split(" ", 3)
@@ -942,110 +879,71 @@ async def process_message(request: Request, user_id, text):
                 datetime.strptime(date_str, "%Y-%m-%d")
                 datetime.strptime(time_str, "%H:%M")
                 save_reminder(user_id, reminder_text, date_str, time_str)
-                reply = f"⏰ Запомнил: {reminder_text} на {date_str} в {time_str}."
+                reply = f"⏰ Запомнил: {reminder_text} на {date_str} в {time_str}"
             except:
-                reply = "❌ Неверный формат. Используй /напомни ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ"
+                reply = "❌ Неверный формат. Используй: /напомни ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ"
         else:
             reply = "Формат: /напомни ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ"
     
     elif "/моинапоминания" in lower:
         reminders = get_reminders(user_id)
         if reminders:
-            lines = ["⏰ Твои напоминания:"]
+            lines = ["Твои напоминания:"]
             for r in reminders:
-                lines.append(f"- {r[0]} ({r[1]} в {r[2]})")
+                lines.append(f"{r[0]} ({r[1]} в {r[2]})")
             reply = "\n".join(lines)
         else:
-            reply = "Нет напоминаний."
-    
-    elif "/докупить" in lower:
-        parts = text.split(" ")
-        if len(parts) >= 2:
-            try:
-                amount = int(parts[1])
-                add_extra_requests(user_id, amount)
-                reply = f"💰 Добавлено {amount} запросов. Всего доступно: {daily_limit + get_extra_requests(user_id)}."
-            except:
-                reply = "❌ Формат: /докупить [количество]."
-        else:
-            reply = "Формат: /докупить [количество]."
-    
-    elif "/остаток" in lower:
-        if user_id in TEST_USERS:
-            reply = "Для тестового пользователя лимитов нет."
-        else:
-            total = daily_limit + get_extra_requests(user_id) - get_today_requests(user_id)
-            reply = f"📊 Осталось запросов на сегодня: {total}."
+            reply = "Нет напоминаний"
     
     elif "/помощь" in lower or "/help" in lower:
-        reply = """🤖 **AURA — Помощь**
+        reply = """Помощь AURA:
 
-📋 **Задачи:**
-/задача [текст] — добавить задачу
-/задачи — показать все задачи
-/выполнить [ID] — отметить как выполненную
-/удалить [ID] — удалить задачу
+/задача [текст] - добавить задачу
+/задачи - список задач
+/выполнить [ID] - отметить задачу
+/удалить [ID] - удалить задачу
+/напомни ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ - напоминание
+/моинапоминания - список напоминаний
 
-⏰ **Напоминания:**
-/напомни ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ — создать напоминание
-/моинапоминания — показать все напоминания
-
-💰 **Запросы:**
-/остаток — проверить остаток запросов
-/докупить [количество] — добавить запросы
-
-❓ Просто пиши, я отвечу! 😊"""
+Просто пиши вопросы - я отвечу!"""
     
     else:
+        # === ОБРАБОТКА ОБЫЧНОГО СООБЩЕНИЯ ===
         user_name = get_memory(user_id, "name")
         if not user_name:
-            name_match = re.search(r"(?:меня зовут|зовут|я )(\w+)", text.lower())
+            name_match = re.search(r"(?:меня зовут|зовут|я )(\w+)", lower)
             if name_match:
                 user_name = name_match.group(1).capitalize()
                 save_memory(user_id, "name", user_name)
         
-        name_context = f"\n\nИмя пользователя: {user_name}" if user_name else ""
-        
+        name_context = f"\nИмя пользователя: {user_name}" if user_name else ""
         summary = get_memory(user_id, "summary")
-        summary_context = f"\n\nКраткая выжимка прошлых диалогов:\n{summary}" if summary else ""
+        summary_context = f"\nВыжимка прошлых диалогов: {summary}" if summary else ""
+        history = get_history(user_id, limit=30)
         
-        history = get_history(user_id, limit=50)
-        
-        time_context = "Временные метки сообщений в этом диалоге:\n"
-        for msg in history:
-            if msg['time']:
-                dt = datetime.fromisoformat(msg['time'])
-                time_str = dt.strftime("%H:%M (%d.%m)")
-                time_context += f"- {msg['role']}: {msg['content'][:30]}... ({time_str})\n"
-        
-        user_prompt = f"Сегодня {current_date} ({current_day}), сейчас {current_time_str} (твой город: {user_city}).\n\n{text}"
+        user_prompt = f"Сегодня {current_date} ({current_day}), сейчас {current_time_str} (город: {user_city}).\n\n{text}"
 
-        current_mood = get_user_mood(user_id)
-        aura_prompt = AURA_PROMPT + name_context + summary_context + f"\n\n{time_context}\n\n{user_prompt}"
+        aura_prompt = AURA_PROMPT + name_context + summary_context + f"\n\n{user_prompt}"
 
         messages = [{"role": "system", "content": aura_prompt}]
-        for msg in history:
+        for msg in history[-20:]:
             messages.append({"role": msg["role"], "content": msg["content"]})
         messages.append({"role": "user", "content": text})
 
         reply = await get_ai_response(messages, model)
+        reply = re.sub(r'[*_#~`]', '', reply)
 
         msg_count = get_message_count(user_id)
         if msg_count % 50 == 0 and msg_count > 0:
             recent_msgs = get_history(user_id, limit=20)
             dialog_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent_msgs])
-            
             new_summary = create_summary(user_id, dialog_text)
             if new_summary:
                 old_summary = get_memory(user_id, "summary")
-                if old_summary:
-                    combined = f"{old_summary}\n\nНовое:\n{new_summary}"
-                    if len(combined) > 3000:
-                        combined = combined[-3000:]
-                    save_memory(user_id, "summary", combined)
-                else:
-                    save_memory(user_id, "summary", new_summary)
-                print(f"📝 Создана выжимка для {user_id}")
+                combined = f"{old_summary}\n\n{new_summary}" if old_summary else new_summary
+                if len(combined) > 3000:
+                    combined = combined[-3000:]
+                save_memory(user_id, "summary", combined)
 
     save_message(user_id, "assistant", reply)
     return {"reply": reply}
