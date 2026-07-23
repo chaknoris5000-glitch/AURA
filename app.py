@@ -21,6 +21,10 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
 from email.mime.text import MIMEText
+from dotenv import load_dotenv
+
+# === ЗАГРУЗКА КЛЮЧЕЙ ИЗ .env ===
+load_dotenv()
 
 # === TAVILY ДЛЯ ПОИСКА ===
 try:
@@ -33,17 +37,25 @@ except ImportError:
 DB_NAME = "aura.db"
 BACKUP_NAME = "aura_backup.db"
 
-# === КЛЮЧИ ===
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-133c0d2bfc664d878ac8dcbc346ea3fc")
-DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8774637081:AAGrAZI-umgkQXXulCulJVRWb8LmAp3Lua4")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+# === КЛЮЧИ (из .env) ===
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+EMAIL_SENDER = os.getenv("EMAIL_SENDER")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 
-# === НАСТРОЙКИ ПОЧТЫ (GMAIL) ===
-EMAIL_SENDER = "chaknoris5000@gmail.com"
-EMAIL_PASSWORD = "fbcsjcmudqofmuya"
-EMAIL_RECEIVER = "chaknoris5000@gmail.com"
+# === ПРОВЕРКА КЛЮЧЕЙ ===
+print("🔍 Проверка ключей...")
+if not DEEPSEEK_API_KEY:
+    print("❌ НЕТ КЛЮЧА DEEPSEEK!")
+if not TELEGRAM_TOKEN:
+    print("❌ НЕТ КЛЮЧА TELEGRAM!")
+if not TAVILY_API_KEY:
+    print("⚠️ НЕТ КЛЮЧА TAVILY (поиск может не работать)")
 
 # === TAVILY ===
 tavily_client = None
@@ -87,7 +99,7 @@ def backup_database():
     try:
         if os.path.exists(DB_NAME):
             shutil.copy2(DB_NAME, BACKUP_NAME)
-            print(f"💾 Бэкап создан: {BACKUP_NAME} ({os.path.getsize(BACKUP_NAME)} байт)")
+            print(f"💾 Бэкап создан: {BACKUP_NAME}")
             return True
         else:
             print("⚠️ База данных не найдена для бэкапа")
@@ -100,7 +112,7 @@ def restore_database():
     try:
         if os.path.exists(BACKUP_NAME):
             shutil.copy2(BACKUP_NAME, DB_NAME)
-            print(f"♻️ База восстановлена из бэкапа: {BACKUP_NAME}")
+            print(f"♻️ База восстановлена из бэкапа")
             return True
         else:
             print("ℹ️ Резервная копия не найдена, создаю новую базу")
@@ -132,7 +144,7 @@ else:
 
 backup_thread = threading.Thread(target=backup_scheduler, daemon=True)
 backup_thread.start()
-print("🔄 Планировщик бэкапа запущен (каждый час, отправка на почту раз в сутки)")
+print("🔄 Планировщик бэкапа запущен")
 
 # === БАЗА ===
 def init_db():
@@ -415,11 +427,97 @@ def analyze_mood(text):
         return "tired"
     return "neutral"
 
-# === TAVILY ПОИСК ===
+# === ОПРЕДЕЛЕНИЕ ГОРОДА ПО IP ===
+def get_city_by_ip(ip):
+    try:
+        response = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,regionName,city,timezone,offset", timeout=3)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("status") == "success":
+                return {
+                    "city": data.get("city", ""),
+                    "region": data.get("regionName", ""),
+                    "country": data.get("country", ""),
+                    "timezone": data.get("timezone", ""),
+                    "offset": data.get("offset", 0) // 3600
+                }
+    except:
+        pass
+    return None
+
+# === ОПРЕДЕЛЕНИЕ ЧАСОВОГО ПОЯСА ПО ГОРОДУ ===
+def get_timezone_offset(city_name):
+    """Определяет смещение часового пояса для города"""
+    # База городов СНГ и мира
+    timezones = {
+        "белово": 7,
+        "кемерово": 7,
+        "новокузнецк": 7,
+        "прокопьевск": 7,
+        "киселёвск": 7,
+        "междуреченск": 7,
+        "москва": 3,
+        "санкт-петербург": 3,
+        "екатеринбург": 5,
+        "новосибирск": 7,
+        "омск": 6,
+        "красноярск": 7,
+        "иркутск": 8,
+        "владивосток": 10,
+        "хабаровск": 10,
+        "алматы": 5,
+        "астана": 5,
+        "минск": 3,
+        "киев": 2,
+        "рига": 2,
+        "лондон": 0,
+        "берлин": 1,
+        "париж": 1,
+        "нью-йорк": -4,
+        "лос-анджелес": -7
+    }
+    
+    for city, offset in timezones.items():
+        if city in city_name.lower():
+            return offset
+    
+    # Если город не найден в базе — возвращаем Москву по умолчанию
+    return 3
+
+# === ПОИСК В ИНТЕРНЕТЕ (DUCKDUCKGO - БЕСПЛАТНЫЙ FALLBACK) ===
+async def search_duckduckgo(query):
+    """Поиск через DuckDuckGo (бесплатно, без API ключа)"""
+    try:
+        from bs4 import BeautifulSoup
+        url = f"https://html.duckduckgo.com/html/?q={query}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        results = []
+        for result in soup.select('.result')[:3]:
+            title = result.select_one('.result__title')
+            if title:
+                link = result.select_one('.result__url')
+                text = result.select_one('.result__snippet')
+                if text:
+                    title_text = title.text.strip()
+                    snippet = text.text.strip()[:150]
+                    results.append(f"🔗 {title_text}\n📄 {snippet}...")
+        if results:
+            return "\n\n".join(results)
+        return None
+    except Exception as e:
+        print(f"❌ DuckDuckGo: {e}")
+        return None
+
+# === TAVILY ПОИСК (ОСНОВНОЙ) ===
 async def search_web(query):
     if not tavily_client:
-        print("❌ Tavily клиент не инициализирован")
-        return None
+        print("❌ Tavily не инициализирован, пробую DuckDuckGo...")
+        return await search_duckduckgo(query)
+    
     try:
         print(f"🔍 Tavily поиск: {query}")
         response = tavily_client.search(
@@ -449,13 +547,13 @@ async def search_web(query):
             print(f"✅ Tavily нашёл {len(results)} результатов")
             return "\n\n".join(results)
         else:
-            print("❌ Tavily ничего не нашёл")
-            return None
+            print("❌ Tavily ничего не нашёл, пробую DuckDuckGo...")
+            return await search_duckduckgo(query)
     except Exception as e:
-        print(f"❌ Tavily: {e}")
-        return None
+        print(f"❌ Tavily: {e}, пробую DuckDuckGo...")
+        return await search_duckduckgo(query)
 
-# === ГОЛОС ===
+# === ГОЛОС (РАСПОЗНАВАНИЕ) ===
 def transcribe_audio_with_groq(audio_url):
     try:
         from groq import Groq
@@ -477,6 +575,56 @@ def transcribe_audio_with_groq(audio_url):
         print(f"❌ Groq: {e}")
         return None
 
+# === TTS (ГОЛОСОВЫЕ ОТВЕТЫ) ===
+def text_to_speech(text, voice="Anna"):
+    """Преобразует текст в голосовое сообщение через ElevenLabs"""
+    if not ELEVENLABS_API_KEY:
+        print("⚠️ ElevenLabs API ключ не настроен")
+        return None
+    
+    try:
+        from elevenlabs import generate, Voice, VoiceSettings
+        
+        audio = generate(
+            text=text,
+            voice=Voice(
+                name=voice,
+                settings=VoiceSettings(
+                    stability=0.5,
+                    similarity_boost=0.75
+                )
+            ),
+            model="eleven_monolingual_v1",
+            api_key=ELEVENLABS_API_KEY
+        )
+        return audio
+    except Exception as e:
+        print(f"❌ TTS ошибка: {e}")
+        return None
+
+async def send_voice_reply(chat_id, text):
+    """Отправляет голосовое сообщение в Telegram"""
+    audio_data = text_to_speech(text)
+    if not audio_data:
+        return False
+    
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+            tmp.write(audio_data)
+            tmp_path = tmp.name
+        
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
+        with open(tmp_path, 'rb') as f:
+            files = {'audio': f}
+            data = {'chat_id': chat_id}
+            response = requests.post(url, files=files, data=data, timeout=30)
+        
+        os.unlink(tmp_path)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"❌ Отправка голоса: {e}")
+        return False
+
 # === DEEPSEEK ===
 client = OpenAI(
     api_key=DEEPSEEK_API_KEY,
@@ -489,54 +637,12 @@ async def get_ai_response(messages, model):
             model=model,
             messages=messages,
             temperature=0.9,
-            max_tokens=150
+            max_tokens=200
         )
         return response.choices[0].message.content
     except Exception as e:
         print("AI error:", e)
         return "Ошибка API. Попробуй позже."
-
-# === ФУНКЦИЯ ДЛЯ ОПРЕДЕЛЕНИЯ ГОРОДА ПО IP ===
-def get_city_by_ip(ip):
-    try:
-        response = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,regionName,city,timezone,offset", timeout=3)
-        if response.status_code == 200:
-            data = response.json()
-            if data.get("status") == "success":
-                return {
-                    "city": data.get("city", ""),
-                    "region": data.get("regionName", ""),
-                    "country": data.get("country", ""),
-                    "timezone": data.get("timezone", ""),
-                    "offset": data.get("offset", 0) // 3600
-                }
-    except:
-        pass
-    return None
-
-# === ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ ВРЕМЕНИ ===
-def get_current_time(city_name=None):
-    try:
-        if city_name:
-            # Пробуем найти часовой пояс по городу через API
-            response = requests.get(f"http://worldtimeapi.org/api/timezone/Europe/Moscow", timeout=3)
-            if response.status_code == 200:
-                data = response.json()
-                dt_str = data.get("datetime")
-                if dt_str:
-                    dt = datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
-                    return dt + timedelta(hours=4)  # Кемерово UTC+7, Москва UTC+3
-        else:
-            response = requests.get("http://worldtimeapi.org/api/timezone/Europe/Moscow", timeout=3)
-            if response.status_code == 200:
-                data = response.json()
-                dt_str = data.get("datetime")
-                if dt_str:
-                    dt = datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
-                    return dt
-    except:
-        pass
-    return datetime.utcnow() + timedelta(hours=3)
 
 # === ФУНКЦИЯ ДЛЯ СОЗДАНИЯ ВЫЖИМКИ ===
 def create_summary(user_id, messages):
@@ -619,6 +725,11 @@ async def webhook(request: Request):
         if text:
             result = await process_message(request, chat_id, text)
             send_message(chat_id, result["reply"])
+            
+            # Если включена озвучка и текст небольшой — отправляем голосовое
+            if len(result["reply"]) < 500 and ELEVENLABS_API_KEY:
+                await send_voice_reply(chat_id, result["reply"])
+                
         return JSONResponse({"ok": True})
     except Exception as e:
         print(f"❌ Ошибка: {e}")
@@ -680,58 +791,51 @@ async def process_message(request: Request, user_id, text):
         else:
             print("❌ Ничего не найдено")
 
-    # === ОПРЕДЕЛЕНИЕ ГОРОДА ПОЛЬЗОВАТЕЛЯ ===
-    user_city = get_memory(user_id, "city")
-    user_offset = get_memory(user_id, "tz_offset")
+    # === ОПРЕДЕЛЕНИЕ ГОРОДА И ВРЕМЕНИ (НОВАЯ ВЕРСИЯ) ===
     
-    # Если город не определён — определяем по IP
-    if not user_city:
-        forwarded = request.headers.get("X-Forwarded-For")
-        if forwarded:
-            ip = forwarded.split(",")[0].strip()
-        else:
-            ip = request.client.host if request.client else "127.0.0.1"
-        
-        city_data = get_city_by_ip(ip)
-        if city_data:
-            user_city = city_data["city"]
-            user_offset = city_data["offset"]
-            save_memory(user_id, "city", user_city)
-            save_memory(user_id, "tz_offset", str(user_offset))
-            print(f"📍 Определён город: {user_city} (UTC{user_offset:+d})")
-    
-    # Если в запросе есть название города — запоминаем его
-    city_match = re.search(r"(?:в|для|город|городе)\s+([а-яА-ЯёЁ\-]+)", lower)
+    # Сначала проверяем, не указал ли пользователь город в сообщении
+    city_match = re.search(r"(?:в|для|город|городе|из)\s+([а-яА-ЯёЁ\-]+)", text.lower())
     if city_match:
         city_name = city_match.group(1).capitalize()
         save_memory(user_id, "city", city_name)
-        # Кемерово и Белово — UTC+7
-        if "кемерово" in city_name.lower() or "белово" in city_name.lower():
-            user_offset = 7
-            save_memory(user_id, "tz_offset", "7")
-        elif "москва" in city_name.lower():
-            user_offset = 3
-            save_memory(user_id, "tz_offset", "3")
-        elif "екатеринбург" in city_name.lower():
-            user_offset = 5
-            save_memory(user_id, "tz_offset", "5")
-        elif "новосибирск" in city_name.lower():
-            user_offset = 7
-            save_memory(user_id, "tz_offset", "7")
-    
-    # Определяем смещение
-    offset_hours = 3  # По умолчанию Москва
-    if user_offset:
-        try:
-            offset_hours = int(user_offset)
-        except:
-            offset_hours = 3
-    
-    # Получаем текущее время
-    now = datetime.utcnow() + timedelta(hours=offset_hours)
-    current_date = now.strftime("%d.%m.%Y")
-    current_day = now.strftime("%A")
-    current_time = now.strftime("%H:%M")
+        user_city = city_name
+        print(f"📍 Пользователь указал город: {city_name}")
+    else:
+        # Пробуем получить город из памяти
+        user_city = get_memory(user_id, "city")
+        
+        # Если города нет в памяти — определяем по IP
+        if not user_city:
+            forwarded = request.headers.get("X-Forwarded-For")
+            if forwarded:
+                ip = forwarded.split(",")[0].strip()
+            else:
+                ip = request.client.host if request.client else "127.0.0.1"
+            
+            # Если IP локальный — используем город по умолчанию
+            if ip in ["127.0.0.1", "localhost", "::1"]:
+                user_city = "Москва"
+            else:
+                city_data = get_city_by_ip(ip)
+                if city_data and city_data.get("city"):
+                    user_city = city_data["city"]
+                else:
+                    user_city = "Москва"  # fallback
+            
+            save_memory(user_id, "city", user_city)
+            print(f"📍 Определён город по IP: {user_city}")
+
+    # Получаем время для города
+    offset_hours = get_timezone_offset(user_city)
+    current_time = datetime.utcnow() + timedelta(hours=offset_hours)
+    current_date = current_time.strftime("%d.%m.%Y")
+    current_day = current_time.strftime("%A")
+    current_time_str = current_time.strftime("%H:%M")
+
+    # Сохраняем в память для будущих запросов
+    save_memory(user_id, "tz_offset", str(offset_hours))
+
+    print(f"🕐 Город: {user_city}, Время: {current_time_str}, Дата: {current_date}, Смещение: UTC{offset_hours:+d}")
 
     # === КОМАНДЫ ===
     if "/задача" in lower or text.startswith("/task"):
@@ -871,7 +975,7 @@ async def process_message(request: Request, user_id, text):
                 time_str = dt.strftime("%H:%M (%d.%m)")
                 time_context += f"- {msg['role']}: {msg['content'][:30]}... ({time_str})\n"
         
-        user_prompt = f"Сегодня {current_date} ({current_day}), сейчас {current_time}.\n\n{text}"
+        user_prompt = f"Сегодня {current_date} ({current_day}), сейчас {current_time_str} (твой город: {user_city}).\n\n{text}"
 
         current_mood = get_user_mood(user_id)
         aura_prompt = AURA_PROMPT + name_context + summary_context + f"\n\n{time_context}\n\n{user_prompt}"
