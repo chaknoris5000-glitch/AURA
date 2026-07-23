@@ -22,6 +22,10 @@ from email.mime.base import MIMEBase
 from email import encoders
 from email.mime.text import MIMEText
 from dotenv import load_dotenv
+import base64
+import hashlib
+import hmac
+import uuid
 
 # === ЗАГРУЗКА КЛЮЧЕЙ ИЗ .env ===
 load_dotenv()
@@ -46,7 +50,7 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 EMAIL_SENDER = os.getenv("EMAIL_SENDER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 
 # === ПРОВЕРКА КЛЮЧЕЙ ===
 print("🔍 Проверка ключей...")
@@ -56,6 +60,8 @@ if not TELEGRAM_TOKEN:
     print("❌ НЕТ КЛЮЧА TELEGRAM!")
 if not TAVILY_API_KEY:
     print("⚠️ НЕТ КЛЮЧА TAVILY (поиск может не работать)")
+if not YANDEX_API_KEY:
+    print("⚠️ НЕТ КЛЮЧА YANDEX TTS (голос не будет работать)")
 
 # === TAVILY ===
 tavily_client = None
@@ -448,7 +454,6 @@ def get_city_by_ip(ip):
 # === ОПРЕДЕЛЕНИЕ ЧАСОВОГО ПОЯСА ПО ГОРОДУ ===
 def get_timezone_offset(city_name):
     """Определяет смещение часового пояса для города"""
-    # База городов СНГ и мира
     timezones = {
         "белово": 7,
         "кемерово": 7,
@@ -481,8 +486,67 @@ def get_timezone_offset(city_name):
         if city in city_name.lower():
             return offset
     
-    # Если город не найден в базе — возвращаем Москву по умолчанию
-    return 3
+    return 3  # Москва по умолчанию
+
+# === YANDEX TTS (ГОЛОСОВЫЕ ОТВЕТЫ) ===
+def yandex_tts(text):
+    """Синтез речи через Yandex SpeechKit"""
+    if not YANDEX_API_KEY:
+        print("⚠️ Нет YANDEX_API_KEY")
+        return None
+    
+    try:
+        # Формируем запрос к Yandex SpeechKit
+        url = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
+        headers = {
+            "Authorization": f"Api-Key {YANDEX_API_KEY}"
+        }
+        data = {
+            "text": text,
+            "lang": "ru-RU",
+            "voice": "oksana",  # женский голос, можно alena, filipp, omazh
+            "emotion": "good",
+            "speed": 1.0,
+            "format": "lpcm",
+            "sampleRateHertz": 48000
+        }
+        
+        response = requests.post(url, headers=headers, data=data, timeout=10)
+        
+        if response.status_code == 200:
+            # Сохраняем аудио во временный файл
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+                tmp.write(response.content)
+                tmp_path = tmp.name
+            return tmp_path
+        else:
+            print(f"❌ Yandex TTS ошибка: {response.status_code} - {response.text}")
+            return None
+    except Exception as e:
+        print(f"❌ Yandex TTS: {e}")
+        return None
+
+async def send_voice_reply(chat_id, text):
+    """Отправляет голосовое сообщение в Telegram"""
+    if not YANDEX_API_KEY:
+        return False
+    
+    audio_path = yandex_tts(text[:500])  # Ограничиваем длину текста
+    if not audio_path:
+        return False
+    
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
+        with open(audio_path, 'rb') as f:
+            files = {'audio': f}
+            data = {'chat_id': chat_id}
+            response = requests.post(url, files=files, data=data, timeout=30)
+        
+        os.unlink(audio_path)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"❌ Отправка голоса: {e}")
+        return False
 
 # === ПОИСК В ИНТЕРНЕТЕ (DUCKDUCKGO - БЕСПЛАТНЫЙ FALLBACK) ===
 async def search_duckduckgo(query):
@@ -499,11 +563,10 @@ async def search_duckduckgo(query):
         for result in soup.select('.result')[:3]:
             title = result.select_one('.result__title')
             if title:
-                link = result.select_one('.result__url')
-                text = result.select_one('.result__snippet')
-                if text:
+                text_elem = result.select_one('.result__snippet')
+                if text_elem:
                     title_text = title.text.strip()
-                    snippet = text.text.strip()[:150]
+                    snippet = text_elem.text.strip()[:150]
                     results.append(f"🔗 {title_text}\n📄 {snippet}...")
         if results:
             return "\n\n".join(results)
@@ -574,56 +637,6 @@ def transcribe_audio_with_groq(audio_url):
     except Exception as e:
         print(f"❌ Groq: {e}")
         return None
-
-# === TTS (ГОЛОСОВЫЕ ОТВЕТЫ) ===
-def text_to_speech(text, voice="Anna"):
-    """Преобразует текст в голосовое сообщение через ElevenLabs"""
-    if not ELEVENLABS_API_KEY:
-        print("⚠️ ElevenLabs API ключ не настроен")
-        return None
-    
-    try:
-        from elevenlabs import generate, Voice, VoiceSettings
-        
-        audio = generate(
-            text=text,
-            voice=Voice(
-                name=voice,
-                settings=VoiceSettings(
-                    stability=0.5,
-                    similarity_boost=0.75
-                )
-            ),
-            model="eleven_monolingual_v1",
-            api_key=ELEVENLABS_API_KEY
-        )
-        return audio
-    except Exception as e:
-        print(f"❌ TTS ошибка: {e}")
-        return None
-
-async def send_voice_reply(chat_id, text):
-    """Отправляет голосовое сообщение в Telegram"""
-    audio_data = text_to_speech(text)
-    if not audio_data:
-        return False
-    
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
-            tmp.write(audio_data)
-            tmp_path = tmp.name
-        
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
-        with open(tmp_path, 'rb') as f:
-            files = {'audio': f}
-            data = {'chat_id': chat_id}
-            response = requests.post(url, files=files, data=data, timeout=30)
-        
-        os.unlink(tmp_path)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"❌ Отправка голоса: {e}")
-        return False
 
 # === DEEPSEEK ===
 client = OpenAI(
@@ -726,8 +739,8 @@ async def webhook(request: Request):
             result = await process_message(request, chat_id, text)
             send_message(chat_id, result["reply"])
             
-            # Если включена озвучка и текст небольшой — отправляем голосовое
-            if len(result["reply"]) < 500 and ELEVENLABS_API_KEY:
+            # Если есть ключ Yandex — отправляем голосовое (короткие ответы)
+            if YANDEX_API_KEY and len(result["reply"]) < 300:
                 await send_voice_reply(chat_id, result["reply"])
                 
         return JSONResponse({"ok": True})
@@ -791,9 +804,7 @@ async def process_message(request: Request, user_id, text):
         else:
             print("❌ Ничего не найдено")
 
-    # === ОПРЕДЕЛЕНИЕ ГОРОДА И ВРЕМЕНИ (НОВАЯ ВЕРСИЯ) ===
-    
-    # Сначала проверяем, не указал ли пользователь город в сообщении
+    # === ОПРЕДЕЛЕНИЕ ГОРОДА И ВРЕМЕНИ ===
     city_match = re.search(r"(?:в|для|город|городе|из)\s+([а-яА-ЯёЁ\-]+)", text.lower())
     if city_match:
         city_name = city_match.group(1).capitalize()
@@ -801,10 +812,8 @@ async def process_message(request: Request, user_id, text):
         user_city = city_name
         print(f"📍 Пользователь указал город: {city_name}")
     else:
-        # Пробуем получить город из памяти
         user_city = get_memory(user_id, "city")
         
-        # Если города нет в памяти — определяем по IP
         if not user_city:
             forwarded = request.headers.get("X-Forwarded-For")
             if forwarded:
@@ -812,7 +821,6 @@ async def process_message(request: Request, user_id, text):
             else:
                 ip = request.client.host if request.client else "127.0.0.1"
             
-            # Если IP локальный — используем город по умолчанию
             if ip in ["127.0.0.1", "localhost", "::1"]:
                 user_city = "Москва"
             else:
@@ -820,7 +828,7 @@ async def process_message(request: Request, user_id, text):
                 if city_data and city_data.get("city"):
                     user_city = city_data["city"]
                 else:
-                    user_city = "Москва"  # fallback
+                    user_city = "Москва"
             
             save_memory(user_id, "city", user_city)
             print(f"📍 Определён город по IP: {user_city}")
@@ -832,9 +840,7 @@ async def process_message(request: Request, user_id, text):
     current_day = current_time.strftime("%A")
     current_time_str = current_time.strftime("%H:%M")
 
-    # Сохраняем в память для будущих запросов
     save_memory(user_id, "tz_offset", str(offset_hours))
-
     print(f"🕐 Город: {user_city}, Время: {current_time_str}, Дата: {current_date}, Смещение: UTC{offset_hours:+d}")
 
     # === КОМАНДЫ ===
