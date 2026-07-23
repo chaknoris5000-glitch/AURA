@@ -24,6 +24,8 @@ from email.mime.text import MIMEText
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 import base64
+import io
+from PIL import Image
 
 # === ЗАГРУЗКА КЛЮЧЕЙ ИЗ .env ===
 load_dotenv()
@@ -72,6 +74,29 @@ if TavilyClient and TAVILY_API_KEY:
     except Exception as e:
         print(f"⚠️ Tavily: {e}")
 
+# === SILERO TTS (БЕСПЛАТНО, ОФЛАЙН) ===
+def silero_tts(text):
+    """Генерация речи через Silero (бесплатно, работает без ключа)"""
+    try:
+        import torch
+        import soundfile as sf
+        
+        device = torch.device('cpu')
+        model, _ = torch.hub.load(repo_or_dir='snakers4/silero-models',
+                                   model='silero_tts',
+                                   language='ru',
+                                   speaker='aidar')
+        model.to(device)
+        
+        audio = model.apply_tts(text, speaker='aidar', sample_rate=48000)
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            sf.write(tmp.name, audio, 48000)
+            return tmp.name
+    except Exception as e:
+        print(f"❌ Silero TTS: {e}")
+        return None
+
 # === НОРМАЛИЗАЦИЯ ===
 def normalize_query(text):
     corrections = {
@@ -111,7 +136,7 @@ def normalize_query(text):
         print(f"🔧 Нормализация: '{text}' → '{normalized}'")
     return normalized
 
-# === ПАРСИНГ САЙТОВ (телефоны, адреса, цены) ===
+# === ПАРСИНГ САЙТОВ ===
 def parse_site_for_info(url):
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -153,16 +178,32 @@ def parse_site_for_info(url):
 
 # === VISION (РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ ЧЕРЕЗ GROQ) ===
 def describe_image_with_groq(image_data):
-    """Отправляет изображение в Groq Vision и получает описание"""
+    """Отправляет изображение в Groq Vision с сжатием и конвертацией"""
     try:
         import groq
-        client = groq.Groq(api_key=GROQ_API_KEY)
         
-        # Кодируем изображение в base64
+        # Конвертируем в JPEG и сжимаем
         if isinstance(image_data, bytes):
-            base64_image = base64.b64encode(image_data).decode('utf-8')
+            img = Image.open(io.BytesIO(image_data))
         else:
-            base64_image = image_data
+            img = Image.open(io.BytesIO(image_data.encode('utf-8')))
+        
+        # Сжимаем до 1024px по длинной стороне
+        max_size = 1024
+        if max(img.size) > max_size:
+            ratio = max_size / max(img.size)
+            new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+            img = img.resize(new_size, Image.Resampling.LANCZOS)
+        
+        # Конвертируем в JPEG с качеством 85%
+        buffer = io.BytesIO()
+        img.convert('RGB').save(buffer, format='JPEG', quality=85)
+        compressed_data = buffer.getvalue()
+        
+        # Кодируем в base64
+        base64_image = base64.b64encode(compressed_data).decode('utf-8')
+        
+        client = groq.Groq(api_key=GROQ_API_KEY)
         
         response = client.chat.completions.create(
             model="llama-3.2-90b-vision-preview",
@@ -170,7 +211,7 @@ def describe_image_with_groq(image_data):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Опиши, что ты видишь на этой картинке. Если там есть текст, тоже напиши его. Ответ дай на русском, кратко, но с деталями."},
+                        {"type": "text", "text": "Опиши, что ты видишь на этой картинке. Если там есть текст, напиши его. Ответ дай на русском, кратко, но с деталями."},
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
                     ]
                 }
@@ -185,19 +226,32 @@ def describe_image_with_groq(image_data):
 
 # === OCR (РАСПОЗНАВАНИЕ ТЕКСТА С КАРТИНКИ ЧЕРЕЗ YANDEX) ===
 def ocr_yandex(image_data):
-    """Распознаёт текст с картинки через Yandex Vision OCR"""
+    """Распознаёт текст с картинки через Yandex Vision OCR с сжатием"""
     if not YANDEX_API_KEY:
         print("❌ YANDEX_API_KEY не найден для OCR")
         return None
     try:
+        # Конвертируем и сжимаем
+        if isinstance(image_data, bytes):
+            img = Image.open(io.BytesIO(image_data))
+        else:
+            img = Image.open(io.BytesIO(image_data.encode('utf-8')))
+        
+        # Сжимаем до 2048px
+        max_size = 2048
+        if max(img.size) > max_size:
+            ratio = max_size / max(img.size)
+            new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+            img = img.resize(new_size, Image.Resampling.LANCZOS)
+        
+        buffer = io.BytesIO()
+        img.save(buffer, format='JPEG', quality=90)
+        compressed_data = buffer.getvalue()
+        
+        base64_image = base64.b64encode(compressed_data).decode('utf-8')
+        
         url = "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze"
         headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}"}
-        
-        # Конвертируем в base64
-        if isinstance(image_data, bytes):
-            base64_image = base64.b64encode(image_data).decode('utf-8')
-        else:
-            base64_image = image_data
         
         payload = {
             "analyze_specs": [{
@@ -209,15 +263,14 @@ def ocr_yandex(image_data):
         response = requests.post(url, headers=headers, json=payload, timeout=15)
         if response.status_code == 200:
             data = response.json()
-            # Извлекаем текст из ответа
             text_blocks = []
             for result in data.get("results", []):
                 for block in result.get("textDetection", {}).get("blocks", []):
                     for line in block.get("lines", []):
                         text_blocks.append(line.get("text", ""))
-            return "\n".join(text_blocks) if text_blocks else "Текст на картинке не обнаружен"
+            return "\n".join(text_blocks) if text_blocks else None
         else:
-            print(f"❌ Yandex OCR ошибка: {response.status_code}")
+            print(f"❌ Yandex OCR ошибка: {response.status_code} - {response.text[:200]}")
             return None
     except Exception as e:
         print(f"❌ Yandex OCR: {e}")
@@ -520,6 +573,33 @@ def get_topics(user_id, days=30):
     conn.close()
     return [r[0] for r in rows]
 
+def get_all_topics(user_id):
+    """Возвращает все темы, которые обсуждал пользователь (без ограничения по времени)"""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT topic, COUNT(*) as cnt FROM topics WHERE user_id = ? GROUP BY topic ORDER BY cnt DESC", (user_id,))
+    rows = c.fetchall()
+    conn.close()
+    return [row[0] for row in rows]
+
+def get_user_topics_summary(user_id):
+    """Возвращает краткую выжимку тем, которые обсуждал пользователь (все темы)"""
+    topics = get_all_topics(user_id)
+    if not topics:
+        return None
+    
+    # Убираем дубликаты и показываем топ-10
+    topic_counts = {}
+    for t in topics:
+        topic_counts[t] = topic_counts.get(t, 0) + 1
+    
+    sorted_topics = sorted(topic_counts.items(), key=lambda x: x[1], reverse=True)
+    top_topics = [t[0] for t in sorted_topics[:10]]
+    
+    if top_topics:
+        return f"📚 Я помню, что мы обсуждали: {', '.join(top_topics)}. Спрашивай, если хочешь что-то уточнить!"
+    return None
+
 def save_memory(user_id, key, value):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -535,25 +615,6 @@ def get_memory(user_id, key):
     row = c.fetchone()
     conn.close()
     return row[0] if row else None
-
-# === ВЕЧНАЯ ПАМЯТЬ: ПОЛУЧАЕМ ТЕМЫ ИЗ ПРОШЛЫХ ДИАЛОГОВ ===
-def get_user_topics_summary(user_id):
-    """Возвращает краткую выжимку тем, которые обсуждал пользователь"""
-    topics = get_topics(user_id, days=365)  # за последний год
-    if not topics:
-        return None
-    
-    # Убираем дубликаты и сортируем по частоте
-    topic_counts = {}
-    for t in topics:
-        topic_counts[t] = topic_counts.get(t, 0) + 1
-    
-    sorted_topics = sorted(topic_counts.items(), key=lambda x: x[1], reverse=True)
-    top_topics = [t[0] for t in sorted_topics[:5]]
-    
-    if top_topics:
-        return f"📚 Из прошлых диалогов я помню, что мы обсуждали: {', '.join(top_topics)}."
-    return None
 
 # === ЗАДАЧИ ===
 def add_task(user_id, text, priority="normal", due_date=None):
@@ -651,7 +712,7 @@ def get_timezone_offset(city_name):
             return offset
     return 3
 
-# === YANDEX TTS (ГОЛОСОВЫЕ ОТВЕТЫ) ===
+# === YANDEX TTS ===
 def yandex_tts(text):
     if not YANDEX_API_KEY:
         print("❌ YANDEX_API_KEY не найден для TTS")
@@ -681,22 +742,24 @@ def yandex_tts(text):
         return None
 
 async def send_voice_reply(chat_id, text):
-    if not YANDEX_API_KEY:
-        print("❌ YANDEX_API_KEY отсутствует, голос не отправлен")
-        return False
-    
     if not text or len(text.strip()) == 0:
-        print("⚠️ Текст пустой, голос не отправлен")
         return False
     
-    # Обрезаем слишком длинный текст (500 символов)
     if len(text) > 500:
         text = text[:500]
-        print("⚠️ Текст обрезан до 500 символов")
     
-    print(f"🎤 Генерирую голос для: {text[:50]}...")
+    audio_path = None
     
-    audio_path = yandex_tts(text)
+    # Пробуем Яндекс TTS
+    if YANDEX_API_KEY:
+        print(f"🎤 Пробую Яндекс TTS...")
+        audio_path = yandex_tts(text)
+    
+    # Если Яндекс не сработал — пробуем Silero
+    if not audio_path:
+        print(f"🎤 Пробую Silero TTS...")
+        audio_path = silero_tts(text)
+    
     if not audio_path:
         print("❌ Не удалось синтезировать голос")
         return False
@@ -708,17 +771,12 @@ async def send_voice_reply(chat_id, text):
             data = {'chat_id': chat_id}
             response = requests.post(url, files=files, data=data, timeout=30)
         os.unlink(audio_path)
-        if response.status_code == 200:
-            print("✅ Голосовое сообщение отправлено!")
-            return True
-        else:
-            print(f"❌ Ошибка отправки голоса: {response.status_code}")
-            return False
+        return response.status_code == 200
     except Exception as e:
         print(f"❌ Отправка голоса: {e}")
         return False
 
-# === ПОИСК С ПАРСИНГОМ ===
+# === ПОИСК ===
 async def search_duckduckgo(query):
     try:
         url = f"https://html.duckduckgo.com/html/?q={query}"
@@ -1027,11 +1085,22 @@ async def process_message(request: Request, user_id, text):
     normalized_text = normalize_query(text)
     search_text = normalized_text if normalized_text != lower else lower
 
-    # === ВЕЧНАЯ ПАМЯТЬ: ПРОВЕРЯЕМ, ЕСТЬ ЛИ ПРОШЛЫЕ ТЕМЫ ===
-    memory_check = get_user_topics_summary(user_id)
-    if memory_check and get_message_count(user_id) <= 2:
-        # Если у пользователя мало сообщений, напоминаем о прошлых темах
-        save_message(user_id, "assistant", memory_check)
+    # === ЕСЛИ ЭТО ПЕРВОЕ СООБЩЕНИЕ ПОСЛЕ ПЕРЕЗАПУСКА ===
+    msg_count = get_message_count(user_id)
+    if msg_count <= 2:  # если это первое или второе сообщение
+        topics_summary = get_user_topics_summary(user_id)
+        if topics_summary:
+            # Отправляем напоминание о прошлых темах
+            send_message(user_id, topics_summary)
+            save_message(user_id, "assistant", topics_summary)
+            print(f"📚 Отправлено напоминание о прошлых темах для {user_id}")
+        else:
+            # Если тем нет — приветствие
+            welcome_msg = "👋 Привет! Расскажи, чем я могу помочь? Я умею искать информацию в интернете, находить телефоны и адреса, распознавать текст на фото и отвечать голосом."
+            send_message(user_id, welcome_msg)
+            save_message(user_id, "assistant", welcome_msg)
+            print(f"👋 Отправлено приветствие для {user_id}")
+        # Продолжаем обработку, чтобы бот не "завис" на приветствии
 
     # === ОПРЕДЕЛЕНИЕ ГОРОДА ===
     city_info = get_user_city(user_id)
@@ -1069,7 +1138,7 @@ async def process_message(request: Request, user_id, text):
             c.execute("UPDATE users SET city_asked = 1 WHERE user_id = ?", (user_id,))
             conn.commit()
             conn.close()
-            return {"reply": "Привет! Напиши, из какого ты города, чтобы я показывал точное время и погоду. Например: Мой город Белово"}
+            return {"reply": "🌍 Напиши, из какого ты города, чтобы я показывал точное время и погоду. Например: Мой город Белово"}
 
     if user_city:
         offset_hours = get_timezone_offset(user_city)
