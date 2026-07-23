@@ -178,29 +178,24 @@ def parse_site_for_info(url):
 
 # === VISION (РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ ЧЕРЕЗ GROQ) ===
 def describe_image_with_groq(image_data):
-    """Отправляет изображение в Groq Vision с сжатием и конвертацией"""
     try:
         import groq
         
-        # Конвертируем в JPEG и сжимаем
         if isinstance(image_data, bytes):
             img = Image.open(io.BytesIO(image_data))
         else:
             img = Image.open(io.BytesIO(image_data.encode('utf-8')))
         
-        # Сжимаем до 1024px по длинной стороне
         max_size = 1024
         if max(img.size) > max_size:
             ratio = max_size / max(img.size)
             new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
             img = img.resize(new_size, Image.Resampling.LANCZOS)
         
-        # Конвертируем в JPEG с качеством 85%
         buffer = io.BytesIO()
         img.convert('RGB').save(buffer, format='JPEG', quality=85)
         compressed_data = buffer.getvalue()
         
-        # Кодируем в base64
         base64_image = base64.b64encode(compressed_data).decode('utf-8')
         
         client = groq.Groq(api_key=GROQ_API_KEY)
@@ -226,18 +221,15 @@ def describe_image_with_groq(image_data):
 
 # === OCR (РАСПОЗНАВАНИЕ ТЕКСТА С КАРТИНКИ ЧЕРЕЗ YANDEX) ===
 def ocr_yandex(image_data):
-    """Распознаёт текст с картинки через Yandex Vision OCR с сжатием"""
     if not YANDEX_API_KEY:
         print("❌ YANDEX_API_KEY не найден для OCR")
         return None
     try:
-        # Конвертируем и сжимаем
         if isinstance(image_data, bytes):
             img = Image.open(io.BytesIO(image_data))
         else:
             img = Image.open(io.BytesIO(image_data.encode('utf-8')))
         
-        # Сжимаем до 2048px
         max_size = 2048
         if max(img.size) > max_size:
             ratio = max_size / max(img.size)
@@ -270,11 +262,21 @@ def ocr_yandex(image_data):
                         text_blocks.append(line.get("text", ""))
             return "\n".join(text_blocks) if text_blocks else None
         else:
-            print(f"❌ Yandex OCR ошибка: {response.status_code} - {response.text[:200]}")
+            print(f"❌ Yandex OCR ошибка: {response.status_code}")
             return None
     except Exception as e:
         print(f"❌ Yandex OCR: {e}")
         return None
+
+# === ОТПРАВКА СТАТУСА "ПЕЧАТАЕТ..." ===
+def send_typing(chat_id):
+    """Отправляет статус 'печатает...' в Telegram"""
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction"
+        data = {"chat_id": chat_id, "action": "typing"}
+        requests.post(url, json=data, timeout=5)
+    except Exception as e:
+        print(f"❌ Ошибка отправки typing: {e}")
 
 # === БЭКАП ===
 def send_backup_email():
@@ -588,7 +590,6 @@ def get_user_topics_summary(user_id):
     if not topics:
         return None
     
-    # Убираем дубликаты и показываем топ-10
     topic_counts = {}
     for t in topics:
         topic_counts[t] = topic_counts.get(t, 0) + 1
@@ -742,23 +743,24 @@ def yandex_tts(text):
         return None
 
 async def send_voice_reply(chat_id, text):
+    """Отправляет голосовое сообщение (только основную мысль, не весь список)"""
     if not text or len(text.strip()) == 0:
         return False
     
-    if len(text) > 500:
-        text = text[:500]
+    # БЕРЁМ ТОЛЬКО ПЕРВОЕ ПРЕДЛОЖЕНИЕ (ОСНОВНУЮ МЫСЛЬ) ДЛЯ ГОЛОСА
+    voice_text = text.split('\n')[0] if '\n' in text else text
+    if len(voice_text) > 300:
+        voice_text = voice_text[:300] + "..."
     
     audio_path = None
     
-    # Пробуем Яндекс TTS
     if YANDEX_API_KEY:
         print(f"🎤 Пробую Яндекс TTS...")
-        audio_path = yandex_tts(text)
+        audio_path = yandex_tts(voice_text)
     
-    # Если Яндекс не сработал — пробуем Silero
     if not audio_path:
         print(f"🎤 Пробую Silero TTS...")
-        audio_path = silero_tts(text)
+        audio_path = silero_tts(voice_text)
     
     if not audio_path:
         print("❌ Не удалось синтезировать голос")
@@ -937,6 +939,52 @@ def create_summary(user_id, messages):
         print(f"❌ Ошибка выжимки: {e}")
         return None
 
+# === ФОРМАТИРОВАНИЕ ОТВЕТОВ ===
+def format_response(text, query):
+    """Форматирует ответ: жирный заголовок, пункты с галочками, ссылки"""
+    
+    # Если текст уже содержит форматирование — возвращаем как есть
+    if '**' in text or '✅' in text or '👉' in text:
+        return text
+    
+    lines = text.split('\n')
+    formatted_lines = []
+    first_line = True
+    
+    # Определяем тип запроса для эмодзи
+    is_phone_query = any(w in query.lower() for w in ["телефон", "номер", "контакт", "позвонить"])
+    is_address_query = any(w in query.lower() for w in ["адрес", "найти", "где", "расположен"])
+    is_news_query = any(w in query.lower() for w in ["новости", "события", "произошло"])
+    is_image_query = any(w in query.lower() for w in ["картинк", "фото", "изображен"])
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        
+        # Первая строка — жирный заголовок
+        if first_line:
+            formatted_lines.append(f"**{line}**")
+            first_line = False
+            continue
+        
+        # Строки, начинающиеся с цифр или маркеров — пункты
+        if re.match(r'^[\d\-•]|^-', line):
+            # Убираем маркеры и добавляем галочку или стрелку
+            clean_line = re.sub(r'^[\d\-•]\s*', '', line)
+            if is_phone_query or is_address_query:
+                formatted_lines.append(f"✅ {clean_line}")
+            elif is_news_query:
+                formatted_lines.append(f"👉 {clean_line}")
+            elif is_image_query:
+                formatted_lines.append(f"🖼️ {clean_line}")
+            else:
+                formatted_lines.append(f"• {clean_line}")
+        else:
+            formatted_lines.append(line)
+    
+    return '\n'.join(formatted_lines)
+
 # === ТАРИФЫ ===
 TARIFFS = {
     "Sapphire": {"price": 10000, "daily_limit": 100, "model": "deepseek-chat"},
@@ -948,12 +996,20 @@ TEST_USERS = ["test_user", "web_user"]
 AURA_PROMPT = """Ты — AURA, помощник в Telegram.
 
 ПРАВИЛА ОТВЕТОВ:
-1. Отвечай КОРОТКО — максимум 2-3 предложения.
-2. НЕ ИСПОЛЬЗУЙ звёздочки (*), решётки (#), подчёркивания (_), дефисы (-) для форматирования.
-3. Пиши ПРОСТЫМ ТЕКСТОМ, как обычный человек в чате.
-4. Ссылки давай ТОЛЬКО если пользователь прямо просит ("дай ссылку", "ссылка на", "покажи ссылку").
-5. Если у тебя нет точного ответа — честно скажи об этом.
-6. Сначала обдумай вопрос, потом отвечай.
+1. Начинай ответ с КОРОТКОЙ ОСНОВНОЙ МЫСЛИ (1 предложение).
+2. Затем давай детали в виде СПИСКА с пунктами.
+3. НЕ ИСПОЛЬЗУЙ звёздочки (*), решётки (#), подчёркивания (_), дефисы (-) для форматирования.
+4. Для выделения используй ТОЛЬКО **жирный текст** (в начале ответа).
+5. Для пунктов используй эмодзи: ✅ (хорошо), ❌ (плохо), 👉 (важно).
+6. Пиши ПРОСТЫМ ТЕКСТОМ, как обычный человек в чате.
+7. Ссылки давай ТОЛЬКО если пользователь прямо просит.
+
+Пример правильного ответа:
+**Вот несколько парикмахерских в Инском с телефонами и адресами.**
+
+✅ Легенда — ул. Пугачёва, 4. Телефон: +7 (905) 960-42-58
+✅ Престиж — ул. Инская, 9а. Телефон: +7 (908) 952-55-98
+✅ Восток — ул. Инская, 14. Телефон: +7 (909) 519-58-00
 
 Ты понятный, живой и полезный помощник.
 """
@@ -972,6 +1028,9 @@ async def webhook(request: Request):
         text = None
         image_data = None
         
+        # === ОТПРАВЛЯЕМ СТАТУС "ПЕЧАТАЕТ..." ===
+        send_typing(chat_id)
+        
         # === ОБРАБОТКА ГОЛОСА ===
         if "voice" in message:
             file_id = message["voice"]["file_id"]
@@ -982,15 +1041,13 @@ async def webhook(request: Request):
                 file_path = file_data["result"]["file_path"]
                 audio_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
                 text = transcribe_audio_with_groq(audio_url)
-                if text:
-                    send_message(chat_id, f"🎤 Я услышал: \"{text}\"")
-                else:
+                if not text:
                     send_message(chat_id, "⚠️ Не удалось распознать голос")
                     return JSONResponse({"ok": True})
+                # НЕ отправляем эхо "🎤 Я услышал..."
         
         # === ОБРАБОТКА ИЗОБРАЖЕНИЙ ===
         elif "photo" in message:
-            # Берём самое большое фото (последнее в списке)
             photo = message["photo"][-1]
             file_id = photo["file_id"]
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
@@ -1004,25 +1061,21 @@ async def webhook(request: Request):
                     image_data = image_response.content
                     send_message(chat_id, "🖼️ Получил изображение, обрабатываю...")
                     
-                    # Пытаемся распознать через Vision (умное описание)
                     vision_result = describe_image_with_groq(image_data)
-                    
-                    # Пытаемся распознать текст через OCR
                     ocr_result = ocr_yandex(image_data)
                     
-                    # Формируем ответ
-                    result_text = "📸 Результаты анализа изображения:\n\n"
+                    result_text = "**📸 Результаты анализа изображения:**\n\n"
                     if vision_result:
-                        result_text += f"🔍 **Описание:**\n{vision_result}\n\n"
+                        result_text += f"**Описание:**\n{vision_result}\n\n"
                     else:
-                        result_text += "⚠️ Не удалось получить описание изображения.\n\n"
+                        result_text += "❌ Не удалось получить описание изображения.\n\n"
                     
                     if ocr_result and ocr_result != "Текст на картинке не обнаружен":
-                        result_text += f"📝 **Распознанный текст:**\n{ocr_result}"
+                        result_text += f"**📝 Распознанный текст:**\n{ocr_result}"
                     elif ocr_result == "Текст на картинке не обнаружен":
                         result_text += "📝 Текст на картинке не обнаружен."
                     else:
-                        result_text += "⚠️ Не удалось распознать текст на изображении."
+                        result_text += "❌ Не удалось распознать текст на изображении."
                     
                     send_message(chat_id, result_text)
                     return JSONResponse({"ok": True})
@@ -1036,7 +1089,12 @@ async def webhook(request: Request):
         
         if text:
             result = await process_message(request, chat_id, text)
-            send_message(chat_id, result["reply"])
+            
+            # Отправляем текст с форматированием
+            formatted_reply = format_response(result["reply"], text)
+            send_message(chat_id, formatted_reply)
+            
+            # Отправляем голос (только основную мысль)
             if YANDEX_API_KEY and result["reply"]:
                 await send_voice_reply(chat_id, result["reply"])
                 
@@ -1048,7 +1106,7 @@ async def webhook(request: Request):
 def send_message(chat_id, text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {"chat_id": chat_id, "text": text}
+        data = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
         response = requests.post(url, json=data, timeout=30)
         return response.status_code == 200
     except Exception as e:
@@ -1087,20 +1145,17 @@ async def process_message(request: Request, user_id, text):
 
     # === ЕСЛИ ЭТО ПЕРВОЕ СООБЩЕНИЕ ПОСЛЕ ПЕРЕЗАПУСКА ===
     msg_count = get_message_count(user_id)
-    if msg_count <= 2:  # если это первое или второе сообщение
+    if msg_count <= 2:
         topics_summary = get_user_topics_summary(user_id)
         if topics_summary:
-            # Отправляем напоминание о прошлых темах
             send_message(user_id, topics_summary)
             save_message(user_id, "assistant", topics_summary)
             print(f"📚 Отправлено напоминание о прошлых темах для {user_id}")
         else:
-            # Если тем нет — приветствие
-            welcome_msg = "👋 Привет! Расскажи, чем я могу помочь? Я умею искать информацию в интернете, находить телефоны и адреса, распознавать текст на фото и отвечать голосом."
+            welcome_msg = "**👋 Привет!** Расскажи, чем я могу помочь?\n\n✅ Ищу информацию в интернете\n✅ Нахожу телефоны и адреса\n✅ Распознаю текст на фото\n✅ Отвечаю голосом"
             send_message(user_id, welcome_msg)
             save_message(user_id, "assistant", welcome_msg)
             print(f"👋 Отправлено приветствие для {user_id}")
-        # Продолжаем обработку, чтобы бот не "завис" на приветствии
 
     # === ОПРЕДЕЛЕНИЕ ГОРОДА ===
     city_info = get_user_city(user_id)
@@ -1185,18 +1240,18 @@ async def process_message(request: Request, user_id, text):
             task_id = add_task(user_id, parts[1])
             reply = f"✅ Задача добавлена! ID: {task_id}"
         else:
-            reply = "Формат: /задача [текст]"
+            reply = "**Формат:** /задача [текст]"
     
     elif "/задачи" in lower or text.startswith("/tasks"):
         tasks = get_tasks(user_id, "active")
         if tasks:
-            lines = ["Твои задачи:"]
+            lines = ["**📋 Твои задачи:**"]
             for task in tasks:
                 task_id, task_text, priority, status, due_date = task
-                lines.append(f"#{task_id} {task_text}")
+                lines.append(f"✅ #{task_id} {task_text}")
             reply = "\n".join(lines)
         else:
-            reply = "Нет активных задач"
+            reply = "🎉 Нет активных задач!"
     
     elif "/выполнить" in lower or text.startswith("/done"):
         parts = text.split(" ")
@@ -1204,13 +1259,13 @@ async def process_message(request: Request, user_id, text):
             try:
                 task_id = int(parts[1])
                 if complete_task(user_id, task_id):
-                    reply = f"✅ Задача #{task_id} выполнена!"
+                    reply = f"✅ Задача #{task_id} выполнена! 🎉"
                 else:
                     reply = f"❌ Задача #{task_id} не найдена"
             except ValueError:
-                reply = "❌ Неверный ID"
+                reply = "❌ Неверный ID. Используй: /выполнить [ID]"
         else:
-            reply = "Формат: /выполнить [ID]"
+            reply = "**Формат:** /выполнить [ID]"
     
     elif "/удалить" in lower or text.startswith("/del"):
         parts = text.split(" ")
@@ -1222,9 +1277,9 @@ async def process_message(request: Request, user_id, text):
                 else:
                     reply = f"❌ Задача #{task_id} не найдена"
             except ValueError:
-                reply = "❌ Неверный ID"
+                reply = "❌ Неверный ID. Используй: /удалить [ID]"
         else:
-            reply = "Формат: /удалить [ID]"
+            reply = "**Формат:** /удалить [ID]"
     
     elif "/напомни" in lower:
         parts = text.split(" ", 3)
@@ -1240,33 +1295,41 @@ async def process_message(request: Request, user_id, text):
             except:
                 reply = "❌ Неверный формат. Используй: /напомни ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ"
         else:
-            reply = "Формат: /напомни ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ"
+            reply = "**Формат:** /напомни ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ"
     
     elif "/моинапоминания" in lower:
         reminders = get_reminders(user_id)
         if reminders:
-            lines = ["Твои напоминания:"]
+            lines = ["**⏰ Твои напоминания:**"]
             for r in reminders:
-                lines.append(f"{r[0]} ({r[1]} в {r[2]})")
+                lines.append(f"✅ {r[0]} ({r[1]} в {r[2]})")
             reply = "\n".join(lines)
         else:
-            reply = "Нет напоминаний"
+            reply = "📭 Нет напоминаний."
     
     elif "/помощь" in lower or "/help" in lower:
-        reply = """Помощь AURA:
+        reply = """**🤖 AURA — Помощь**
 
-/задача [текст] - добавить задачу
-/задачи - список задач
-/выполнить [ID] - отметить задачу
-/удалить [ID] - удалить задачу
-/напомни ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ - напоминание
-/моинапоминания - список напоминаний
+**📋 Задачи:**
+/задача [текст] — добавить задачу
+/задачи — показать все задачи
+/выполнить [ID] — отметить как выполненную
+/удалить [ID] — удалить задачу
 
-📸 Просто отправь фото - я опишу его и распознаю текст!
-🎤 Отправь голосовое - я услышу и отвечу!
-🌍 Скажи "Мой город ..." - я запомню время!
+**⏰ Напоминания:**
+/напомни ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ — создать напоминание
+/моинапоминания — показать все напоминания
 
-Просто пиши вопросы - я отвечу!"""
+**📸 Фото:**
+Просто отправь фото — я опишу его и распознаю текст!
+
+**🎤 Голос:**
+Отправь голосовое — я услышу и отвечу!
+
+**🌍 Город:**
+Скажи "Мой город ..." — я запомню время!
+
+❓ Просто пиши вопросы — я отвечу! 😊"""
     
     else:
         user_name = get_memory(user_id, "name")
