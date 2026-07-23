@@ -569,16 +569,10 @@ def get_timezone_offset(city_name):
             return offset
     return 3
 
-# === YANDEX TTS (С ОТЛАДКОЙ) ===
+# === YANDEX TTS ===
 def yandex_tts(text):
-    """Синтез речи через Yandex SpeechKit с отладкой"""
-    
     if not YANDEX_API_KEY:
-        print("❌ YANDEX_API_KEY не найден")
         return None
-    
-    print(f"🔊 Запрос к Яндекс TTS: {text[:50]}...")
-    
     try:
         url = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
         headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}"}
@@ -591,57 +585,32 @@ def yandex_tts(text):
             "format": "lpcm",
             "sampleRateHertz": 48000
         }
-        
         response = requests.post(url, headers=headers, data=data, timeout=10)
-        
-        print(f"📡 Статус Яндекс TTS: {response.status_code}")
-        
         if response.status_code == 200:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
                 tmp.write(response.content)
-                print(f"✅ Аудио сохранено: {tmp.name}")
                 return tmp.name
-        else:
-            print(f"❌ Яндекс TTS ошибка: {response.status_code} - {response.text[:200]}")
-            return None
+        return None
     except Exception as e:
-        print(f"❌ Яндекс TTS исключение: {e}")
+        print(f"❌ Yandex TTS: {e}")
         return None
 
 async def send_voice_reply(chat_id, text):
-    """Отправляет голосовое сообщение в Telegram с отладкой"""
-    
     if not YANDEX_API_KEY:
-        print("❌ Ошибка: YANDEX_API_KEY не найден в .env")
         return False
-    
-    print(f"🎤 Пытаюсь озвучить: {text[:50]}...")
-    
     audio_path = yandex_tts(text)
-    
     if not audio_path:
-        print("❌ Ошибка: yandex_tts вернул None (не удалось синтезировать голос)")
         return False
-    
-    print(f"✅ Аудиофайл создан: {audio_path}")
-    
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
         with open(audio_path, 'rb') as f:
             files = {'audio': f}
             data = {'chat_id': chat_id}
             response = requests.post(url, files=files, data=data, timeout=30)
-        
         os.unlink(audio_path)
-        
-        if response.status_code == 200:
-            print("✅ Голосовое сообщение отправлено!")
-            return True
-        else:
-            print(f"❌ Ошибка отправки: {response.status_code} - {response.text}")
-            return False
+        return response.status_code == 200
     except Exception as e:
-        print(f"❌ Ошибка при отправке голоса: {e}")
+        print(f"❌ Отправка голоса: {e}")
         return False
 
 # === ПОИСК ===
