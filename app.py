@@ -22,6 +22,7 @@ from email.mime.base import MIMEBase
 from email import encoders
 from email.mime.text import MIMEText
 from dotenv import load_dotenv
+from bs4 import BeautifulSoup
 
 # === ЗАГРУЗКА КЛЮЧЕЙ ИЗ .env ===
 load_dotenv()
@@ -68,13 +69,9 @@ if TavilyClient and TAVILY_API_KEY:
     except Exception as e:
         print(f"⚠️ Tavily: {e}")
 
-# === ФУНКЦИЯ НОРМАЛИЗАЦИИ ЗАПРОСОВ (РАСПОЗНАВАНИЕ РЕЧИ) ===
+# === ФУНКЦИЯ НОРМАЛИЗАЦИИ ===
 def normalize_query(text):
-    """Исправляет опечатки, понимает синонимы и улучшает распознавание"""
-    
-    # Словарь исправлений популярных ошибок
     corrections = {
-        # Бренды и компании
         r"валдберис": "Wildberries",
         r"валберис": "Wildberries",
         r"вальдберис": "Wildberries",
@@ -82,64 +79,94 @@ def normalize_query(text):
         r"wildberies": "Wildberries",
         r"озон": "Ozon",
         r"ozon": "Ozon",
-        
-        # Поиск картинок
         r"котик": "кот",
         r"котики": "коты",
-        r"котят": "коты",
         r"картинк": "картинки",
         r"фотограф": "фото",
         r"изображен": "изображения",
-        r"рисунк": "рисунки",
-        
-        # Время и дата
         r"сколька": "сколько",
         r"скольк": "сколько",
         r"который час": "сколько время",
         r"времян": "время",
-        r"време": "время",
-        
-        # Погода
         r"пагода": "погода",
         r"пагоду": "погоду",
         r"темпертур": "температура",
-        r"тепература": "температура",
-        
-        # Новости
         r"нависти": "новости",
         r"навасти": "новости",
         r"свежи": "свежие",
         r"актуальн": "актуальные",
-        r"последние": "свежие",
-        
-        # Поиск
-        r"найди": "найди",
-        r"поищи": "поищи",
-        r"узнай": "узнай",
-        r"найти": "найди",
-        
-        # Клиника
         r"клиник": "клиника",
-        r"больниц": "больница",
-        r"поликлиник": "поликлиника",
-        
-        # Сайты
-        r"сайт": "сайт",
-        r"страниц": "страница",
+        r"полихмакер": "парикмахерская",
+        r"поліхмакер": "парикмахерская",
+        r"палихмакер": "парикмахерская",
+        r"инской": "Инской",
     }
-    
-    # Применяем исправления
     normalized = text.lower()
     for pattern, replacement in corrections.items():
         normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
-    
-    # Если текст изменился — печатаем для отладки
     if normalized != text.lower():
         print(f"🔧 Нормализация: '{text}' → '{normalized}'")
-    
     return normalized
 
-# === ФУНКЦИЯ ОТПРАВКИ БЭКАПА НА ПОЧТУ ===
+# === ФУНКЦИЯ ДЛЯ ПАРСИНГА САЙТОВ (ИЩЕТ ТЕЛЕФОНЫ, АДРЕСА, ЦЕНЫ) ===
+def parse_site_for_info(url):
+    """Открывает сайт и ищет телефоны, адреса, цены, email"""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=15)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Удаляем скрипты и стили
+        for script in soup(["script", "style"]):
+            script.decompose()
+        
+        text = soup.get_text(separator="\n", strip=True)
+        
+        result = {}
+        
+        # Поиск телефонов (формат +7 XXX XXX XX XX и 8 XXX XXX XX XX)
+        phone_patterns = [
+            r'\+7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}',
+            r'8\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}',
+            r'7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}',
+        ]
+        phones = []
+        for pattern in phone_patterns:
+            phones.extend(re.findall(pattern, text))
+        
+        # Очищаем от лишних пробелов
+        phones = [re.sub(r'\s+', ' ', p).strip() for p in phones]
+        phones = list(set(phones))[:5]  # не больше 5 номеров
+        
+        if phones:
+            result["phones"] = phones
+        
+        # Поиск email
+        email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+        emails = list(set(re.findall(email_pattern, text)))[:3]
+        if emails:
+            result["emails"] = emails
+        
+        # Поиск адресов (ищем слова "ул.", "проспект", "переулок" и т.д.)
+        address_pattern = r'(?:ул\.|улица|проспект|пр\.|переулок|пер\.|площадь|пл\.)\s+[А-Яа-я0-9\-\.\s,]+'
+        addresses = list(set(re.findall(address_pattern, text)))[:3]
+        if addresses:
+            result["addresses"] = addresses
+        
+        # Поиск цен (ищем числа с "₽", "руб", "$")
+        price_pattern = r'(\d+[\s,.]*\d*)\s*(?:₽|руб|рублей|\$|€)'
+        prices = list(set(re.findall(price_pattern, text)))[:3]
+        if prices:
+            result["prices"] = prices
+        
+        return result
+    except Exception as e:
+        print(f"❌ Ошибка парсинга: {e}")
+        return None
+
+# === ФУНКЦИЯ ОТПРАВКИ БЭКАПА ===
 def send_backup_email():
     try:
         if not os.path.exists(DB_NAME):
@@ -535,7 +562,7 @@ def get_city_by_ip(ip):
         pass
     return None
 
-# === ОПРЕДЕЛЕНИЕ ЧАСОВОГО ПОЯСА ПО ГОРОДУ ===
+# === ОПРЕДЕЛЕНИЕ ЧАСОВОГО ПОЯСА ===
 def get_timezone_offset(city_name):
     timezones = {
         "белово": 7,
@@ -544,6 +571,7 @@ def get_timezone_offset(city_name):
         "прокопьевск": 7,
         "киселёвск": 7,
         "междуреченск": 7,
+        "инской": 7,
         "москва": 3,
         "санкт-петербург": 3,
         "екатеринбург": 5,
@@ -613,7 +641,7 @@ async def send_voice_reply(chat_id, text):
         print(f"❌ Отправка голоса: {e}")
         return False
 
-# === ПОИСК ===
+# === ПОИСК С ПАРСИНГОМ САЙТОВ ===
 async def search_duckduckgo(query):
     try:
         from bs4 import BeautifulSoup
@@ -631,49 +659,110 @@ async def search_duckduckgo(query):
                     title_text = title.text.strip()
                     snippet = text_elem.text.strip()[:300]
                     url_text = link.text.strip()
-                    results.append(f"{title_text}\n{snippet}...\n{url_text}")
-        return "\n\n---\n\n".join(results) if results else None
+                    results.append({
+                        "title": title_text,
+                        "snippet": snippet,
+                        "url": url_text
+                    })
+        return results if results else None
     except Exception as e:
         print(f"❌ DuckDuckGo: {e}")
         return None
 
 async def search_web(query, need_links=False, is_image_search=False):
-    """Поиск с учётом контекста запроса"""
+    """Поиск с парсингом сайтов для получения детальной информации"""
     
-    # Если это поиск картинок — сразу даём ссылку на Яндекс.Картинки
+    # Если это поиск картинок — сразу даём ссылку
     if is_image_search:
         encoded_query = query.replace(" ", "%20")
         return f"Вот ссылка на картинки по запросу '{query}':\nhttps://yandex.ru/images/search?text={encoded_query}"
     
     # Обычный поиск через Tavily
-    if not tavily_client:
-        return await search_duckduckgo(query)
+    if tavily_client:
+        try:
+            response = tavily_client.search(
+                query=query,
+                search_depth="advanced",
+                max_results=5,
+                include_answer=True,
+                include_images=False
+            )
+            
+            # Собираем результаты
+            results = []
+            urls = []
+            
+            if response.get('answer'):
+                results.append(response['answer'])
+            
+            if response.get('results'):
+                for r in response['results'][:5]:
+                    title = r.get('title', '')
+                    url = r.get('url', '')
+                    content = r.get('content', '')[:300]
+                    if title and url:
+                        urls.append(url)
+                        if need_links:
+                            results.append(f"{title}\n{content}...\nСсылка: {url}")
+                        else:
+                            results.append(f"{title}\n{content}...")
+            
+            # Если нужно найти телефоны или адреса — парсим сайты
+            if "телефон" in query.lower() or "адрес" in query.lower() or "номер" in query.lower() or "контакт" in query.lower():
+                print("📞 Ищем контакты через парсинг сайтов...")
+                parsed_info = []
+                for url in urls[:3]:  # парсим не больше 3 сайтов
+                    info = parse_site_for_info(url)
+                    if info:
+                        info_text = f"🔗 {url}\n"
+                        if info.get("phones"):
+                            info_text += f"📞 Телефоны: {', '.join(info['phones'])}\n"
+                        if info.get("addresses"):
+                            info_text += f"📍 Адреса: {', '.join(info['addresses'])}\n"
+                        if info.get("emails"):
+                            info_text += f"✉️ Email: {', '.join(info['emails'])}\n"
+                        if info.get("prices"):
+                            info_text += f"💰 Цены: {', '.join(info['prices'])}\n"
+                        parsed_info.append(info_text)
+                
+                if parsed_info:
+                    results.append("\n\n--- ДЕТАЛЬНАЯ ИНФОРМАЦИЯ СО СТРАНИЦ ---\n" + "\n".join(parsed_info))
+            
+            return "\n\n---\n\n".join(results) if results else None
+            
+        except Exception as e:
+            print(f"❌ Tavily: {e}")
     
-    try:
-        response = tavily_client.search(
-            query=query,
-            search_depth="advanced",
-            max_results=5,
-            include_answer=True,
-            include_images=False
-        )
+    # Если Tavily не работает — пробуем DuckDuckGo
+    duck_results = await search_duckduckgo(query)
+    if duck_results:
         results = []
-        if response.get('answer'):
-            results.append(f"{response['answer']}")
-        if response.get('results'):
-            for r in response['results'][:5]:
-                title = r.get('title', '')
-                url = r.get('url', '')
-                content = r.get('content', '')[:300]
-                if title and url:
-                    if need_links:
-                        results.append(f"{title}\n{content}...\nСсылка: {url}")
-                    else:
-                        results.append(f"{title}\n{content}...")
-        return "\n\n---\n\n".join(results) if results else await search_duckduckgo(query)
-    except Exception as e:
-        print(f"❌ Tavily: {e}")
-        return await search_duckduckgo(query)
+        urls = []
+        for r in duck_results:
+            urls.append(r["url"])
+            if need_links:
+                results.append(f"{r['title']}\n{r['snippet']}...\nСсылка: {r['url']}")
+            else:
+                results.append(f"{r['title']}\n{r['snippet']}...")
+        
+        # Ищем контакты через парсинг
+        if "телефон" in query.lower() or "адрес" in query.lower():
+            parsed_info = []
+            for url in urls[:3]:
+                info = parse_site_for_info(url)
+                if info:
+                    info_text = f"🔗 {url}\n"
+                    if info.get("phones"):
+                        info_text += f"📞 Телефоны: {', '.join(info['phones'])}\n"
+                    if info.get("addresses"):
+                        info_text += f"📍 Адреса: {', '.join(info['addresses'])}\n"
+                    parsed_info.append(info_text)
+            if parsed_info:
+                results.append("\n\n--- ДЕТАЛЬНАЯ ИНФОРМАЦИЯ СО СТРАНИЦ ---\n" + "\n".join(parsed_info))
+        
+        return "\n\n---\n\n".join(results) if results else None
+    
+    return None
 
 # === ГОЛОС ===
 def transcribe_audio_with_groq(audio_url):
@@ -742,7 +831,7 @@ TARIFFS = {
 }
 TEST_USERS = ["test_user", "web_user"]
 
-# === НОВЫЙ ПРОМПТ ===
+# === ПРОМПТ ===
 AURA_PROMPT = """Ты — AURA, помощник в Telegram.
 
 ПРАВИЛА ОТВЕТОВ:
@@ -789,10 +878,8 @@ async def webhook(request: Request):
         if text:
             result = await process_message(request, chat_id, text)
             
-            # Всегда отправляем текст
             send_message(chat_id, result["reply"])
             
-            # Всегда отправляем голос (если есть ключ)
             if YANDEX_API_KEY and result["reply"]:
                 await send_voice_reply(chat_id, result["reply"])
                 
@@ -837,11 +924,8 @@ async def process_message(request: Request, user_id, text):
     if mood != "neutral":
         update_user_mood(user_id, mood)
 
-    # === НОРМАЛИЗАЦИЯ ЗАПРОСА (РАСПОЗНАВАНИЕ ОШИБОК) ===
     lower = text.lower()
     normalized_text = normalize_query(text)
-    
-    # Если текст изменился — сохраняем нормализованную версию для поиска
     search_text = normalized_text if normalized_text != lower else lower
 
     # === ОПРЕДЕЛЕНИЕ ГОРОДА ===
@@ -897,26 +981,20 @@ async def process_message(request: Request, user_id, text):
         current_time_str = current_time.strftime("%H:%M")
         user_city = "Москва"
 
-    # === ПОИСК С УЧЁТОМ КОНТЕКСТА И НОРМАЛИЗАЦИИ ===
+    # === ПОИСК ===
     search_result = None
     
-    # Проверяем, ищет ли пользователь картинки (используем нормализованный текст)
     is_image_search = bool(re.search(r"(?:картинк|фото|изображен|рисунк)", search_text))
+    need_links = bool(re.search(r"(?:дай|покажи|скинь|ссылк|ссылка|link|url)", search_text))
     
-    # Проверяем, нужны ли ссылки (используем нормализованный текст)
-    need_links = bool(re.search(r"(?:дай|покажи|скинь|ссылк|ссылка|link|url)\s*(?:ссылк|ссылку|ссылка|link|url)?", search_text))
-    
-    # Если это поиск картинок — сразу даём ссылку без лишних вопросов
     if is_image_search:
         print(f"🖼️ Поиск картинок: {text}")
         search_result = await search_web(search_text, need_links=True, is_image_search=True)
         if search_result:
             text = text + f"\n\n{search_result}"
             print("✅ Ссылка на картинки найдена")
-    
-    # Обычный поиск (новости, факты, организации) — используем нормализованный текст
     else:
-        search_triggers = ["новости", "сегодня", "актуальные", "свежие", "прогноз", "курс", "погода", "найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "атака", "склады", "wildberries", "озон", "сайт", "адрес", "телефон"]
+        search_triggers = ["новости", "сегодня", "актуальные", "свежие", "прогноз", "курс", "погода", "найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "атака", "склады", "wildberries", "озон", "сайт", "адрес", "телефон", "контакт", "парикмахер", "инской"]
         if any(word in search_text for word in search_triggers):
             print(f"🔍 Поиск: {text}")
             search_result = await search_web(search_text, need_links=need_links, is_image_search=False)
@@ -1013,7 +1091,6 @@ async def process_message(request: Request, user_id, text):
 Просто пиши вопросы - я отвечу!"""
     
     else:
-        # === ОБРАБОТКА ОБЫЧНОГО СООБЩЕНИЯ ===
         user_name = get_memory(user_id, "name")
         if not user_name:
             name_match = re.search(r"(?:меня зовут|зовут|я )(\w+)", lower)
