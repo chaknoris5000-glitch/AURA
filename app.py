@@ -30,7 +30,7 @@ from PIL import Image
 # === ЗАГРУЗКА КЛЮЧЕЙ ИЗ .env ===
 load_dotenv()
 
-# === TAVILY ДЛЯ ПОИСКА ===
+# === TAVILY ===
 try:
     from tavily import TavilyClient
 except ImportError:
@@ -52,7 +52,6 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 
-# === ПРОВЕРКА КЛЮЧЕЙ ===
 print("🔍 Проверка ключей...")
 if not DEEPSEEK_API_KEY:
     print("❌ НЕТ КЛЮЧА DEEPSEEK!")
@@ -63,7 +62,7 @@ if not TAVILY_API_KEY:
 if not YANDEX_API_KEY:
     print("⚠️ НЕТ КЛЮЧА YANDEX")
 
-# === TAVILY ===
+# === TAVILY CLIENT ===
 tavily_client = None
 if TavilyClient and TAVILY_API_KEY:
     try:
@@ -72,21 +71,18 @@ if TavilyClient and TAVILY_API_KEY:
     except Exception as e:
         print(f"⚠️ Tavily: {e}")
 
-# === SILERO TTS ===
+# === SILERO TTS (бесплатный голос) ===
 def silero_tts(text):
     try:
         import torch
         import soundfile as sf
-        
         device = torch.device('cpu')
         model, _ = torch.hub.load(repo_or_dir='snakers4/silero-models',
                                    model='silero_tts',
                                    language='ru',
                                    speaker='aidar')
         model.to(device)
-        
         audio = model.apply_tts(text, speaker='aidar', sample_rate=48000)
-        
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
             sf.write(tmp.name, audio, 48000)
             return tmp.name
@@ -94,7 +90,7 @@ def silero_tts(text):
         print(f"❌ Silero TTS: {e}")
         return None
 
-# === НОРМАЛИЗАЦИЯ ===
+# === НОРМАЛИЗАЦИЯ (исправление опечаток) ===
 def normalize_query(text):
     corrections = {
         r"валдберис": "Wildberries",
@@ -135,7 +131,7 @@ def normalize_query(text):
         print(f"🔧 Нормализация: '{text}' → '{normalized}'")
     return normalized
 
-# === ПАРСИНГ САЙТОВ ===
+# === ПАРСИНГ САЙТОВ (телефоны, адреса) ===
 def parse_site_for_info(url):
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -145,7 +141,6 @@ def parse_site_for_info(url):
             script.decompose()
         text = soup.get_text(separator="\n", strip=True)
         result = {}
-        
         phone_patterns = [r'\+7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'8\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}']
         phones = []
         for pattern in phone_patterns:
@@ -154,51 +149,37 @@ def parse_site_for_info(url):
         phones = list(set(phones))[:5]
         if phones:
             result["phones"] = phones
-        
         email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
         emails = list(set(re.findall(email_pattern, text)))[:3]
         if emails:
             result["emails"] = emails
-        
         address_pattern = r'(?:ул\.|улица|проспект|пр\.|переулок|пер\.|площадь|пл\.)\s+[А-Яа-я0-9\-\.\s,]+'
         addresses = list(set(re.findall(address_pattern, text)))[:3]
         if addresses:
             result["addresses"] = addresses
-        
-        price_pattern = r'(\d+[\s,.]*\d*)\s*(?:₽|руб|рублей|\$|€)'
-        prices = list(set(re.findall(price_pattern, text)))[:3]
-        if prices:
-            result["prices"] = prices
-        
         return result
     except Exception as e:
         print(f"❌ Ошибка парсинга: {e}")
         return None
 
-# === VISION ===
+# === VISION (описание картинок через Groq) ===
 def describe_image_with_groq(image_data):
     try:
         import groq
-        
         if isinstance(image_data, bytes):
             img = Image.open(io.BytesIO(image_data))
         else:
             img = Image.open(io.BytesIO(image_data.encode('utf-8')))
-        
         max_size = 1024
         if max(img.size) > max_size:
             ratio = max_size / max(img.size)
             new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
             img = img.resize(new_size, Image.Resampling.LANCZOS)
-        
         buffer = io.BytesIO()
         img.convert('RGB').save(buffer, format='JPEG', quality=85)
         compressed_data = buffer.getvalue()
-        
         base64_image = base64.b64encode(compressed_data).decode('utf-8')
-        
         client = groq.Groq(api_key=GROQ_API_KEY)
-        
         response = client.chat.completions.create(
             model="llama-3.2-90b-vision-preview",
             messages=[
@@ -218,7 +199,7 @@ def describe_image_with_groq(image_data):
         print(f"❌ Groq Vision ошибка: {e}")
         return None
 
-# === OCR ===
+# === OCR (текст с картинки через Yandex) ===
 def ocr_yandex(image_data):
     if not YANDEX_API_KEY:
         return None
@@ -227,29 +208,23 @@ def ocr_yandex(image_data):
             img = Image.open(io.BytesIO(image_data))
         else:
             img = Image.open(io.BytesIO(image_data.encode('utf-8')))
-        
         max_size = 2048
         if max(img.size) > max_size:
             ratio = max_size / max(img.size)
             new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
             img = img.resize(new_size, Image.Resampling.LANCZOS)
-        
         buffer = io.BytesIO()
         img.save(buffer, format='JPEG', quality=90)
         compressed_data = buffer.getvalue()
-        
         base64_image = base64.b64encode(compressed_data).decode('utf-8')
-        
         url = "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze"
         headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}"}
-        
         payload = {
             "analyze_specs": [{
                 "content": base64_image,
                 "features": [{"type": "TEXT_DETECTION"}]
             }]
         }
-        
         response = requests.post(url, headers=headers, json=payload, timeout=15)
         if response.status_code == 200:
             data = response.json()
@@ -295,7 +270,7 @@ def send_backup_email():
         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
         server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
         server.quit()
-        print(f"✅ Бэкап отправлен на почту")
+        print("✅ Бэкап отправлен на почту")
         return True
     except Exception as e:
         print(f"❌ Ошибка отправки бэкапа: {e}")
@@ -345,7 +320,7 @@ backup_thread = threading.Thread(target=backup_scheduler, daemon=True)
 backup_thread.start()
 print("🔄 Планировщик бэкапа запущен")
 
-# === БАЗА ===
+# === БАЗА ДАННЫХ ===
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -709,23 +684,16 @@ def yandex_tts(text):
 async def send_voice_reply(chat_id, text):
     if not text or len(text.strip()) == 0:
         return False
-    
-    # Берём только первое предложение для голоса
     voice_text = text.split('\n')[0] if '\n' in text else text
     if len(voice_text) > 300:
         voice_text = voice_text[:300] + "..."
-    
     audio_path = None
-    
     if YANDEX_API_KEY:
         audio_path = yandex_tts(voice_text)
-    
     if not audio_path:
         audio_path = silero_tts(voice_text)
-    
     if not audio_path:
         return False
-    
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
         with open(audio_path, 'rb') as f:
@@ -766,7 +734,6 @@ async def search_web(query, need_links=False, is_image_search=False):
     if is_image_search:
         encoded_query = query.replace(" ", "%20")
         return f"https://yandex.ru/images/search?text={encoded_query}"
-    
     if tavily_client:
         try:
             response = tavily_client.search(
@@ -807,7 +774,6 @@ async def search_web(query, need_links=False, is_image_search=False):
             return "\n\n".join(results) if results else None
         except Exception as e:
             print(f"❌ Tavily: {e}")
-    
     duck_results = await search_duckduckgo(query)
     if duck_results:
         results = []
@@ -860,10 +826,8 @@ async def get_ai_response(messages, model):
 def create_summary(user_id, messages):
     try:
         summary_prompt = f"""Сделай краткую выжимку этого диалога (максимум 200 символов). Выдели основные темы и интересы.
-
 Диалог:
 {messages}
-
 Выжимка:"""
         response = client.chat.completions.create(
             model="deepseek-chat",
@@ -883,7 +847,7 @@ TARIFFS = {
 }
 TEST_USERS = ["test_user", "web_user"]
 
-# === ЧЕЛОВЕЧЕСКИЙ ПРОМПТ ===
+# === ЧЕЛОВЕЧЕСКИЙ ПРОМПТ (КОРОТКО, БЕЗ ПЕРЕГРУЗА) ===
 AURA_PROMPT = """Ты — AURA, помощник в Telegram.
 
 ТВОЙ СТИЛЬ:
@@ -901,28 +865,7 @@ AURA_PROMPT = """Ты — AURA, помощник в Telegram.
 https://www.avito.ru/belovo/koshki?q=котёнок
 Если нужна конкретная порода — скажи."
 
-Ты понятный, живой и полезный помощник. Без перегруза.
-
-ЭМОДЗИ:
-✅ — хорошая новость, найдено
-❌ — проблема, не найдено
-👉 — важный момент
-📌 — итог
-😊 — тепло и улыбка
-👍 — одобрение
-
-ПРИМЕР ОТВЕТА:
-**Вот несколько парикмахерских в Инском с телефонами.**
-
-✅ Легенда — ул. Пугачёва, 4. 📞 +7 (905) 960-42-58
-✅ Престиж — ул. Инская, 9а. 📞 +7 (908) 952-55-98
-
-👉 Советую позвонить перед визитом.
-
-📌 Хочешь, найду ещё варианты? 😊
-
-Ты — понятный, живой и полезный помощник. Всегда заканчивай вопросом или предложением действия.
-"""
+Ты понятный, живой и полезный помощник. Без перегруза."""
 
 # === ОСНОВНОЙ БОТ ===
 app = FastAPI()
@@ -966,21 +909,17 @@ async def webhook(request: Request):
                 if image_response.status_code == 200:
                     image_data = image_response.content
                     send_message(chat_id, "🖼️ Обрабатываю фото...")
-                    
                     vision_result = describe_image_with_groq(image_data)
                     ocr_result = ocr_yandex(image_data)
-                    
                     result_text = "**📸 Что я вижу на фото:**\n\n"
                     if vision_result:
                         result_text += f"{vision_result}\n\n"
                     else:
                         result_text += "❌ Не удалось описать фото.\n\n"
-                    
                     if ocr_result:
                         result_text += f"**📝 Текст на фото:**\n{ocr_result}"
                     else:
                         result_text += "📝 Текст на фото не найден."
-                    
                     send_message(chat_id, result_text)
                     return JSONResponse({"ok": True})
                 else:
@@ -992,10 +931,8 @@ async def webhook(request: Request):
         
         if text:
             result = await process_message(request, chat_id, text)
-            
             formatted_reply = result["reply"]
             send_message(chat_id, formatted_reply)
-            
             if YANDEX_API_KEY and result["reply"]:
                 await send_voice_reply(chat_id, result["reply"])
                 
@@ -1240,7 +1177,6 @@ async def process_message(request: Request, user_id, text):
         
         user_prompt = f"Сегодня {current_date} ({current_day}), сейчас {current_time_str} (город: {user_city}).\n\n{text}"
 
-        # Учитываем настроение
         mood_context = ""
         if mood == "sad":
             mood_context = "Пользователь грустный. Отвечай тепло и поддерживающе."
@@ -1261,7 +1197,6 @@ async def process_message(request: Request, user_id, text):
         reply = await get_ai_response(messages, model)
         reply = re.sub(r'[*_#~`]', '', reply)
 
-        # Создаём выжимку каждые 50 сообщений
         if msg_count % 50 == 0 and msg_count > 0:
             recent_msgs = get_history(user_id, limit=15)
             dialog_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent_msgs])
