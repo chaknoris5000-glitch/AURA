@@ -163,14 +163,16 @@ def init_db():
         level TEXT DEFAULT 'Sapphire',
         created_at TEXT,
         mood TEXT DEFAULT 'neutral',
-        style TEXT DEFAULT 'neutral'
+        style TEXT DEFAULT 'neutral',
+        city TEXT DEFAULT NULL,
+        city_asked BOOLEAN DEFAULT 0
     )""")
     try:
-        c.execute("ALTER TABLE users ADD COLUMN mood TEXT DEFAULT 'neutral'")
+        c.execute("ALTER TABLE users ADD COLUMN city TEXT DEFAULT NULL")
     except:
         pass
     try:
-        c.execute("ALTER TABLE users ADD COLUMN style TEXT DEFAULT 'neutral'")
+        c.execute("ALTER TABLE users ADD COLUMN city_asked BOOLEAN DEFAULT 0")
     except:
         pass
     c.execute("""CREATE TABLE IF NOT EXISTS history (
@@ -240,11 +242,26 @@ def get_user_level(user_id):
     user = get_user(user_id)
     return user[3] if user else "Sapphire"
 
-def save_user(user_id, name="Пользователь", level="Sapphire"):
+def save_user(user_id, name="Пользователь", level="Sapphire", city=None):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO users (user_id, name, level, created_at, mood, style) VALUES (?, ?, ?, ?, ?, ?)",
-              (user_id, name, level, datetime.now().isoformat(), "neutral", "neutral"))
+    c.execute("INSERT OR REPLACE INTO users (user_id, name, level, created_at, mood, style, city, city_asked) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+              (user_id, name, level, datetime.now().isoformat(), "neutral", "neutral", city, 1 if city else 0))
+    conn.commit()
+    conn.close()
+
+def get_user_city(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT city, city_asked FROM users WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return (row[0], row[1]) if row else (None, 0)
+
+def update_user_city(user_id, city):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("UPDATE users SET city = ?, city_asked = 1 WHERE user_id = ?", (city, user_id))
     conn.commit()
     conn.close()
 
@@ -496,7 +513,6 @@ def yandex_tts(text):
         return None
     
     try:
-        # Формируем запрос к Yandex SpeechKit
         url = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
         headers = {
             "Authorization": f"Api-Key {YANDEX_API_KEY}"
@@ -504,7 +520,7 @@ def yandex_tts(text):
         data = {
             "text": text,
             "lang": "ru-RU",
-            "voice": "oksana",  # женский голос, можно alena, filipp, omazh
+            "voice": "oksana",
             "emotion": "good",
             "speed": 1.0,
             "format": "lpcm",
@@ -514,13 +530,12 @@ def yandex_tts(text):
         response = requests.post(url, headers=headers, data=data, timeout=10)
         
         if response.status_code == 200:
-            # Сохраняем аудио во временный файл
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
                 tmp.write(response.content)
                 tmp_path = tmp.name
             return tmp_path
         else:
-            print(f"❌ Yandex TTS ошибка: {response.status_code} - {response.text}")
+            print(f"❌ Yandex TTS ошибка: {response.status_code}")
             return None
     except Exception as e:
         print(f"❌ Yandex TTS: {e}")
@@ -531,7 +546,7 @@ async def send_voice_reply(chat_id, text):
     if not YANDEX_API_KEY:
         return False
     
-    audio_path = yandex_tts(text[:500])  # Ограничиваем длину текста
+    audio_path = yandex_tts(text[:500])
     if not audio_path:
         return False
     
@@ -548,7 +563,7 @@ async def send_voice_reply(chat_id, text):
         print(f"❌ Отправка голоса: {e}")
         return False
 
-# === ПОИСК В ИНТЕРНЕТЕ (DUCKDUCKGO - БЕСПЛАТНЫЙ FALLBACK) ===
+# === ПОИСК В ИНТЕРНЕТЕ (Tavily + DuckDuckGo) ===
 async def search_duckduckgo(query):
     """Поиск через DuckDuckGo (бесплатно, без API ключа)"""
     try:
@@ -560,23 +575,25 @@ async def search_duckduckgo(query):
         response = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
         results = []
-        for result in soup.select('.result')[:3]:
+        for result in soup.select('.result')[:5]:
             title = result.select_one('.result__title')
             if title:
+                link = result.select_one('.result__url')
                 text_elem = result.select_one('.result__snippet')
-                if text_elem:
+                if text_elem and link:
                     title_text = title.text.strip()
-                    snippet = text_elem.text.strip()[:150]
-                    results.append(f"🔗 {title_text}\n📄 {snippet}...")
+                    snippet = text_elem.text.strip()[:200]
+                    url_text = link.text.strip()
+                    results.append(f"🔗 **{title_text}**\n📄 {snippet}...\n🔗 {url_text}")
         if results:
-            return "\n\n".join(results)
+            return "\n\n---\n\n".join(results)
         return None
     except Exception as e:
         print(f"❌ DuckDuckGo: {e}")
         return None
 
-# === TAVILY ПОИСК (ОСНОВНОЙ) ===
 async def search_web(query):
+    """Поиск через Tavily с возвратом ссылок"""
     if not tavily_client:
         print("❌ Tavily не инициализирован, пробую DuckDuckGo...")
         return await search_duckduckgo(query)
@@ -585,30 +602,28 @@ async def search_web(query):
         print(f"🔍 Tavily поиск: {query}")
         response = tavily_client.search(
             query=query,
-            search_depth="basic",
+            search_depth="advanced",
             max_results=5,
             include_answer=True,
-            include_images=True,
+            include_images=False,
             include_raw_content=False
         )
         results = []
+        
         if response.get('answer'):
-            results.append(f"💡 {response['answer'][:300]}")
+            results.append(f"💡 **Краткий ответ:**\n{response['answer']}")
+        
         if response.get('results'):
             for r in response['results'][:5]:
                 title = r.get('title', '')
                 url = r.get('url', '')
-                content = r.get('content', '')[:150]
+                content = r.get('content', '')[:300]
                 if title and url:
-                    results.append(f"🔗 [{title}]({url})")
-                    if content:
-                        results.append(f"📄 {content}...")
-        if response.get('images'):
-            for img in response['images'][:3]:
-                results.append(f"🖼️ {img}")
+                    results.append(f"🔗 **{title}**\n📄 {content}...\n🔗 {url}")
+        
         if results:
             print(f"✅ Tavily нашёл {len(results)} результатов")
-            return "\n\n".join(results)
+            return "\n\n---\n\n".join(results)
         else:
             print("❌ Tavily ничего не нашёл, пробую DuckDuckGo...")
             return await search_duckduckgo(query)
@@ -650,7 +665,7 @@ async def get_ai_response(messages, model):
             model=model,
             messages=messages,
             temperature=0.9,
-            max_tokens=200
+            max_tokens=300
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -690,19 +705,17 @@ TARIFFS = {
 }
 TEST_USERS = ["test_user", "web_user"]
 
-# === ПРОМПТ ===
-AURA_PROMPT = """Ты — AURA. Ты живой собеседник, а не эксперт. Отвечай как человек: коротко, ёмко, с лёгким юмором и смайлами.
+# === НОВЫЙ ПРОМПТ (БЕЗ ЗАПРЕТА НА ССЫЛКИ) ===
+AURA_PROMPT = """Ты — AURA. Ты профессиональный помощник, который умеет искать информацию в интернете и давать точные, актуальные ответы с указанием источников.
 
 СТИЛЬ:
-- Ответы — максимум 100 символов.
-- Если пользователь просит уточнить — максимум 200 символов.
-- Если пользователь спрашивает о новостях, погоде, курсах или актуальных событиях — используй информацию из интернета (она передаётся в запросе после слов "🔍 Актуальная информация:").
-- Никогда не используй маркдаун (#, **, *, ~).
-- Говори по делу, без воды.
-- Используй смайлы, чтобы передать эмоции.
-- Будь вовлечённым, как друг, который всегда рядом.
+- Отвечай кратко, по делу, но с уважением к пользователю.
+- Если пользователь спрашивает о новостях, погоде, курсах, событиях или любой другой актуальной информации — используй информацию из интернета. Она передаётся в запросе после слов "🔍 Актуальная информация:".
+- ВСЕГДА указывай ссылки на источники, если они есть в найденной информации.
+- Не выдумывай факты. Если информации нет — честно скажи об этом.
+- Будь вовлечённым и тактичным.
 
-ТЫ — ЧЕЛОВЕК, А НЕ РОБОТ.
+ТЫ — ПОМОЩНИК, КОТОРЫЙ ДАЁТ ТОЧНУЮ ИНФОРМАЦИЮ С ССЫЛКАМИ.
 """
 
 # === ОСНОВНОЙ БОТ ===
@@ -739,8 +752,7 @@ async def webhook(request: Request):
             result = await process_message(request, chat_id, text)
             send_message(chat_id, result["reply"])
             
-            # Если есть ключ Yandex — отправляем голосовое (короткие ответы)
-            if YANDEX_API_KEY and len(result["reply"]) < 300:
+            if YANDEX_API_KEY and len(result["reply"]) < 500:
                 await send_voice_reply(chat_id, result["reply"])
                 
         return JSONResponse({"ok": True})
@@ -751,7 +763,7 @@ async def webhook(request: Request):
 def send_message(chat_id, text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {"chat_id": chat_id, "text": text}
+        data = {"chat_id": chat_id, "text": text, "disable_web_page_preview": False}
         response = requests.post(url, json=data, timeout=30)
         return response.status_code == 200
     except Exception as e:
@@ -791,6 +803,70 @@ async def process_message(request: Request, user_id, text):
 
     lower = text.lower()
 
+    # === ОПРЕДЕЛЕНИЕ ГОРОДА ПОЛЬЗОВАТЕЛЯ ===
+    city_info = get_user_city(user_id)
+    user_city = city_info[0] if city_info else None
+    city_asked = city_info[1] if city_info else 0
+
+    # Проверяем, указал ли пользователь город в сообщении
+    city_match = re.search(r"(?:мой город|я из|я в|город|городе|из)\s+([а-яА-ЯёЁ\-]+)", lower)
+    if city_match:
+        city_name = city_match.group(1).capitalize()
+        update_user_city(user_id, city_name)
+        user_city = city_name
+        city_asked = 1
+        print(f"📍 Пользователь указал город: {city_name}")
+        
+        # Сохраняем в память для быстрого доступа
+        save_memory(user_id, "city", city_name)
+        save_memory(user_id, "tz_offset", str(get_timezone_offset(city_name)))
+
+    # Если город не определён и мы ещё не спрашивали
+    elif not user_city and not city_asked:
+        # Пробуем определить по IP
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            ip = forwarded.split(",")[0].strip()
+        else:
+            ip = request.client.host if request.client else "127.0.0.1"
+        
+        if ip and ip not in ["127.0.0.1", "localhost", "::1"]:
+            city_data = get_city_by_ip(ip)
+            if city_data and city_data.get("city"):
+                user_city = city_data["city"]
+                update_user_city(user_id, user_city)
+                save_memory(user_id, "city", user_city)
+                save_memory(user_id, "tz_offset", str(get_timezone_offset(user_city)))
+                print(f"📍 Определён город по IP: {user_city}")
+        
+        # Если город так и не определился — спрашиваем
+        if not user_city:
+            # Отмечаем, что спросили
+            conn = sqlite3.connect(DB_NAME)
+            c = conn.cursor()
+            c.execute("UPDATE users SET city_asked = 1 WHERE user_id = ?", (user_id,))
+            conn.commit()
+            conn.close()
+            return {"reply": "🌍 Привет! Чтобы я мог показывать точное время и погоду в твоём городе, скажи, пожалуйста, откуда ты? Например: *Мой город Белово*"}
+
+    # Если город есть, получаем время
+    if user_city:
+        offset_hours = get_timezone_offset(user_city)
+        current_time = datetime.utcnow() + timedelta(hours=offset_hours)
+        current_date = current_time.strftime("%d.%m.%Y")
+        current_day = current_time.strftime("%A")
+        current_time_str = current_time.strftime("%H:%M")
+        save_memory(user_id, "tz_offset", str(offset_hours))
+        print(f"🕐 Город: {user_city}, Время: {current_time_str}, Дата: {current_date}")
+    else:
+        # Fallback на Москву
+        offset_hours = 3
+        current_time = datetime.utcnow() + timedelta(hours=3)
+        current_date = current_time.strftime("%d.%m.%Y")
+        current_day = current_time.strftime("%A")
+        current_time_str = current_time.strftime("%H:%M")
+        user_city = "Москва"
+
     # === ПОИСК ===
     search_result = None
     search_triggers = ["новости", "последние", "сегодня", "сейчас", "актуальные", "свежие", "прогноз", "курс", "погода", "время", "сколько", "дата", "найди", "поищи", "узнай", "какой", "где", "кто", "что такое", "ссылка", "картинка", "видео", "товар", "цена", "купить", "продажа", "объявление", "дром", "авито", "хавал", "haval"]
@@ -803,45 +879,6 @@ async def process_message(request: Request, user_id, text):
             print("✅ Найдено!")
         else:
             print("❌ Ничего не найдено")
-
-    # === ОПРЕДЕЛЕНИЕ ГОРОДА И ВРЕМЕНИ ===
-    city_match = re.search(r"(?:в|для|город|городе|из)\s+([а-яА-ЯёЁ\-]+)", text.lower())
-    if city_match:
-        city_name = city_match.group(1).capitalize()
-        save_memory(user_id, "city", city_name)
-        user_city = city_name
-        print(f"📍 Пользователь указал город: {city_name}")
-    else:
-        user_city = get_memory(user_id, "city")
-        
-        if not user_city:
-            forwarded = request.headers.get("X-Forwarded-For")
-            if forwarded:
-                ip = forwarded.split(",")[0].strip()
-            else:
-                ip = request.client.host if request.client else "127.0.0.1"
-            
-            if ip in ["127.0.0.1", "localhost", "::1"]:
-                user_city = "Москва"
-            else:
-                city_data = get_city_by_ip(ip)
-                if city_data and city_data.get("city"):
-                    user_city = city_data["city"]
-                else:
-                    user_city = "Москва"
-            
-            save_memory(user_id, "city", user_city)
-            print(f"📍 Определён город по IP: {user_city}")
-
-    # Получаем время для города
-    offset_hours = get_timezone_offset(user_city)
-    current_time = datetime.utcnow() + timedelta(hours=offset_hours)
-    current_date = current_time.strftime("%d.%m.%Y")
-    current_day = current_time.strftime("%A")
-    current_time_str = current_time.strftime("%H:%M")
-
-    save_memory(user_id, "tz_offset", str(offset_hours))
-    print(f"🕐 Город: {user_city}, Время: {current_time_str}, Дата: {current_date}, Смещение: UTC{offset_hours:+d}")
 
     # === КОМАНДЫ ===
     if "/задача" in lower or text.startswith("/task"):
