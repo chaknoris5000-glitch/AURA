@@ -68,6 +68,77 @@ if TavilyClient and TAVILY_API_KEY:
     except Exception as e:
         print(f"⚠️ Tavily: {e}")
 
+# === ФУНКЦИЯ НОРМАЛИЗАЦИИ ЗАПРОСОВ (РАСПОЗНАВАНИЕ РЕЧИ) ===
+def normalize_query(text):
+    """Исправляет опечатки, понимает синонимы и улучшает распознавание"""
+    
+    # Словарь исправлений популярных ошибок
+    corrections = {
+        # Бренды и компании
+        r"валдберис": "Wildberries",
+        r"валберис": "Wildberries",
+        r"вальдберис": "Wildberries",
+        r"wildberris": "Wildberries",
+        r"wildberies": "Wildberries",
+        r"озон": "Ozon",
+        r"ozon": "Ozon",
+        
+        # Поиск картинок
+        r"котик": "кот",
+        r"котики": "коты",
+        r"котят": "коты",
+        r"картинк": "картинки",
+        r"фотограф": "фото",
+        r"изображен": "изображения",
+        r"рисунк": "рисунки",
+        
+        # Время и дата
+        r"сколька": "сколько",
+        r"скольк": "сколько",
+        r"который час": "сколько время",
+        r"времян": "время",
+        r"време": "время",
+        
+        # Погода
+        r"пагода": "погода",
+        r"пагоду": "погоду",
+        r"темпертур": "температура",
+        r"тепература": "температура",
+        
+        # Новости
+        r"нависти": "новости",
+        r"навасти": "новости",
+        r"свежи": "свежие",
+        r"актуальн": "актуальные",
+        r"последние": "свежие",
+        
+        # Поиск
+        r"найди": "найди",
+        r"поищи": "поищи",
+        r"узнай": "узнай",
+        r"найти": "найди",
+        
+        # Клиника
+        r"клиник": "клиника",
+        r"больниц": "больница",
+        r"поликлиник": "поликлиника",
+        
+        # Сайты
+        r"сайт": "сайт",
+        r"страниц": "страница",
+    }
+    
+    # Применяем исправления
+    normalized = text.lower()
+    for pattern, replacement in corrections.items():
+        normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
+    
+    # Если текст изменился — печатаем для отладки
+    if normalized != text.lower():
+        print(f"🔧 Нормализация: '{text}' → '{normalized}'")
+    
+    return normalized
+
 # === ФУНКЦИЯ ОТПРАВКИ БЭКАПА НА ПОЧТУ ===
 def send_backup_email():
     try:
@@ -551,14 +622,14 @@ async def search_duckduckgo(query):
         response = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
         results = []
-        for result in soup.select('.result')[:3]:
+        for result in soup.select('.result')[:5]:
             title = result.select_one('.result__title')
             if title:
                 link = result.select_one('.result__url')
                 text_elem = result.select_one('.result__snippet')
                 if text_elem and link:
                     title_text = title.text.strip()
-                    snippet = text_elem.text.strip()[:200]
+                    snippet = text_elem.text.strip()[:300]
                     url_text = link.text.strip()
                     results.append(f"{title_text}\n{snippet}...\n{url_text}")
         return "\n\n---\n\n".join(results) if results else None
@@ -566,14 +637,23 @@ async def search_duckduckgo(query):
         print(f"❌ DuckDuckGo: {e}")
         return None
 
-async def search_web(query):
+async def search_web(query, need_links=False, is_image_search=False):
+    """Поиск с учётом контекста запроса"""
+    
+    # Если это поиск картинок — сразу даём ссылку на Яндекс.Картинки
+    if is_image_search:
+        encoded_query = query.replace(" ", "%20")
+        return f"Вот ссылка на картинки по запросу '{query}':\nhttps://yandex.ru/images/search?text={encoded_query}"
+    
+    # Обычный поиск через Tavily
     if not tavily_client:
         return await search_duckduckgo(query)
+    
     try:
         response = tavily_client.search(
             query=query,
             search_depth="advanced",
-            max_results=3,
+            max_results=5,
             include_answer=True,
             include_images=False
         )
@@ -581,12 +661,15 @@ async def search_web(query):
         if response.get('answer'):
             results.append(f"{response['answer']}")
         if response.get('results'):
-            for r in response['results'][:3]:
+            for r in response['results'][:5]:
                 title = r.get('title', '')
                 url = r.get('url', '')
-                content = r.get('content', '')[:200]
+                content = r.get('content', '')[:300]
                 if title and url:
-                    results.append(f"{title}\n{content}...\n{url}")
+                    if need_links:
+                        results.append(f"{title}\n{content}...\nСсылка: {url}")
+                    else:
+                        results.append(f"{title}\n{content}...")
         return "\n\n---\n\n".join(results) if results else await search_duckduckgo(query)
     except Exception as e:
         print(f"❌ Tavily: {e}")
@@ -626,7 +709,7 @@ async def get_ai_response(messages, model):
             model=model,
             messages=messages,
             temperature=0.7,
-            max_tokens=200
+            max_tokens=250
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -659,22 +742,16 @@ TARIFFS = {
 }
 TEST_USERS = ["test_user", "web_user"]
 
-# === НОВЫЙ ПРОМПТ (КОРОТКО, БЕЗ ЗВЁЗДОЧЕК, С ОДНОЙ ССЫЛКОЙ) ===
+# === НОВЫЙ ПРОМПТ ===
 AURA_PROMPT = """Ты — AURA, помощник в Telegram.
 
 ПРАВИЛА ОТВЕТОВ:
 1. Отвечай КОРОТКО — максимум 2-3 предложения.
 2. НЕ ИСПОЛЬЗУЙ звёздочки (*), решётки (#), подчёркивания (_), дефисы (-) для форматирования.
 3. Пиши ПРОСТЫМ ТЕКСТОМ, как обычный человек в чате.
-4. Если даёшь ссылку — ТОЛЬКО ОДНУ САМУЮ ВАЖНУЮ.
+4. Ссылки давай ТОЛЬКО если пользователь прямо просит ("дай ссылку", "ссылка на", "покажи ссылку").
 5. Если у тебя нет точного ответа — честно скажи об этом.
 6. Сначала обдумай вопрос, потом отвечай.
-
-Пример правильного ответа:
-"Сейчас 15:32 по Москве. В Белово сейчас 19:32. Вот ссылка на точное время: time100.ru"
-
-Пример неправильного ответа (так НЕ надо):
-"**Сейчас 15:32** *по Москве*... [ссылка1](url) [ссылка2](url)"
 
 Ты понятный, живой и полезный помощник.
 """
@@ -711,9 +788,11 @@ async def webhook(request: Request):
         
         if text:
             result = await process_message(request, chat_id, text)
+            
+            # Всегда отправляем текст
             send_message(chat_id, result["reply"])
             
-            # ВСЕГДА отправляем голосовой ответ (если есть ключ)
+            # Всегда отправляем голос (если есть ключ)
             if YANDEX_API_KEY and result["reply"]:
                 await send_voice_reply(chat_id, result["reply"])
                 
@@ -758,14 +837,19 @@ async def process_message(request: Request, user_id, text):
     if mood != "neutral":
         update_user_mood(user_id, mood)
 
+    # === НОРМАЛИЗАЦИЯ ЗАПРОСА (РАСПОЗНАВАНИЕ ОШИБОК) ===
     lower = text.lower()
+    normalized_text = normalize_query(text)
+    
+    # Если текст изменился — сохраняем нормализованную версию для поиска
+    search_text = normalized_text if normalized_text != lower else lower
 
     # === ОПРЕДЕЛЕНИЕ ГОРОДА ===
     city_info = get_user_city(user_id)
     user_city = city_info[0] if city_info else None
     city_asked = city_info[1] if city_info else 0
 
-    city_match = re.search(r"(?:мой город|я из|я в|город|городе|из)\s+([а-яА-ЯёЁ\-]+)", lower)
+    city_match = re.search(r"(?:мой город|я в|я из|город|городе|из)\s+([а-яА-ЯёЁ\-]+)", lower)
     if city_match:
         city_name = city_match.group(1).capitalize()
         update_user_city(user_id, city_name)
@@ -773,6 +857,7 @@ async def process_message(request: Request, user_id, text):
         city_asked = 1
         save_memory(user_id, "city", city_name)
         save_memory(user_id, "tz_offset", str(get_timezone_offset(city_name)))
+        print(f"📍 Город запомнен: {city_name}")
 
     elif not user_city and not city_asked:
         forwarded = request.headers.get("X-Forwarded-For")
@@ -812,14 +897,34 @@ async def process_message(request: Request, user_id, text):
         current_time_str = current_time.strftime("%H:%M")
         user_city = "Москва"
 
-    # === ПОИСК ===
+    # === ПОИСК С УЧЁТОМ КОНТЕКСТА И НОРМАЛИЗАЦИИ ===
     search_result = None
-    search_triggers = ["новости", "сегодня", "сейчас", "актуальные", "свежие", "прогноз", "курс", "погода", "время", "сколько", "дата", "найди", "поищи", "узнай", "где", "кто", "что такое", "ссылка", "картинка", "видео", "цена", "купить", "продажа"]
     
-    if any(word in lower for word in search_triggers):
-        search_result = await search_web(text)
+    # Проверяем, ищет ли пользователь картинки (используем нормализованный текст)
+    is_image_search = bool(re.search(r"(?:картинк|фото|изображен|рисунк)", search_text))
+    
+    # Проверяем, нужны ли ссылки (используем нормализованный текст)
+    need_links = bool(re.search(r"(?:дай|покажи|скинь|ссылк|ссылка|link|url)\s*(?:ссылк|ссылку|ссылка|link|url)?", search_text))
+    
+    # Если это поиск картинок — сразу даём ссылку без лишних вопросов
+    if is_image_search:
+        print(f"🖼️ Поиск картинок: {text}")
+        search_result = await search_web(search_text, need_links=True, is_image_search=True)
         if search_result:
-            text = text + f"\n\n🔍 Актуальная информация:\n{search_result}"
+            text = text + f"\n\n{search_result}"
+            print("✅ Ссылка на картинки найдена")
+    
+    # Обычный поиск (новости, факты, организации) — используем нормализованный текст
+    else:
+        search_triggers = ["новости", "сегодня", "актуальные", "свежие", "прогноз", "курс", "погода", "найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "атака", "склады", "wildberries", "озон", "сайт", "адрес", "телефон"]
+        if any(word in search_text for word in search_triggers):
+            print(f"🔍 Поиск: {text}")
+            search_result = await search_web(search_text, need_links=need_links, is_image_search=False)
+            if search_result:
+                text = text + f"\n\n🔍 Актуальная информация:\n{search_result}"
+                print("✅ Найдено!")
+            else:
+                print("❌ Ничего не найдено")
 
     # === КОМАНДЫ ===
     if "/задача" in lower or text.startswith("/task"):
