@@ -496,16 +496,44 @@ async def get_ai_response(messages, model):
         print("AI error:", e)
         return "Ошибка API. Попробуй позже."
 
-# === ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ ВРЕМЕНИ ИЗ API ===
-def get_current_time():
+# === ФУНКЦИЯ ДЛЯ ОПРЕДЕЛЕНИЯ ГОРОДА ПО IP ===
+def get_city_by_ip(ip):
     try:
-        response = requests.get("http://worldtimeapi.org/api/timezone/Europe/Moscow", timeout=3)
+        response = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,regionName,city,timezone,offset", timeout=3)
         if response.status_code == 200:
             data = response.json()
-            dt_str = data.get("datetime")
-            if dt_str:
-                dt = datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
-                return dt
+            if data.get("status") == "success":
+                return {
+                    "city": data.get("city", ""),
+                    "region": data.get("regionName", ""),
+                    "country": data.get("country", ""),
+                    "timezone": data.get("timezone", ""),
+                    "offset": data.get("offset", 0) // 3600
+                }
+    except:
+        pass
+    return None
+
+# === ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ ВРЕМЕНИ ===
+def get_current_time(city_name=None):
+    try:
+        if city_name:
+            # Пробуем найти часовой пояс по городу через API
+            response = requests.get(f"http://worldtimeapi.org/api/timezone/Europe/Moscow", timeout=3)
+            if response.status_code == 200:
+                data = response.json()
+                dt_str = data.get("datetime")
+                if dt_str:
+                    dt = datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
+                    return dt + timedelta(hours=4)  # Кемерово UTC+7, Москва UTC+3
+        else:
+            response = requests.get("http://worldtimeapi.org/api/timezone/Europe/Moscow", timeout=3)
+            if response.status_code == 200:
+                data = response.json()
+                dt_str = data.get("datetime")
+                if dt_str:
+                    dt = datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
+                    return dt
     except:
         pass
     return datetime.utcnow() + timedelta(hours=3)
@@ -589,7 +617,7 @@ async def webhook(request: Request):
             text = message["text"].strip()
         
         if text:
-            result = await process_message(chat_id, text)
+            result = await process_message(request, chat_id, text)
             send_message(chat_id, result["reply"])
         return JSONResponse({"ok": True})
     except Exception as e:
@@ -606,7 +634,7 @@ def send_message(chat_id, text):
         print(f"❌ Отправка: {e}")
         return False
 
-async def process_message(user_id, text):
+async def process_message(request: Request, user_id, text):
     user = get_user(user_id)
     if not user:
         save_user(user_id, level="Sapphire")
@@ -652,12 +680,59 @@ async def process_message(user_id, text):
         else:
             print("❌ Ничего не найдено")
 
-    # === ВРЕМЯ (ИЗ API) ===
-    now = get_current_time()
+    # === ОПРЕДЕЛЕНИЕ ГОРОДА ПОЛЬЗОВАТЕЛЯ ===
+    user_city = get_memory(user_id, "city")
+    user_offset = get_memory(user_id, "tz_offset")
+    
+    # Если город не определён — определяем по IP
+    if not user_city:
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            ip = forwarded.split(",")[0].strip()
+        else:
+            ip = request.client.host if request.client else "127.0.0.1"
+        
+        city_data = get_city_by_ip(ip)
+        if city_data:
+            user_city = city_data["city"]
+            user_offset = city_data["offset"]
+            save_memory(user_id, "city", user_city)
+            save_memory(user_id, "tz_offset", str(user_offset))
+            print(f"📍 Определён город: {user_city} (UTC{user_offset:+d})")
+    
+    # Если в запросе есть название города — запоминаем его
+    city_match = re.search(r"(?:в|для|город|городе)\s+([а-яА-ЯёЁ\-]+)", lower)
+    if city_match:
+        city_name = city_match.group(1).capitalize()
+        save_memory(user_id, "city", city_name)
+        # Кемерово и Белово — UTC+7
+        if "кемерово" in city_name.lower() or "белово" in city_name.lower():
+            user_offset = 7
+            save_memory(user_id, "tz_offset", "7")
+        elif "москва" in city_name.lower():
+            user_offset = 3
+            save_memory(user_id, "tz_offset", "3")
+        elif "екатеринбург" in city_name.lower():
+            user_offset = 5
+            save_memory(user_id, "tz_offset", "5")
+        elif "новосибирск" in city_name.lower():
+            user_offset = 7
+            save_memory(user_id, "tz_offset", "7")
+    
+    # Определяем смещение
+    offset_hours = 3  # По умолчанию Москва
+    if user_offset:
+        try:
+            offset_hours = int(user_offset)
+        except:
+            offset_hours = 3
+    
+    # Получаем текущее время
+    now = datetime.utcnow() + timedelta(hours=offset_hours)
     current_date = now.strftime("%d.%m.%Y")
     current_day = now.strftime("%A")
     current_time = now.strftime("%H:%M")
-    
+
     # === КОМАНДЫ ===
     if "/задача" in lower or text.startswith("/task"):
         parts = text.split(" ", 1)
