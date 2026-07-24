@@ -13,3 +13,4 @@ soundfile==0.12.1
 torch
 torchaudio
 gTTS==2.3.2
+edge-tts==6.1.9
