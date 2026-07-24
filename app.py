@@ -179,7 +179,7 @@ def parse_site_for_info(url):
         return None
 
 # ==========================
-# VISION (ОТКЛЮЧЕНА, ЧТОБЫ НЕ МЕШАЛА)
+# VISION (ОТКЛЮЧЕНА)
 # ==========================
 
 def describe_image_with_groq(image_data):
@@ -764,6 +764,7 @@ AURA_PROMPT = """Ты — AURA, помощник в Telegram.
 - НЕ ставь галочки (✅) в каждом ответе — они нужны только для списков.
 - Отвечай на вопрос прямо, потом дай ссылку или совет.
 - В конце не спрашивай "что ещё?" в каждом сообщении — только если действительно нужно.
+- НЕ ВЫДУМЫВАЙ ТО, ЧЕГО НЕ БЫЛО. Если не помнишь — честно скажи.
 
 Ты понятный, живой и полезный помощник. Без перегруза."""
 
@@ -872,7 +873,7 @@ async def process_message(request: Request, user_id, text):
     search_text = normalized_text if normalized_text != lower else lower
 
     # ==========================
-    # ПРОСТОЕ ПРИВЕТСТВИЕ (БЕЗ СПИСКА ТЕМ)
+    # ПРОСТОЕ ПРИВЕТСТВИЕ
     # ==========================
     msg_count = get_message_count(user_id)
     if msg_count <= 2:
@@ -985,7 +986,7 @@ async def process_message(request: Request, user_id, text):
                 print("❌ Ничего не найдено")
 
     # ==========================
-    # КОМАНДЫ
+    # ОСНОВНОЙ ОТВЕТ (С ПАМЯТЬЮ)
     # ==========================
 
     if "/задача" in lower:
@@ -1079,11 +1080,27 @@ async def process_message(request: Request, user_id, text):
                 save_memory(user_id, "name", user_name)
         
         name_context = f"\nИмя: {user_name}" if user_name else ""
+        
+        # ==========================
+        # ПАМЯТЬ В ПРОМПТЕ (ЧЕСТНАЯ)
+        # ==========================
+        
+        # Получаем сохранённые темы из базы
+        topics = get_all_topics(user_id)
+        topics_text = ", ".join(topics[:7]) if topics else "нет сохранённых тем"
+        
+        # Получаем последнюю выжимку (если есть)
         summary = get_memory(user_id, "summary")
-        summary_context = f"\nВыжимка прошлых диалогов: {summary}" if summary else ""
+        summary_text = f"Краткая выжимка прошлых диалогов: {summary}" if summary else ""
+        
+        # Формируем честный контекст
+        memory_context = f"Вот реальные темы, которые мы обсуждали раньше: {topics_text}. {summary_text} Используй эту информацию, если пользователь спрашивает о прошлых разговорах. НЕ ВЫДУМЫВАЙ ТО, ЧЕГО НЕ БЫЛО. Если не помнишь — честно скажи."
+        
+        # Получаем историю
         history = get_history(user_id, limit=30)
         
-        user_prompt = f"Сегодня {current_date} ({current_day}), сейчас {current_time_str} (город: {user_city}).\n\n{text}"
+        # Формируем основной промпт
+        user_prompt = f"Сегодня {current_date} ({current_day}), сейчас {current_time_str} (город: {user_city}).\n\n{memory_context}\n\n{text}"
 
         mood_context = ""
         if mood == "sad":
@@ -1095,7 +1112,7 @@ async def process_message(request: Request, user_id, text):
         elif mood == "tired":
             mood_context = "Пользователь устал. Отвечай мягко и без лишней информации."
 
-        aura_prompt = AURA_PROMPT + name_context + summary_context + f"\n\n{mood_context}\n\n{user_prompt}"
+        aura_prompt = AURA_PROMPT + name_context + f"\n\n{mood_context}\n\n{user_prompt}"
 
         messages = [{"role": "system", "content": aura_prompt}]
         for msg in history[-15:]:
@@ -1105,7 +1122,8 @@ async def process_message(request: Request, user_id, text):
         reply = await get_ai_response(messages, model)
         reply = re.sub(r'[*_#~`]', '', reply)
 
-        if msg_count % 50 == 0 and msg_count > 0:
+        # Сохраняем выжимку каждые 30 сообщений
+        if msg_count % 30 == 0 and msg_count > 0:
             recent_msgs = get_history(user_id, limit=15)
             dialog_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent_msgs])
             new_summary = create_summary(user_id, dialog_text)
