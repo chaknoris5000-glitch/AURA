@@ -27,22 +27,17 @@ import base64
 import io
 from PIL import Image
 
-# === ЗАГРУЗКА КЛЮЧЕЙ ИЗ .env ===
 load_dotenv()
 
-# === TAVILY ДЛЯ ПОИСКА ===
 try:
     from tavily import TavilyClient
 except ImportError:
     print("⚠️ Tavily не установлен")
     TavilyClient = None
 
-# === КОНФИГ ===
 DB_NAME = "aura.db"
 BACKUP_NAME = "aura_backup.db"
-LAST_VOICE_MESSAGE = {}  # для предотвращения дубляжа голоса
 
-# === КЛЮЧИ ===
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -58,12 +53,9 @@ if not DEEPSEEK_API_KEY:
     print("❌ НЕТ КЛЮЧА DEEPSEEK!")
 if not TELEGRAM_TOKEN:
     print("❌ НЕТ КЛЮЧА TELEGRAM!")
-if not TAVILY_API_KEY:
-    print("⚠️ НЕТ КЛЮЧА TAVILY")
 if not YANDEX_API_KEY:
-    print("⚠️ НЕТ КЛЮЧА YANDEX")
+    print("⚠️ НЕТ КЛЮЧА YANDEX (голос не будет работать)")
 
-# === TAVILY CLIENT ===
 tavily_client = None
 if TavilyClient and TAVILY_API_KEY:
     try:
@@ -72,7 +64,10 @@ if TavilyClient and TAVILY_API_KEY:
     except Exception as e:
         print(f"⚠️ Tavily: {e}")
 
-# === SILERO TTS ===
+# ==========================
+# ГОЛОС (TTS)
+# ==========================
+
 def silero_tts(text):
     try:
         import torch
@@ -91,7 +86,6 @@ def silero_tts(text):
         print(f"❌ Silero TTS: {e}")
         return None
 
-# === YANDEX TTS (мужской голос) ===
 def yandex_tts(text):
     if not YANDEX_API_KEY:
         return None
@@ -101,7 +95,7 @@ def yandex_tts(text):
         data = {
             "text": text[:500],
             "lang": "ru-RU",
-            "voice": "filipp",  # Мужской голос
+            "voice": "filipp",
             "emotion": "good",
             "speed": 1.0,
             "format": "lpcm",
@@ -117,42 +111,16 @@ def yandex_tts(text):
         print(f"❌ Yandex TTS: {e}")
         return None
 
-# === ОСНОВНАЯ ФУНКЦИЯ ОТПРАВКИ ГОЛОСА (С ЗАЩИТОЙ ОТ ДУБЛЯЖА) ===
-def send_voice_reply_sync(chat_id, text):
-    """Синхронная отправка голоса (Яндекс → Silero) с защитой от дубляжа"""
-    if not text or len(text.strip()) == 0:
+def send_voice_reply(chat_id, text):
+    if not text:
+        return False
+    voice_text = text.split('\n')[0][:300]
+    if not voice_text:
         return False
     
-    # Проверяем, не отправляли ли мы уже этот же текст в голосе
-    text_hash = hash(text[:100])
-    if LAST_VOICE_MESSAGE.get(chat_id) == text_hash:
-        print(f"⏭️ Пропускаем дубляж голоса для {chat_id}")
-        return True
-    
-    voice_text = text.split('\n')[0] if '\n' in text else text
-    if len(voice_text) > 300:
-        voice_text = voice_text[:300] + "..."
-    
-    audio_path = None
-    used_service = None
-    
-    if YANDEX_API_KEY:
-        print(f"🎤 Пробую Яндекс TTS (мужской)...")
-        audio_path = yandex_tts(voice_text)
-        if audio_path:
-            used_service = "Яндекс (мужской)"
-    
+    audio_path = yandex_tts(voice_text) or silero_tts(voice_text)
     if not audio_path:
-        print(f"🎤 Пробую Silero TTS...")
-        audio_path = silero_tts(voice_text)
-        if audio_path:
-            used_service = "Silero"
-    
-    if not audio_path:
-        print("❌ Не удалось синтезировать голос")
         return False
-    
-    print(f"✅ Голос синтезирован через {used_service}")
     
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
@@ -161,18 +129,15 @@ def send_voice_reply_sync(chat_id, text):
             data = {'chat_id': chat_id}
             response = requests.post(url, files=files, data=data, timeout=30)
         os.unlink(audio_path)
-        if response.status_code == 200:
-            print(f"✅ Голосовое сообщение отправлено!")
-            LAST_VOICE_MESSAGE[chat_id] = text_hash
-            return True
-        else:
-            print(f"❌ Ошибка отправки: {response.status_code}")
-            return False
+        return response.status_code == 200
     except Exception as e:
         print(f"❌ Отправка голоса: {e}")
         return False
 
-# === НОРМАЛИЗАЦИЯ ===
+# ==========================
+# НОРМАЛИЗАЦИЯ
+# ==========================
+
 def normalize_query(text):
     corrections = {
         r"валдберис": "Wildberries",
@@ -213,7 +178,10 @@ def normalize_query(text):
         print(f"🔧 Нормализация: '{text}' → '{normalized}'")
     return normalized
 
-# === ПАРСИНГ САЙТОВ ===
+# ==========================
+# ПАРСИНГ САЙТОВ
+# ==========================
+
 def parse_site_for_info(url):
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -244,11 +212,13 @@ def parse_site_for_info(url):
         print(f"❌ Ошибка парсинга: {e}")
         return None
 
-# === VISION (РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ ЧЕРЕЗ GROQ) ===
+# ==========================
+# VISION (РАСПОЗНАВАНИЕ ФОТО)
+# ==========================
+
 def describe_image_with_groq(image_data):
     try:
         import groq
-        
         if isinstance(image_data, bytes):
             img = Image.open(io.BytesIO(image_data))
         else:
@@ -263,18 +233,16 @@ def describe_image_with_groq(image_data):
         buffer = io.BytesIO()
         img.convert('RGB').save(buffer, format='JPEG', quality=80)
         compressed_data = buffer.getvalue()
-        
         base64_image = base64.b64encode(compressed_data).decode('utf-8')
         
         client = groq.Groq(api_key=GROQ_API_KEY)
-        
         response = client.chat.completions.create(
             model="llama-3.2-90b-vision-preview",
             messages=[
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Опиши, что ты видишь на этой картинке. Если там есть текст, напиши его. Ответ дай на русском, кратко, но с деталями."},
+                        {"type": "text", "text": "Опиши, что ты видишь на этой картинке. Если там есть текст, напиши его. Ответ дай на русском."},
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
                     ]
                 }
@@ -287,7 +255,10 @@ def describe_image_with_groq(image_data):
         print(f"❌ Groq Vision ошибка: {e}")
         return None
 
-# === OCR (РАСПОЗНАВАНИЕ ТЕКСТА ЧЕРЕЗ YANDEX) ===
+# ==========================
+# OCR (РАСПОЗНАВАНИЕ ТЕКСТА С ФОТО)
+# ==========================
+
 def ocr_yandex(image_data):
     if not YANDEX_API_KEY:
         return None
@@ -306,19 +277,16 @@ def ocr_yandex(image_data):
         buffer = io.BytesIO()
         img.save(buffer, format='JPEG', quality=90)
         compressed_data = buffer.getvalue()
-        
         base64_image = base64.b64encode(compressed_data).decode('utf-8')
         
         url = "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze"
         headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}"}
-        
         payload = {
             "analyze_specs": [{
                 "content": base64_image,
                 "features": [{"type": "TEXT_DETECTION"}]
             }]
         }
-        
         response = requests.post(url, headers=headers, json=payload, timeout=15)
         if response.status_code == 200:
             data = response.json()
@@ -329,22 +297,15 @@ def ocr_yandex(image_data):
                         text_blocks.append(line.get("text", ""))
             return "\n".join(text_blocks) if text_blocks else None
         else:
-            print(f"❌ Yandex OCR ошибка: {response.status_code}")
             return None
     except Exception as e:
         print(f"❌ Yandex OCR: {e}")
         return None
 
-# === СТАТУС "ПЕЧАТАЕТ..." ===
-def send_typing(chat_id):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction"
-        data = {"chat_id": chat_id, "action": "typing"}
-        requests.post(url, json=data, timeout=5)
-    except Exception as e:
-        print(f"❌ Ошибка typing: {e}")
+# ==========================
+# БЭКАП
+# ==========================
 
-# === БЭКАП ===
 def send_backup_email():
     try:
         if not os.path.exists(DB_NAME):
@@ -415,7 +376,10 @@ backup_thread = threading.Thread(target=backup_scheduler, daemon=True)
 backup_thread.start()
 print("🔄 Планировщик бэкапа запущен")
 
-# === БАЗА ДАННЫХ ===
+# ==========================
+# БАЗА ДАННЫХ
+# ==========================
+
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -492,7 +456,10 @@ def init_db():
 
 init_db()
 
-# === ФУНКЦИИ БАЗЫ ===
+# ==========================
+# ФУНКЦИИ БАЗЫ
+# ==========================
+
 def get_user(user_id):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -662,7 +629,10 @@ def get_memory(user_id, key):
     conn.close()
     return row[0] if row else None
 
-# === ЗАДАЧИ ===
+# ==========================
+# ЗАДАЧИ
+# ==========================
+
 def add_task(user_id, text, priority="normal", due_date=None):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -700,7 +670,10 @@ def delete_task(user_id, task_id):
     conn.close()
     return affected > 0
 
-# === АНАЛИЗ НАСТРОЕНИЯ ===
+# ==========================
+# АНАЛИЗ НАСТРОЕНИЯ
+# ==========================
+
 def analyze_mood(text):
     sad_words = ["груст", "тоск", "печал", "плач", "больно", "тяжел", "устал", "не могу", "нет сил", "всё плохо", "депресс"]
     anxious_words = ["тревож", "волн", "боюс", "страш", "паник", "нерв", "пережив", "срок", "не успева", "давл"]
@@ -717,7 +690,10 @@ def analyze_mood(text):
         return "tired"
     return "neutral"
 
-# === ОПРЕДЕЛЕНИЕ ГОРОДА ===
+# ==========================
+# ОПРЕДЕЛЕНИЕ ГОРОДА
+# ==========================
+
 def get_city_by_ip(ip):
     try:
         response = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,regionName,city,timezone,offset", timeout=3)
@@ -750,7 +726,10 @@ def get_timezone_offset(city_name):
             return offset
     return 3
 
-# === ПОИСК ===
+# ==========================
+# ПОИСК
+# ==========================
+
 async def search_duckduckgo(query):
     try:
         url = f"https://html.duckduckgo.com/html/?q={query}"
@@ -826,7 +805,10 @@ async def search_web(query, need_links=False, is_image_search=False):
         return "\n\n".join(results) if results else None
     return None
 
-# === ГОЛОС (ВХОД) ===
+# ==========================
+# ГОЛОС (ВХОД)
+# ==========================
+
 def transcribe_audio_with_groq(audio_url):
     try:
         from groq import Groq
@@ -848,7 +830,10 @@ def transcribe_audio_with_groq(audio_url):
         print(f"❌ Groq: {e}")
         return None
 
-# === DEEPSEEK ===
+# ==========================
+# DEEPSEEK
+# ==========================
+
 client = OpenAI(
     api_key=DEEPSEEK_API_KEY,
     base_url=DEEPSEEK_BASE_URL
@@ -884,14 +869,20 @@ def create_summary(user_id, messages):
         print(f"❌ Ошибка выжимки: {e}")
         return None
 
-# === ТАРИФЫ ===
+# ==========================
+# ТАРИФЫ
+# ==========================
+
 TARIFFS = {
     "Sapphire": {"price": 10000, "daily_limit": 100, "model": "deepseek-chat"},
     "Black": {"price": 25000, "daily_limit": 200, "model": "deepseek-chat"},
 }
 TEST_USERS = ["test_user", "web_user"]
 
-# === ЧЕЛОВЕЧЕСКИЙ ПРОМПТ ===
+# ==========================
+# ПРОМПТ
+# ==========================
+
 AURA_PROMPT = """Ты — AURA, помощник в Telegram.
 
 ТВОЙ СТИЛЬ:
@@ -903,7 +894,10 @@ AURA_PROMPT = """Ты — AURA, помощник в Telegram.
 
 Ты понятный, живой и полезный помощник. Без перегруза."""
 
-# === ОСНОВНОЙ БОТ ===
+# ==========================
+# ОСНОВНОЙ БОТ
+# ==========================
+
 app = FastAPI()
 
 @app.post("/webhook")
@@ -916,8 +910,6 @@ async def webhook(request: Request):
         chat_id = str(message["chat"]["id"])
         text = None
         image_data = None
-        
-        send_typing(chat_id)
         
         if "voice" in message:
             file_id = message["voice"]["file_id"]
@@ -967,11 +959,9 @@ async def webhook(request: Request):
         
         if text:
             result = await process_message(request, chat_id, text)
-            formatted_reply = result["reply"]
-            send_message(chat_id, formatted_reply)
+            send_message(chat_id, result["reply"])
             if result["reply"]:
-                # Отправляем голос синхронно, в отдельном потоке
-                threading.Thread(target=send_voice_reply_sync, args=(chat_id, result["reply"])).start()
+                threading.Thread(target=send_voice_reply, args=(chat_id, result["reply"])).start()
                 
         return JSONResponse({"ok": True})
     except Exception as e:
@@ -1018,7 +1008,6 @@ async def process_message(request: Request, user_id, text):
     normalized_text = normalize_query(text)
     search_text = normalized_text if normalized_text != lower else lower
 
-    # === ПАМЯТЬ ===
     msg_count = get_message_count(user_id)
     if msg_count <= 2:
         topics_summary = get_user_topics_summary(user_id)
@@ -1030,7 +1019,6 @@ async def process_message(request: Request, user_id, text):
             send_message(user_id, welcome)
             save_message(user_id, "assistant", welcome)
 
-    # === ГОРОД ===
     city_info = get_user_city(user_id)
     user_city = city_info[0] if city_info else None
     city_asked = city_info[1] if city_info else 0
@@ -1083,7 +1071,6 @@ async def process_message(request: Request, user_id, text):
         current_time_str = current_time.strftime("%H:%M")
         user_city = "Москва"
 
-    # === ПОИСК ===
     search_result = None
     
     is_image_search = bool(re.search(r"(?:картинк|фото|изображен|рисунк)", search_text))
@@ -1106,7 +1093,6 @@ async def process_message(request: Request, user_id, text):
             else:
                 print("❌ Ничего не найдено")
 
-    # === КОМАНДЫ ===
     if "/задача" in lower:
         parts = text.split(" ", 1)
         if len(parts) >= 2:
