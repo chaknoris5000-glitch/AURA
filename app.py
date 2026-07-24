@@ -65,26 +65,8 @@ if TavilyClient and TAVILY_API_KEY:
         print(f"⚠️ Tavily: {e}")
 
 # ==========================
-# ГОЛОС (TTS)
+# ГОЛОС (ТОЛЬКО YANDEX TTS)
 # ==========================
-
-def silero_tts(text):
-    try:
-        import torch
-        import soundfile as sf
-        device = torch.device('cpu')
-        model, _ = torch.hub.load(repo_or_dir='snakers4/silero-models',
-                                   model='silero_tts',
-                                   language='ru',
-                                   speaker='aidar')
-        model.to(device)
-        audio = model.apply_tts(text, speaker='aidar', sample_rate=48000)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-            sf.write(tmp.name, audio, 48000)
-            return tmp.name
-    except Exception as e:
-        print(f"❌ Silero TTS: {e}")
-        return None
 
 def yandex_tts(text):
     if not YANDEX_API_KEY:
@@ -95,7 +77,7 @@ def yandex_tts(text):
         data = {
             "text": text[:500],
             "lang": "ru-RU",
-            "voice": "filipp",
+            "voice": "filipp",  # Мужской
             "emotion": "good",
             "speed": 1.0,
             "format": "lpcm",
@@ -118,8 +100,9 @@ def send_voice_reply(chat_id, text):
     if not voice_text:
         return False
     
-    audio_path = yandex_tts(voice_text) or silero_tts(voice_text)
+    audio_path = yandex_tts(voice_text)
     if not audio_path:
+        print("❌ Голос не синтезирован (Яндекс TTS не работает)")
         return False
     
     try:
@@ -213,7 +196,7 @@ def parse_site_for_info(url):
         return None
 
 # ==========================
-# VISION (РАСПОЗНАВАНИЕ ФОТО)
+# VISION (НОВАЯ МОДЕЛЬ)
 # ==========================
 
 def describe_image_with_groq(image_data):
@@ -237,7 +220,7 @@ def describe_image_with_groq(image_data):
         
         client = groq.Groq(api_key=GROQ_API_KEY)
         response = client.chat.completions.create(
-            model="llama-3.2-90b-vision-preview",
+            model="llama-3.2-11b-vision-preview",  # НОВАЯ МОДЕЛЬ
             messages=[
                 {
                     "role": "user",
@@ -256,51 +239,12 @@ def describe_image_with_groq(image_data):
         return None
 
 # ==========================
-# OCR (РАСПОЗНАВАНИЕ ТЕКСТА С ФОТО)
+# OCR (ОТКЛЮЧЁН, Т.К. КЛЮЧ НЕ РАБОТАЕТ)
 # ==========================
 
 def ocr_yandex(image_data):
-    if not YANDEX_API_KEY:
-        return None
-    try:
-        if isinstance(image_data, bytes):
-            img = Image.open(io.BytesIO(image_data))
-        else:
-            img = Image.open(io.BytesIO(image_data))
-        
-        max_size = 2048
-        if max(img.size) > max_size:
-            ratio = max_size / max(img.size)
-            new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
-            img = img.resize(new_size, Image.Resampling.LANCZOS)
-        
-        buffer = io.BytesIO()
-        img.save(buffer, format='JPEG', quality=90)
-        compressed_data = buffer.getvalue()
-        base64_image = base64.b64encode(compressed_data).decode('utf-8')
-        
-        url = "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze"
-        headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}"}
-        payload = {
-            "analyze_specs": [{
-                "content": base64_image,
-                "features": [{"type": "TEXT_DETECTION"}]
-            }]
-        }
-        response = requests.post(url, headers=headers, json=payload, timeout=15)
-        if response.status_code == 200:
-            data = response.json()
-            text_blocks = []
-            for result in data.get("results", []):
-                for block in result.get("textDetection", {}).get("blocks", []):
-                    for line in block.get("lines", []):
-                        text_blocks.append(line.get("text", ""))
-            return "\n".join(text_blocks) if text_blocks else None
-        else:
-            return None
-    except Exception as e:
-        print(f"❌ Yandex OCR: {e}")
-        return None
+    # Временно отключено, так как ключ 401
+    return None
 
 # ==========================
 # БЭКАП
@@ -938,16 +882,13 @@ async def webhook(request: Request):
                     image_data = image_response.content
                     send_message(chat_id, "🖼️ Обрабатываю фото...")
                     vision_result = describe_image_with_groq(image_data)
-                    ocr_result = ocr_yandex(image_data)
+                    # OCR временно отключён
                     result_text = "**📸 Что я вижу на фото:**\n\n"
                     if vision_result:
                         result_text += f"{vision_result}\n\n"
                     else:
                         result_text += "❌ Не удалось описать фото.\n\n"
-                    if ocr_result:
-                        result_text += f"**📝 Текст на фото:**\n{ocr_result}"
-                    else:
-                        result_text += "📝 Текст на фото не найден."
+                    result_text += "📝 Распознавание текста временно недоступно."
                     send_message(chat_id, result_text)
                     return JSONResponse({"ok": True})
                 else:
