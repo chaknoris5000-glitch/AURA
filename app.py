@@ -30,7 +30,7 @@ from PIL import Image
 # === ЗАГРУЗКА КЛЮЧЕЙ ИЗ .env ===
 load_dotenv()
 
-# === TAVILY ===
+# === TAVILY ДЛЯ ПОИСКА ===
 try:
     from tavily import TavilyClient
 except ImportError:
@@ -90,7 +90,20 @@ def silero_tts(text):
         print(f"❌ Silero TTS: {e}")
         return None
 
-# === НОРМАЛИЗАЦИЯ (исправление опечаток) ===
+# === GOOGLE TTS (БЕСПЛАТНО, БЕЗ КЛЮЧА) ===
+def google_tts(text):
+    """Синтез речи через Google TTS (бесплатно, без ключа)"""
+    try:
+        from gtts import gTTS
+        tts = gTTS(text=text, lang='ru', slow=False)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+            tts.save(tmp.name)
+            return tmp.name
+    except Exception as e:
+        print(f"❌ Google TTS ошибка: {e}")
+        return None
+
+# === НОРМАЛИЗАЦИЯ ===
 def normalize_query(text):
     corrections = {
         r"валдберис": "Wildberries",
@@ -131,7 +144,7 @@ def normalize_query(text):
         print(f"🔧 Нормализация: '{text}' → '{normalized}'")
     return normalized
 
-# === ПАРСИНГ САЙТОВ (телефоны, адреса) ===
+# === ПАРСИНГ САЙТОВ ===
 def parse_site_for_info(url):
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -162,24 +175,31 @@ def parse_site_for_info(url):
         print(f"❌ Ошибка парсинга: {e}")
         return None
 
-# === VISION (описание картинок через Groq) ===
+# === VISION (РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ ЧЕРЕЗ GROQ) ===
 def describe_image_with_groq(image_data):
+    """Отправляет изображение в Groq Vision с сжатием"""
     try:
         import groq
+        
         if isinstance(image_data, bytes):
             img = Image.open(io.BytesIO(image_data))
         else:
-            img = Image.open(io.BytesIO(image_data.encode('utf-8')))
+            img = Image.open(io.BytesIO(image_data))
+        
         max_size = 1024
         if max(img.size) > max_size:
             ratio = max_size / max(img.size)
             new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
             img = img.resize(new_size, Image.Resampling.LANCZOS)
+        
         buffer = io.BytesIO()
         img.convert('RGB').save(buffer, format='JPEG', quality=85)
         compressed_data = buffer.getvalue()
+        
         base64_image = base64.b64encode(compressed_data).decode('utf-8')
+        
         client = groq.Groq(api_key=GROQ_API_KEY)
+        
         response = client.chat.completions.create(
             model="llama-3.2-90b-vision-preview",
             messages=[
@@ -199,32 +219,40 @@ def describe_image_with_groq(image_data):
         print(f"❌ Groq Vision ошибка: {e}")
         return None
 
-# === OCR (текст с картинки через Yandex) ===
+# === OCR (РАСПОЗНАВАНИЕ ТЕКСТА ЧЕРЕЗ YANDEX) ===
 def ocr_yandex(image_data):
+    """Распознаёт текст с картинки через Yandex Vision OCR"""
     if not YANDEX_API_KEY:
+        print("❌ YANDEX_API_KEY не найден для OCR")
         return None
     try:
         if isinstance(image_data, bytes):
             img = Image.open(io.BytesIO(image_data))
         else:
-            img = Image.open(io.BytesIO(image_data.encode('utf-8')))
+            img = Image.open(io.BytesIO(image_data))
+        
         max_size = 2048
         if max(img.size) > max_size:
             ratio = max_size / max(img.size)
             new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
             img = img.resize(new_size, Image.Resampling.LANCZOS)
+        
         buffer = io.BytesIO()
         img.save(buffer, format='JPEG', quality=90)
         compressed_data = buffer.getvalue()
+        
         base64_image = base64.b64encode(compressed_data).decode('utf-8')
+        
         url = "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze"
         headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}"}
+        
         payload = {
             "analyze_specs": [{
                 "content": base64_image,
                 "features": [{"type": "TEXT_DETECTION"}]
             }]
         }
+        
         response = requests.post(url, headers=headers, json=payload, timeout=15)
         if response.status_code == 200:
             data = response.json()
@@ -235,10 +263,65 @@ def ocr_yandex(image_data):
                         text_blocks.append(line.get("text", ""))
             return "\n".join(text_blocks) if text_blocks else None
         else:
+            print(f"❌ Yandex OCR ошибка: {response.status_code}")
             return None
     except Exception as e:
         print(f"❌ Yandex OCR: {e}")
         return None
+
+# === ОСНОВНАЯ ФУНКЦИЯ ОТПРАВКИ ГОЛОСА ===
+async def send_voice_reply(chat_id, text):
+    """Отправляет голосовое сообщение (Яндекс → Silero → Google)"""
+    if not text or len(text.strip()) == 0:
+        return False
+    
+    voice_text = text.split('\n')[0] if '\n' in text else text
+    if len(voice_text) > 300:
+        voice_text = voice_text[:300] + "..."
+    
+    audio_path = None
+    used_service = None
+    
+    if YANDEX_API_KEY:
+        print(f"🎤 Пробую Яндекс TTS...")
+        audio_path = yandex_tts(voice_text)
+        if audio_path:
+            used_service = "Яндекс"
+    
+    if not audio_path:
+        print(f"🎤 Пробую Silero TTS...")
+        audio_path = silero_tts(voice_text)
+        if audio_path:
+            used_service = "Silero"
+    
+    if not audio_path:
+        print(f"🎤 Пробую Google TTS...")
+        audio_path = google_tts(voice_text)
+        if audio_path:
+            used_service = "Google"
+    
+    if not audio_path:
+        print("❌ Не удалось синтезировать голос (все сервисы недоступны)")
+        return False
+    
+    print(f"✅ Голос синтезирован через {used_service}")
+    
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
+        with open(audio_path, 'rb') as f:
+            files = {'audio': f}
+            data = {'chat_id': chat_id}
+            response = requests.post(url, files=files, data=data, timeout=30)
+        os.unlink(audio_path)
+        if response.status_code == 200:
+            print(f"✅ Голосовое сообщение отправлено! (через {used_service})")
+            return True
+        else:
+            print(f"❌ Ошибка отправки: {response.status_code}")
+            return False
+    except Exception as e:
+        print(f"❌ Отправка голоса: {e}")
+        return False
 
 # === СТАТУС "ПЕЧАТАЕТ..." ===
 def send_typing(chat_id):
@@ -680,31 +763,6 @@ def yandex_tts(text):
     except Exception as e:
         print(f"❌ Yandex TTS: {e}")
         return None
-
-async def send_voice_reply(chat_id, text):
-    if not text or len(text.strip()) == 0:
-        return False
-    voice_text = text.split('\n')[0] if '\n' in text else text
-    if len(voice_text) > 300:
-        voice_text = voice_text[:300] + "..."
-    audio_path = None
-    if YANDEX_API_KEY:
-        audio_path = yandex_tts(voice_text)
-    if not audio_path:
-        audio_path = silero_tts(voice_text)
-    if not audio_path:
-        return False
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
-        with open(audio_path, 'rb') as f:
-            files = {'audio': f}
-            data = {'chat_id': chat_id}
-            response = requests.post(url, files=files, data=data, timeout=30)
-        os.unlink(audio_path)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"❌ Отправка голоса: {e}")
-        return False
 
 # === ПОИСК ===
 async def search_duckduckgo(query):
