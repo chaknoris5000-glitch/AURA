@@ -706,7 +706,7 @@ def transcribe_audio_with_groq(audio_url):
         return None
 
 # ==========================
-# DEEPSEEK V4 FLASH (НОВАЯ МОДЕЛЬ)
+# DEEPSEEK V4 FLASH
 # ==========================
 
 client = OpenAI(
@@ -716,17 +716,15 @@ client = OpenAI(
 
 async def get_ai_response(messages, model):
     try:
-        # ИСПОЛЬЗУЕМ НОВУЮ МОДЕЛЬ DEEPSEEK V4 FLASH
         response = client.chat.completions.create(
-            model="deepseek-v4-flash",  # ✅ НОВАЯ МОДЕЛЬ! В 2 РАЗА БЫСТРЕЕ
+            model="deepseek-v4-flash",
             messages=messages,
             temperature=0.8,
-            max_tokens=300
+            max_tokens=1200
         )
         return response.choices[0].message.content
     except Exception as e:
         print(f"❌ DeepSeek V4 ошибка: {e}")
-        # Если DeepSeek не работает — пробуем Groq как запасной
         try:
             from groq import Groq
             groq_client = Groq(api_key=GROQ_API_KEY)
@@ -734,7 +732,7 @@ async def get_ai_response(messages, model):
                 model="llama-3.3-70b-versatile",
                 messages=messages,
                 temperature=0.8,
-                max_tokens=300
+                max_tokens=1200
             )
             print("✅ Ответ через Groq (запасной)")
             return groq_response.choices[0].message.content
@@ -749,10 +747,10 @@ def create_summary(user_id, messages):
 {messages}
 Выжимка:"""
         response = client.chat.completions.create(
-            model="deepseek-v4-flash",  # ТОЖЕ НОВАЯ МОДЕЛЬ
+            model="deepseek-v4-flash",
             messages=[{"role": "user", "content": summary_prompt}],
             temperature=0.7,
-            max_tokens=150
+            max_tokens=300
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -770,29 +768,26 @@ TARIFFS = {
 TEST_USERS = ["test_user", "web_user"]
 
 # ==========================
-# ПРОМПТ
+# НОВЫЙ ПРОМПТ (КАК Я)
 # ==========================
 
-AURA_PROMPT = """Ты — AURA, помощник в Telegram.
+AURA_PROMPT = """Ты — AURA. Ты — мой личный аналог в Telegram.
 
-ОСНОВНОЙ СТИЛЬ:
-- Отвечай КОРОТКО — 2–3 предложения, как в живом чате.
-- Если пользователь просит "подробнее", "расскажи подробно", "разверни" — только тогда давай развёрнутый ответ.
-- Не перегружай ответы лишней информацией.
+ТВОЙ СТИЛЬ — КАК У МЕНЯ:
+- Отвечай коротко, по делу. 1–3 предложения. Без воды.
+- Говори просто, как человек в чате. Без канцелярита и роботизированных фраз.
+- Если нужно — дай ссылку, телефон или адрес одной строкой.
+- Не спрашивай "что ещё?" после каждого ответа. Только если это реально нужно.
+- Не используй эмодзи, если они не несут смысла. Иногда можно: 😊🔥🚀 — но редко.
+- Отвечай так, будто ты — я, но в телеграме. Дружелюбно, прямо, без лишнего пафоса.
 
-ФОРМАТИРОВАНИЕ:
-- Используй **жирный** только для ключевой мысли (1 раз в ответе).
-- Эмодзи ставь РЕДКО — только для эмоционального акцента (😊🔥🚀).
-- Ссылки давай только если просят ("дай ссылку").
-- Номера и адреса давай списком (без галочек, просто строки).
+ПРАВИЛА:
+- Если пользователь просит "подробнее" или "разверни" — тогда дай развёрнутый ответ.
+- По умолчанию — только суть.
+- Не выдумывай. Если не знаешь — скажи честно.
 
-ПРИМЕР (короткий ответ):
-"В Белово есть несколько объявлений о продаже котят. Могу дать ссылки, если нужно."
+Ты — полезный, живой, короткий и понятный помощник. Как я."""
 
-ПРИМЕР (развёрнутый по запросу "подробнее"):
-"На Авито в Белово сейчас 5 объявлений: британцы от 10 000 ₽, мейн-кун 15 000 ₽, и три бесплатных котёнка. Вот ссылки: ..."
-
-Ты — живой, полезный и ненавязчивый помощник. Без воды и перегруза."""
 # ==========================
 # ОСНОВНОЙ БОТ
 # ==========================
@@ -1110,21 +1105,12 @@ async def process_message(request: Request, user_id, text):
         # ПАМЯТЬ В ПРОМПТЕ (ЧЕСТНАЯ)
         # ==========================
         
-        # Получаем сохранённые темы из базы
         topics = get_all_topics(user_id)
         topics_text = ", ".join(topics[:7]) if topics else "нет сохранённых тем"
-        
-        # Получаем последнюю выжимку (если есть)
         summary = get_memory(user_id, "summary")
         summary_text = f"Краткая выжимка прошлых диалогов: {summary}" if summary else ""
-        
-        # Формируем честный контекст
         memory_context = f"Вот реальные темы, которые мы обсуждали раньше: {topics_text}. {summary_text} Используй эту информацию, если пользователь спрашивает о прошлых разговорах. НЕ ВЫДУМЫВАЙ ТО, ЧЕГО НЕ БЫЛО. Если не помнишь — честно скажи."
-        
-        # Получаем историю
         history = get_history(user_id, limit=30)
-        
-        # Формируем основной промпт
         user_prompt = f"Сегодня {current_date} ({current_day}), сейчас {current_time_str} (город: {user_city}).\n\n{memory_context}\n\n{text}"
 
         mood_context = ""
@@ -1147,7 +1133,6 @@ async def process_message(request: Request, user_id, text):
         reply = await get_ai_response(messages, model)
         reply = re.sub(r'[*_#~`]', '', reply)
 
-        # Сохраняем выжимку каждые 30 сообщений
         if msg_count % 30 == 0 and msg_count > 0:
             recent_msgs = get_history(user_id, limit=15)
             dialog_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent_msgs])
