@@ -46,15 +46,14 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 EMAIL_SENDER = os.getenv("EMAIL_SENDER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
-YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 
 print("🔍 Проверка ключей...")
 if not DEEPSEEK_API_KEY:
     print("❌ НЕТ КЛЮЧА DEEPSEEK!")
 if not TELEGRAM_TOKEN:
     print("❌ НЕТ КЛЮЧА TELEGRAM!")
-if not YANDEX_API_KEY:
-    print("⚠️ НЕТ КЛЮЧА YANDEX (голос не будет работать)")
+if not TAVILY_API_KEY:
+    print("⚠️ НЕТ КЛЮЧА TAVILY")
 
 tavily_client = None
 if TavilyClient and TAVILY_API_KEY:
@@ -65,44 +64,32 @@ if TavilyClient and TAVILY_API_KEY:
         print(f"⚠️ Tavily: {e}")
 
 # ==========================
-# ГОЛОС (ТОЛЬКО YANDEX TTS)
+# ПРОСТОЙ GOOGLE TTS (БЕЗ КЛЮЧЕЙ)
 # ==========================
 
-def yandex_tts(text):
-    if not YANDEX_API_KEY:
-        return None
+def google_tts(text):
+    """Синтез речи через Google TTS (бесплатно, без ключа)"""
     try:
-        url = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
-        headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}"}
-        data = {
-            "text": text[:500],
-            "lang": "ru-RU",
-            "voice": "filipp",  # Мужской
-            "emotion": "good",
-            "speed": 1.0,
-            "format": "lpcm",
-            "sampleRateHertz": 48000
-        }
-        response = requests.post(url, headers=headers, data=data, timeout=10)
-        if response.status_code == 200:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-                tmp.write(response.content)
-                return tmp.name
-        return None
+        from gtts import gTTS
+        tts = gTTS(text=text, lang='ru', slow=False)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+            tts.save(tmp.name)
+            return tmp.name
     except Exception as e:
-        print(f"❌ Yandex TTS: {e}")
+        print(f"❌ Google TTS ошибка: {e}")
         return None
 
 def send_voice_reply(chat_id, text):
     if not text:
         return False
+    
     voice_text = text.split('\n')[0][:300]
     if not voice_text:
         return False
     
-    audio_path = yandex_tts(voice_text)
+    audio_path = google_tts(voice_text)
     if not audio_path:
-        print("❌ Голос не синтезирован (Яндекс TTS не работает)")
+        print("❌ Голос не синтезирован")
         return False
     
     try:
@@ -196,7 +183,7 @@ def parse_site_for_info(url):
         return None
 
 # ==========================
-# VISION (НОВАЯ МОДЕЛЬ)
+# VISION (НОВАЯ МОДЕЛЬ, ЕСЛИ РАБОТАЕТ — ХОРОШО)
 # ==========================
 
 def describe_image_with_groq(image_data):
@@ -220,7 +207,7 @@ def describe_image_with_groq(image_data):
         
         client = groq.Groq(api_key=GROQ_API_KEY)
         response = client.chat.completions.create(
-            model="llama-3.2-11b-vision-preview",  # НОВАЯ МОДЕЛЬ
+            model="llama-3.2-11b-vision-preview",
             messages=[
                 {
                     "role": "user",
@@ -239,11 +226,10 @@ def describe_image_with_groq(image_data):
         return None
 
 # ==========================
-# OCR (ОТКЛЮЧЁН, Т.К. КЛЮЧ НЕ РАБОТАЕТ)
+# OCR (ОТКЛЮЧЁН)
 # ==========================
 
 def ocr_yandex(image_data):
-    # Временно отключено, так как ключ 401
     return None
 
 # ==========================
@@ -882,13 +868,11 @@ async def webhook(request: Request):
                     image_data = image_response.content
                     send_message(chat_id, "🖼️ Обрабатываю фото...")
                     vision_result = describe_image_with_groq(image_data)
-                    # OCR временно отключён
                     result_text = "**📸 Что я вижу на фото:**\n\n"
                     if vision_result:
                         result_text += f"{vision_result}\n\n"
                     else:
                         result_text += "❌ Не удалось описать фото.\n\n"
-                    result_text += "📝 Распознавание текста временно недоступно."
                     send_message(chat_id, result_text)
                     return JSONResponse({"ok": True})
                 else:
@@ -956,7 +940,7 @@ async def process_message(request: Request, user_id, text):
             send_message(user_id, f"**👋 Привет!** {topics_summary}")
             save_message(user_id, "assistant", topics_summary)
         else:
-            welcome = "**👋 Привет!** Я AURA — твой помощник. 😊\n\n✅ Ищу информацию в интернете\n✅ Нахожу телефоны и адреса\n✅ Распознаю текст на фото\n✅ Отвечаю голосом\n\nЧем могу помочь?"
+            welcome = "**👋 Привет!** Я AURA — твой помощник. 😊\n\n✅ Ищу информацию в интернете\n✅ Нахожу телефоны и адреса\n✅ Отвечаю голосом\n\nЧем могу помочь?"
             send_message(user_id, welcome)
             save_message(user_id, "assistant", welcome)
 
@@ -1120,7 +1104,7 @@ async def process_message(request: Request, user_id, text):
 /напомни ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ
 /моинапоминания — показать все
 
-**📸 Фото:** отправь фото — опишу и распознаю текст
+**📸 Фото:** отправь фото — опишу
 **🎤 Голос:** отправь голосовое — услышу и отвечу
 **🌍 Город:** скажи "Мой город ..." — запомню время
 
