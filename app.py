@@ -26,6 +26,7 @@ from bs4 import BeautifulSoup
 import base64
 import io
 from PIL import Image
+import asyncio
 
 # === ЗАГРУЗКА КЛЮЧЕЙ ИЗ .env ===
 load_dotenv()
@@ -40,6 +41,7 @@ except ImportError:
 # === КОНФИГ ===
 DB_NAME = "aura.db"
 BACKUP_NAME = "aura_backup.db"
+LAST_VOICE_MESSAGE = {}  # для предотвращения дубляжа голоса
 
 # === КЛЮЧИ ===
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
@@ -71,7 +73,7 @@ if TavilyClient and TAVILY_API_KEY:
     except Exception as e:
         print(f"⚠️ Tavily: {e}")
 
-# === SILERO TTS (бесплатный голос) ===
+# === SILERO TTS ===
 def silero_tts(text):
     try:
         import torch
@@ -90,9 +92,21 @@ def silero_tts(text):
         print(f"❌ Silero TTS: {e}")
         return None
 
-# === GOOGLE TTS (БЕСПЛАТНО, БЕЗ КЛЮЧА) ===
+# === EDGE TTS (мужской голос) ===
+async def edge_tts(text):
+    """Синтез речи через Edge TTS (бесплатно, качественный мужской голос)"""
+    try:
+        import edge_tts
+        voice = "ru-RU-DmitryNeural"  # Мужской голос
+        output_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3").name
+        await edge_tts.Communicate(text, voice).save(output_file)
+        return output_file
+    except Exception as e:
+        print(f"❌ Edge TTS ошибка: {e}")
+        return None
+
+# === GOOGLE TTS (запасной) ===
 def google_tts(text):
-    """Синтез речи через Google TTS (бесплатно, без ключа)"""
     try:
         from gtts import gTTS
         tts = gTTS(text=text, lang='ru', slow=False)
@@ -177,7 +191,7 @@ def parse_site_for_info(url):
 
 # === VISION (РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ ЧЕРЕЗ GROQ) ===
 def describe_image_with_groq(image_data):
-    """Отправляет изображение в Groq Vision с сжатием"""
+    """Отправляет изображение в Groq Vision с сжатием до 512px"""
     try:
         import groq
         
@@ -186,14 +200,14 @@ def describe_image_with_groq(image_data):
         else:
             img = Image.open(io.BytesIO(image_data))
         
-        max_size = 1024
+        max_size = 512
         if max(img.size) > max_size:
             ratio = max_size / max(img.size)
             new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
             img = img.resize(new_size, Image.Resampling.LANCZOS)
         
         buffer = io.BytesIO()
-        img.convert('RGB').save(buffer, format='JPEG', quality=85)
+        img.convert('RGB').save(buffer, format='JPEG', quality=80)
         compressed_data = buffer.getvalue()
         
         base64_image = base64.b64encode(compressed_data).decode('utf-8')
@@ -221,9 +235,7 @@ def describe_image_with_groq(image_data):
 
 # === OCR (РАСПОЗНАВАНИЕ ТЕКСТА ЧЕРЕЗ YANDEX) ===
 def ocr_yandex(image_data):
-    """Распознаёт текст с картинки через Yandex Vision OCR"""
     if not YANDEX_API_KEY:
-        print("❌ YANDEX_API_KEY не найден для OCR")
         return None
     try:
         if isinstance(image_data, bytes):
@@ -269,11 +281,43 @@ def ocr_yandex(image_data):
         print(f"❌ Yandex OCR: {e}")
         return None
 
-# === ОСНОВНАЯ ФУНКЦИЯ ОТПРАВКИ ГОЛОСА ===
+# === YANDEX TTS (мужской голос) ===
+def yandex_tts(text):
+    if not YANDEX_API_KEY:
+        return None
+    try:
+        url = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
+        headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}"}
+        data = {
+            "text": text[:500],
+            "lang": "ru-RU",
+            "voice": "filipp",  # Мужской голос
+            "emotion": "good",
+            "speed": 1.0,
+            "format": "lpcm",
+            "sampleRateHertz": 48000
+        }
+        response = requests.post(url, headers=headers, data=data, timeout=10)
+        if response.status_code == 200:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+                tmp.write(response.content)
+                return tmp.name
+        return None
+    except Exception as e:
+        print(f"❌ Yandex TTS: {e}")
+        return None
+
+# === ОСНОВНАЯ ФУНКЦИЯ ОТПРАВКИ ГОЛОСА (С ЗАЩИТОЙ ОТ ДУБЛЯЖА) ===
 async def send_voice_reply(chat_id, text):
-    """Отправляет голосовое сообщение (Яндекс → Silero → Google)"""
+    """Отправляет голосовое сообщение (Яндекс → Edge → Silero) с защитой от дубляжа"""
     if not text or len(text.strip()) == 0:
         return False
+    
+    # Проверяем, не отправляли ли мы уже этот же текст в голосе
+    text_hash = hash(text[:100])  # Берём хеш первых 100 символов
+    if LAST_VOICE_MESSAGE.get(chat_id) == text_hash:
+        print(f"⏭️ Пропускаем дубляж голоса для {chat_id}")
+        return True  # Возвращаем True, чтобы не прерывать обработку
     
     voice_text = text.split('\n')[0] if '\n' in text else text
     if len(voice_text) > 300:
@@ -283,10 +327,16 @@ async def send_voice_reply(chat_id, text):
     used_service = None
     
     if YANDEX_API_KEY:
-        print(f"🎤 Пробую Яндекс TTS...")
+        print(f"🎤 Пробую Яндекс TTS (мужской)...")
         audio_path = yandex_tts(voice_text)
         if audio_path:
-            used_service = "Яндекс"
+            used_service = "Яндекс (мужской)"
+    
+    if not audio_path:
+        print(f"🎤 Пробую Edge TTS (мужской)...")
+        audio_path = await edge_tts(voice_text)
+        if audio_path:
+            used_service = "Edge (мужской)"
     
     if not audio_path:
         print(f"🎤 Пробую Silero TTS...")
@@ -295,13 +345,7 @@ async def send_voice_reply(chat_id, text):
             used_service = "Silero"
     
     if not audio_path:
-        print(f"🎤 Пробую Google TTS...")
-        audio_path = google_tts(voice_text)
-        if audio_path:
-            used_service = "Google"
-    
-    if not audio_path:
-        print("❌ Не удалось синтезировать голос (все сервисы недоступны)")
+        print("❌ Не удалось синтезировать голос")
         return False
     
     print(f"✅ Голос синтезирован через {used_service}")
@@ -314,7 +358,9 @@ async def send_voice_reply(chat_id, text):
             response = requests.post(url, files=files, data=data, timeout=30)
         os.unlink(audio_path)
         if response.status_code == 200:
-            print(f"✅ Голосовое сообщение отправлено! (через {used_service})")
+            print(f"✅ Голосовое сообщение отправлено!")
+            # Запоминаем, что этот текст уже озвучили
+            LAST_VOICE_MESSAGE[chat_id] = text_hash
             return True
         else:
             print(f"❌ Ошибка отправки: {response.status_code}")
@@ -631,7 +677,7 @@ def get_user_topics_summary(user_id):
     sorted_topics = sorted(topic_counts.items(), key=lambda x: x[1], reverse=True)
     top_topics = [t[0] for t in sorted_topics[:10]]
     if top_topics:
-        return f"📚 Я помню, что мы обсуждали: {', '.join(top_topics)}."
+        return f"📚 Я помню, что мы обсуждали: {', '.join(top_topics)}. Чем могу помочь сегодня? 😊"
     return None
 
 def save_memory(user_id, key, value):
@@ -737,32 +783,6 @@ def get_timezone_offset(city_name):
         if city in city_name.lower():
             return offset
     return 3
-
-# === YANDEX TTS ===
-def yandex_tts(text):
-    if not YANDEX_API_KEY:
-        return None
-    try:
-        url = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
-        headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}"}
-        data = {
-            "text": text[:500],
-            "lang": "ru-RU",
-            "voice": "oksana",
-            "emotion": "good",
-            "speed": 1.0,
-            "format": "lpcm",
-            "sampleRateHertz": 48000
-        }
-        response = requests.post(url, headers=headers, data=data, timeout=10)
-        if response.status_code == 200:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-                tmp.write(response.content)
-                return tmp.name
-        return None
-    except Exception as e:
-        print(f"❌ Yandex TTS: {e}")
-        return None
 
 # === ПОИСК ===
 async def search_duckduckgo(query):
@@ -905,7 +925,7 @@ TARIFFS = {
 }
 TEST_USERS = ["test_user", "web_user"]
 
-# === ЧЕЛОВЕЧЕСКИЙ ПРОМПТ (КОРОТКО, БЕЗ ПЕРЕГРУЗА) ===
+# === ЧЕЛОВЕЧЕСКИЙ ПРОМПТ ===
 AURA_PROMPT = """Ты — AURA, помощник в Telegram.
 
 ТВОЙ СТИЛЬ:
@@ -914,14 +934,6 @@ AURA_PROMPT = """Ты — AURA, помощник в Telegram.
 - НЕ ставь галочки (✅) в каждом ответе — они нужны только для списков.
 - Отвечай на вопрос прямо, потом дай ссылку или совет.
 - В конце не спрашивай "что ещё?" в каждом сообщении — только если действительно нужно.
-
-ПРИМЕР (на вопрос о котятах):
-"В Белово есть несколько объявлений о продаже котят. Могу дать ссылки, если нужно."
-
-ПРИМЕР (когда даёшь ссылки):
-"Вот ссылки на Avito с котятами в Белово:
-https://www.avito.ru/belovo/koshki?q=котёнок
-Если нужна конкретная порода — скажи."
 
 Ты понятный, живой и полезный помощник. Без перегруза."""
 
@@ -991,7 +1003,7 @@ async def webhook(request: Request):
             result = await process_message(request, chat_id, text)
             formatted_reply = result["reply"]
             send_message(chat_id, formatted_reply)
-            if YANDEX_API_KEY and result["reply"]:
+            if result["reply"]:
                 await send_voice_reply(chat_id, result["reply"])
                 
         return JSONResponse({"ok": True})
@@ -1044,7 +1056,7 @@ async def process_message(request: Request, user_id, text):
     if msg_count <= 2:
         topics_summary = get_user_topics_summary(user_id)
         if topics_summary:
-            send_message(user_id, f"**👋 Привет!** {topics_summary} Чем могу помочь сегодня? 😊")
+            send_message(user_id, f"**👋 Привет!** {topics_summary}")
             save_message(user_id, "assistant", topics_summary)
         else:
             welcome = "**👋 Привет!** Я AURA — твой помощник. 😊\n\n✅ Ищу информацию в интернете\n✅ Нахожу телефоны и адреса\n✅ Распознаю текст на фото\n✅ Отвечаю голосом\n\nЧем могу помочь?"
