@@ -64,14 +64,13 @@ if TavilyClient and TAVILY_API_KEY:
         print(f"⚠️ Tavily: {e}")
 
 # ==========================
-# ПРОСТОЙ GOOGLE TTS (БЕЗ КЛЮЧЕЙ)
+# ГОЛОС (Google TTS)
 # ==========================
 
 def google_tts(text):
-    """Синтез речи через Google TTS (бесплатно, без ключа)"""
     try:
         from gtts import gTTS
-        tts = gTTS(text=text, lang='ru', slow=False)
+        tts = gTTS(text=text, lang='ru', slow=False, tld='ru')
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
             tts.save(tmp.name)
             return tmp.name
@@ -82,16 +81,13 @@ def google_tts(text):
 def send_voice_reply(chat_id, text):
     if not text:
         return False
-    
     voice_text = text.split('\n')[0][:300]
     if not voice_text:
         return False
-    
     audio_path = google_tts(voice_text)
     if not audio_path:
         print("❌ Голос не синтезирован")
         return False
-    
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
         with open(audio_path, 'rb') as f:
@@ -183,51 +179,11 @@ def parse_site_for_info(url):
         return None
 
 # ==========================
-# VISION (НОВАЯ МОДЕЛЬ, ЕСЛИ РАБОТАЕТ — ХОРОШО)
+# VISION (ОТКЛЮЧЕНА, ЧТОБЫ НЕ МЕШАЛА)
 # ==========================
 
 def describe_image_with_groq(image_data):
-    try:
-        import groq
-        if isinstance(image_data, bytes):
-            img = Image.open(io.BytesIO(image_data))
-        else:
-            img = Image.open(io.BytesIO(image_data))
-        
-        max_size = 512
-        if max(img.size) > max_size:
-            ratio = max_size / max(img.size)
-            new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
-            img = img.resize(new_size, Image.Resampling.LANCZOS)
-        
-        buffer = io.BytesIO()
-        img.convert('RGB').save(buffer, format='JPEG', quality=80)
-        compressed_data = buffer.getvalue()
-        base64_image = base64.b64encode(compressed_data).decode('utf-8')
-        
-        client = groq.Groq(api_key=GROQ_API_KEY)
-        response = client.chat.completions.create(
-            model="llama-3.2-11b-vision-preview",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Опиши, что ты видишь на этой картинке. Если там есть текст, напиши его. Ответ дай на русском."},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                    ]
-                }
-            ],
-            temperature=0.7,
-            max_tokens=300
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        print(f"❌ Groq Vision ошибка: {e}")
-        return None
-
-# ==========================
-# OCR (ОТКЛЮЧЁН)
-# ==========================
+    return None
 
 def ocr_yandex(image_data):
     return None
@@ -529,19 +485,6 @@ def get_all_topics(user_id):
     rows = c.fetchall()
     conn.close()
     return [row[0] for row in rows]
-
-def get_user_topics_summary(user_id):
-    topics = get_all_topics(user_id)
-    if not topics:
-        return None
-    topic_counts = {}
-    for t in topics:
-        topic_counts[t] = topic_counts.get(t, 0) + 1
-    sorted_topics = sorted(topic_counts.items(), key=lambda x: x[1], reverse=True)
-    top_topics = [t[0] for t in sorted_topics[:10]]
-    if top_topics:
-        return f"📚 Я помню, что мы обсуждали: {', '.join(top_topics)}. Чем могу помочь сегодня? 😊"
-    return None
 
 def save_memory(user_id, key, value):
     conn = sqlite3.connect(DB_NAME)
@@ -867,12 +810,7 @@ async def webhook(request: Request):
                 if image_response.status_code == 200:
                     image_data = image_response.content
                     send_message(chat_id, "🖼️ Обрабатываю фото...")
-                    vision_result = describe_image_with_groq(image_data)
-                    result_text = "**📸 Что я вижу на фото:**\n\n"
-                    if vision_result:
-                        result_text += f"{vision_result}\n\n"
-                    else:
-                        result_text += "❌ Не удалось описать фото.\n\n"
+                    result_text = "**📸 Что я вижу на фото:**\n\n❌ Распознавание фото временно недоступно. Скоро появится!"
                     send_message(chat_id, result_text)
                     return JSONResponse({"ok": True})
                 else:
@@ -933,16 +871,40 @@ async def process_message(request: Request, user_id, text):
     normalized_text = normalize_query(text)
     search_text = normalized_text if normalized_text != lower else lower
 
+    # ==========================
+    # ПРОСТОЕ ПРИВЕТСТВИЕ (БЕЗ СПИСКА ТЕМ)
+    # ==========================
     msg_count = get_message_count(user_id)
     if msg_count <= 2:
-        topics_summary = get_user_topics_summary(user_id)
-        if topics_summary:
-            send_message(user_id, f"**👋 Привет!** {topics_summary}")
-            save_message(user_id, "assistant", topics_summary)
+        welcome = "**👋 Привет!** Я AURA — твой помощник. 😊\n\n✅ Ищу информацию в интернете\n✅ Нахожу телефоны и адреса\n✅ Отвечаю голосом\n\nЧем могу помочь?"
+        send_message(user_id, welcome)
+        save_message(user_id, "assistant", welcome)
+
+    # ==========================
+    # КОМАНДА /НАПОМНИ
+    # ==========================
+    if "/напомни" in lower and len(text.split()) > 1:
+        topic = text.lower().replace("/напомни", "").strip()
+        if not topic:
+            reply = "Напиши, о чём напомнить. Например: /напомни котята"
         else:
-            welcome = "**👋 Привет!** Я AURA — твой помощник. 😊\n\n✅ Ищу информацию в интернете\n✅ Нахожу телефоны и адреса\n✅ Отвечаю голосом\n\nЧем могу помочь?"
-            send_message(user_id, welcome)
-            save_message(user_id, "assistant", welcome)
+            conn = sqlite3.connect(DB_NAME)
+            c = conn.cursor()
+            c.execute("SELECT topic, last_mentioned FROM topics WHERE user_id = ? AND topic LIKE ? ORDER BY last_mentioned DESC LIMIT 1", 
+                      (user_id, f"%{topic}%"))
+            row = c.fetchone()
+            conn.close()
+            if row:
+                date_str = row[1][:10] if row[1] else "недавно"
+                reply = f"📚 Мы обсуждали это {date_str}. Могу найти актуальную информацию, если хочешь."
+            else:
+                reply = f"❌ Не помню, чтобы мы обсуждали '{topic}'. Может, уточнишь?"
+        save_message(user_id, "assistant", reply)
+        return {"reply": reply}
+
+    # ==========================
+    # ОПРЕДЕЛЕНИЕ ГОРОДА
+    # ==========================
 
     city_info = get_user_city(user_id)
     user_city = city_info[0] if city_info else None
@@ -996,6 +958,10 @@ async def process_message(request: Request, user_id, text):
         current_time_str = current_time.strftime("%H:%M")
         user_city = "Москва"
 
+    # ==========================
+    # ПОИСК
+    # ==========================
+
     search_result = None
     
     is_image_search = bool(re.search(r"(?:картинк|фото|изображен|рисунк)", search_text))
@@ -1017,6 +983,10 @@ async def process_message(request: Request, user_id, text):
                 print("✅ Найдено!")
             else:
                 print("❌ Ничего не найдено")
+
+    # ==========================
+    # КОМАНДЫ
+    # ==========================
 
     if "/задача" in lower:
         parts = text.split(" ", 1)
@@ -1066,20 +1036,7 @@ async def process_message(request: Request, user_id, text):
             reply = "**Формат:** /удалить [ID]"
     
     elif "/напомни" in lower:
-        parts = text.split(" ", 3)
-        if len(parts) >= 4:
-            date_str = parts[1]
-            time_str = parts[2]
-            reminder_text = parts[3]
-            try:
-                datetime.strptime(date_str, "%Y-%m-%d")
-                datetime.strptime(time_str, "%H:%M")
-                save_reminder(user_id, reminder_text, date_str, time_str)
-                reply = f"⏰ Запомнил: {reminder_text} на {date_str} в {time_str}"
-            except:
-                reply = "❌ Неверный формат. Используй: /напомни ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ"
-        else:
-            reply = "**Формат:** /напомни ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ"
+        reply = "Напиши, о чём напомнить. Например: /напомни котята"
     
     elif "/моинапоминания" in lower:
         reminders = get_reminders(user_id)
@@ -1103,6 +1060,9 @@ async def process_message(request: Request, user_id, text):
 **⏰ Напоминания:**
 /напомни ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ
 /моинапоминания — показать все
+
+**🧠 Память:**
+/напомни [тема] — вспомнить, о чём говорили
 
 **📸 Фото:** отправь фото — опишу
 **🎤 Голос:** отправь голосовое — услышу и отвечу
