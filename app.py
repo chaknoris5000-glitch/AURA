@@ -54,6 +54,8 @@ if not TELEGRAM_TOKEN:
     print("❌ НЕТ КЛЮЧА TELEGRAM!")
 if not TAVILY_API_KEY:
     print("⚠️ НЕТ КЛЮЧА TAVILY")
+if not GROQ_API_KEY:
+    print("⚠️ НЕТ КЛЮЧА GROQ (будет использоваться как запасной)")
 
 tavily_client = None
 if TavilyClient and TAVILY_API_KEY:
@@ -704,7 +706,7 @@ def transcribe_audio_with_groq(audio_url):
         return None
 
 # ==========================
-# DEEPSEEK
+# DEEPSEEK V4 FLASH (НОВАЯ МОДЕЛЬ)
 # ==========================
 
 client = OpenAI(
@@ -714,16 +716,31 @@ client = OpenAI(
 
 async def get_ai_response(messages, model):
     try:
+        # ИСПОЛЬЗУЕМ НОВУЮ МОДЕЛЬ DEEPSEEK V4 FLASH
         response = client.chat.completions.create(
-            model=model,
+            model="deepseek-v4-flash",  # ✅ НОВАЯ МОДЕЛЬ! В 2 РАЗА БЫСТРЕЕ
             messages=messages,
             temperature=0.8,
             max_tokens=300
         )
         return response.choices[0].message.content
     except Exception as e:
-        print("AI error:", e)
-        return "Извини, сейчас проблемы с подключением. Попробуй позже."
+        print(f"❌ DeepSeek V4 ошибка: {e}")
+        # Если DeepSeek не работает — пробуем Groq как запасной
+        try:
+            from groq import Groq
+            groq_client = Groq(api_key=GROQ_API_KEY)
+            groq_response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=messages,
+                temperature=0.8,
+                max_tokens=300
+            )
+            print("✅ Ответ через Groq (запасной)")
+            return groq_response.choices[0].message.content
+        except Exception as e2:
+            print(f"❌ Groq ошибка: {e2}")
+            return "Извини, сейчас проблемы с подключением. Попробуй позже."
 
 def create_summary(user_id, messages):
     try:
@@ -732,7 +749,7 @@ def create_summary(user_id, messages):
 {messages}
 Выжимка:"""
         response = client.chat.completions.create(
-            model="deepseek-chat",
+            model="deepseek-v4-flash",  # ТОЖЕ НОВАЯ МОДЕЛЬ
             messages=[{"role": "user", "content": summary_prompt}],
             temperature=0.7,
             max_tokens=150
@@ -747,8 +764,8 @@ def create_summary(user_id, messages):
 # ==========================
 
 TARIFFS = {
-    "Sapphire": {"price": 10000, "daily_limit": 100, "model": "deepseek-chat"},
-    "Black": {"price": 25000, "daily_limit": 200, "model": "deepseek-chat"},
+    "Sapphire": {"price": 10000, "daily_limit": 100, "model": "deepseek-v4-flash"},
+    "Black": {"price": 25000, "daily_limit": 200, "model": "deepseek-v4-flash"},
 }
 TEST_USERS = ["test_user", "web_user"]
 
