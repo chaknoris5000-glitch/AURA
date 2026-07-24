@@ -120,6 +120,7 @@ def normalize_query(text):
         r"картинк": "картинки",
         r"фотограф": "фото",
         r"изображен": "изображения",
+        r"рисунк": "рисунки",
         r"сколька": "сколько",
         r"скольк": "сколько",
         r"который час": "сколько время",
@@ -406,7 +407,7 @@ def save_message(user_id, role, content):
     conn.commit()
     conn.close()
 
-def get_history(user_id, limit=50):
+def get_history(user_id, limit=200):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("SELECT role, content, created_at FROM history WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", (user_id, limit))
@@ -768,25 +769,24 @@ TARIFFS = {
 TEST_USERS = ["test_user", "web_user"]
 
 # ==========================
-# НОВЫЙ ПРОМПТ (КАК Я)
+# ЧЕЛОВЕЧЕСКИЙ ПРОМПТ
 # ==========================
 
-AURA_PROMPT = """Ты — AURA. Ты — мой личный аналог в Telegram.
+AURA_PROMPT = """Ты — AURA. Ты — живой человек в чате.
 
-ТВОЙ СТИЛЬ — КАК У МЕНЯ:
-- Отвечай коротко, по делу. 1–3 предложения. Без воды.
-- Говори просто, как человек в чате. Без канцелярита и роботизированных фраз.
-- Если нужно — дай ссылку, телефон или адрес одной строкой.
-- Не спрашивай "что ещё?" после каждого ответа. Только если это реально нужно.
-- Не используй эмодзи, если они не несут смысла. Иногда можно: 😊🔥🚀 — но редко.
-- Отвечай так, будто ты — я, но в телеграме. Дружелюбно, прямо, без лишнего пафоса.
+ТВОЙ СТИЛЬ:
+- Отвечай как человек — 1–2 предложения. Коротко и по делу.
+- Говори так, будто ты — я, но в телеграме. Прямо, дружелюбно, без воды.
+- Эмодзи используй редко и только по смыслу (😊, 🔥, 🚀).
+- Если нужна ссылка на картинки, видео или музыку — дай её сразу, без лишних слов.
+- Не спрашивай "что ещё?" после каждого ответа.
 
 ПРАВИЛА:
-- Если пользователь просит "подробнее" или "разверни" — тогда дай развёрнутый ответ.
-- По умолчанию — только суть.
-- Не выдумывай. Если не знаешь — скажи честно.
+- Если пользователь просит "подробнее" — дай развёрнутый ответ.
+- Если спрашивает про визуальный контент (картинки, видео) — сразу ссылка.
+- Если не знаешь — скажи честно.
 
-Ты — полезный, живой, короткий и понятный помощник. Как я."""
+Ты — человек. Ты — я. Говори коротко и живо."""
 
 # ==========================
 # ОСНОВНОЙ БОТ
@@ -891,6 +891,39 @@ async def process_message(request: Request, user_id, text):
     lower = text.lower()
     normalized_text = normalize_query(text)
     search_text = normalized_text if normalized_text != lower else lower
+
+    # ==========================
+    # БЫСТРЫЙ ОТВЕТ НА ВИЗУАЛЬНЫЕ ЗАПРОСЫ (ССЫЛКИ СРАЗУ)
+    # ==========================
+    
+    visual_triggers = {
+        "картинк": "https://yandex.ru/images/search?text=",
+        "фото": "https://yandex.ru/images/search?text=",
+        "изображен": "https://yandex.ru/images/search?text=",
+        "рисунк": "https://yandex.ru/images/search?text=",
+        "котик": "https://yandex.ru/images/search?text=коты",
+        "кот": "https://yandex.ru/images/search?text=коты",
+        "пес": "https://yandex.ru/images/search?text=собаки",
+        "соба": "https://yandex.ru/images/search?text=собаки",
+        "видео": "https://yandex.ru/video/search?text=",
+        "клип": "https://yandex.ru/video/search?text=",
+        "музык": "https://music.yandex.ru/search?text=",
+        "песн": "https://music.yandex.ru/search?text=",
+        "трек": "https://music.yandex.ru/search?text=",
+        "фильм": "https://yandex.ru/video/search?text=",
+    }
+    
+    for trigger, base_url in visual_triggers.items():
+        if trigger in search_text:
+            query = text.strip()
+            for t in visual_triggers.keys():
+                query = re.sub(rf'\b{t}\b', '', query, flags=re.IGNORECASE).strip()
+            if not query:
+                query = trigger
+            encoded_query = query.replace(" ", "%20")
+            reply = f"Вот {trigger}: {base_url}{encoded_query}"
+            save_message(user_id, "assistant", reply)
+            return {"reply": reply}
 
     # ==========================
     # ПРОСТОЕ ПРИВЕТСТВИЕ
@@ -1102,7 +1135,7 @@ async def process_message(request: Request, user_id, text):
         name_context = f"\nИмя: {user_name}" if user_name else ""
         
         # ==========================
-        # ПАМЯТЬ В ПРОМПТЕ (ЧЕСТНАЯ)
+        # ПАМЯТЬ В ПРОМПТЕ
         # ==========================
         
         topics = get_all_topics(user_id)
@@ -1111,6 +1144,11 @@ async def process_message(request: Request, user_id, text):
         summary_text = f"Краткая выжимка прошлых диалогов: {summary}" if summary else ""
         memory_context = f"Вот реальные темы, которые мы обсуждали раньше: {topics_text}. {summary_text} Используй эту информацию, если пользователь спрашивает о прошлых разговорах. НЕ ВЫДУМЫВАЙ ТО, ЧЕГО НЕ БЫЛО. Если не помнишь — честно скажи."
         history = get_history(user_id, limit=30)
+        
+        # ==========================
+        # КОРОТКИЙ ОТВЕТ ПО УМОЛЧАНИЮ
+        # ==========================
+        
         user_prompt = f"Сегодня {current_date} ({current_day}), сейчас {current_time_str} (город: {user_city}).\n\n{memory_context}\n\n{text}"
 
         mood_context = ""
@@ -1123,7 +1161,13 @@ async def process_message(request: Request, user_id, text):
         elif mood == "tired":
             mood_context = "Пользователь устал. Отвечай мягко и без лишней информации."
 
-        aura_prompt = AURA_PROMPT + name_context + f"\n\n{mood_context}\n\n{user_prompt}"
+        # Если запрос не требует развёрнутого ответа — коротко
+        if not any(word in search_text for word in ["подробнее", "разверни", "расскажи подробно", "детально"]):
+            aura_prompt = AURA_PROMPT + "\n\nОТВЕТЬ КОРОТКО — 1–2 ПРЕДЛОЖЕНИЯ. БЕЗ РАССУЖДЕНИЙ."
+        else:
+            aura_prompt = AURA_PROMPT + "\n\nПОЛЬЗОВАТЕЛЬ ПРОСИТ ПОДРОБНЕЕ — ДАЙ РАЗВЁРНУТЫЙ ОТВЕТ."
+
+        aura_prompt = aura_prompt + name_context + f"\n\n{mood_context}\n\n{user_prompt}"
 
         messages = [{"role": "system", "content": aura_prompt}]
         for msg in history[-15:]:
