@@ -98,19 +98,21 @@ def send_voice_reply(chat_id, text):
     # Берём только ПЕРВОЕ предложение (основную мысль)
     voice_text = text.split('\n')[0] if '\n' in text else text
     
-    # Убираем ссылки, номера телефонов, лишние символы
-    voice_text = re.sub(r'https?://\S+', '', voice_text)          # ссылки
-    voice_text = re.sub(r'\+?\d[\d\s\-\(\)]+', '', voice_text)    # номера телефонов
-    voice_text = re.sub(r'[#*_~`]', '', voice_text)              # маркдаун
-    voice_text = re.sub(r'[✅❌👉📌⚡🔮🚀😊🔥💬📸🎤🌍]', '', voice_text)  # эмодзи
-    voice_text = re.sub(r'\s+', ' ', voice_text).strip()         # лишние пробелы
+    # Убираем ссылки, номера телефонов, эмодзи
+    voice_text = re.sub(r'https?://\S+', '', voice_text)                           # ссылки
+    voice_text = re.sub(r'\+7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', '', voice_text)  # +7 XXX XXX XX XX
+    voice_text = re.sub(r'8\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', '', voice_text)   # 8 XXX XXX XX XX
+    voice_text = re.sub(r'[#*_~`]', '', voice_text)                               # маркдаун
+    voice_text = re.sub(r'[✅❌👉📌⚡🔮🚀😊🔥💬📸🎤🌍]', '', voice_text)             # эмодзи
+    voice_text = re.sub(r'\s+', ' ', voice_text).strip()                          # лишние пробелы
     
     if len(voice_text) < 10:
         # Если после очистки текст слишком короткий — берём второе предложение
         sentences = text.split('.')
         for s in sentences[1:3]:
             clean = re.sub(r'https?://\S+', '', s)
-            clean = re.sub(r'\+?\d[\d\s\-\(\)]+', '', clean)
+            clean = re.sub(r'\+7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', '', clean)
+            clean = re.sub(r'8\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', '', clean)
             clean = re.sub(r'[#*_~`]', '', clean)
             clean = re.sub(r'[✅❌👉📌⚡🔮🚀😊🔥💬📸🎤🌍]', '', clean).strip()
             if len(clean) > 10:
