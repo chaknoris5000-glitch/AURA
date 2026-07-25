@@ -90,7 +90,7 @@ def send_voice_reply(chat_id, text):
         return False
     
     # Защита от дубляжа
-    text_hash = hash(text[:100])
+    text_hash = hash(text)
     if LAST_VOICE_MESSAGE.get(chat_id) == text_hash:
         print(f"⏭️ Пропускаем дубляж голоса для {chat_id}")
         return True
@@ -99,10 +99,11 @@ def send_voice_reply(chat_id, text):
     voice_text = text.split('\n')[0] if '\n' in text else text
     
     # Убираем ссылки, номера телефонов, лишние символы
-    voice_text = re.sub(r'https?://\S+', '', voice_text)  # убираем ссылки
-    voice_text = re.sub(r'\+?\d[\d\s\-\(\)]+', '', voice_text)  # убираем номера телефонов
-    voice_text = re.sub(r'[#*_~`]', '', voice_text)  # убираем маркдаун
-    voice_text = re.sub(r'\s+', ' ', voice_text).strip()  # убираем лишние пробелы
+    voice_text = re.sub(r'https?://\S+', '', voice_text)          # ссылки
+    voice_text = re.sub(r'\+?\d[\d\s\-\(\)]+', '', voice_text)    # номера телефонов
+    voice_text = re.sub(r'[#*_~`]', '', voice_text)              # маркдаун
+    voice_text = re.sub(r'[✅❌👉📌⚡🔮🚀😊🔥💬📸🎤🌍]', '', voice_text)  # эмодзи
+    voice_text = re.sub(r'\s+', ' ', voice_text).strip()         # лишние пробелы
     
     if len(voice_text) < 10:
         # Если после очистки текст слишком короткий — берём второе предложение
@@ -110,7 +111,8 @@ def send_voice_reply(chat_id, text):
         for s in sentences[1:3]:
             clean = re.sub(r'https?://\S+', '', s)
             clean = re.sub(r'\+?\d[\d\s\-\(\)]+', '', clean)
-            clean = re.sub(r'[#*_~`]', '', clean).strip()
+            clean = re.sub(r'[#*_~`]', '', clean)
+            clean = re.sub(r'[✅❌👉📌⚡🔮🚀😊🔥💬📸🎤🌍]', '', clean).strip()
             if len(clean) > 10:
                 voice_text = clean
                 break
