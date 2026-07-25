@@ -9,8 +9,6 @@ groq==0.13.0
 beautifulsoup4==4.12.3
 lxml==5.3.0
 Pillow==10.4.0
-soundfile==0.12.1
-torch
-torchaudio
 gTTS==2.3.2
-edge-tts==6.1.9
+PyPDF2==3.0.1
+python-docx==1.1.0
