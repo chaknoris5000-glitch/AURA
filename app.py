@@ -810,4 +810,543 @@ def transcribe_audio_with_groq(audio_url):
             tmp_file.write(response.content)
             tmp_path = tmp_file.name
         with open(tmp_path, "rb") as file:
-            transcription = client.
+            transcription = client.audio.transcriptions.create(
+                file=(tmp_path, file.read()),
+                model="whisper-large-v3-turbo",
+                language="ru",
+                response_format="json"
+            )
+        os.unlink(tmp_path)
+        return transcription.text
+    except Exception as e:
+        print(f"❌ Groq: {e}")
+        return None
+
+# ==========================
+# DEEPSEEK V4 FLASH
+# ==========================
+
+client = OpenAI(
+    api_key=DEEPSEEK_API_KEY,
+    base_url=DEEPSEEK_BASE_URL
+)
+
+async def get_ai_response(messages, model):
+    try:
+        response = client.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=messages,
+            temperature=0.8,
+            max_tokens=1200
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"❌ DeepSeek V4 ошибка: {e}")
+        try:
+            from groq import Groq
+            groq_client = Groq(api_key=GROQ_API_KEY)
+            groq_response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=messages,
+                temperature=0.8,
+                max_tokens=1200
+            )
+            print("✅ Ответ через Groq (запасной)")
+            return groq_response.choices[0].message.content
+        except Exception as e2:
+            print(f"❌ Groq ошибка: {e2}")
+            return "Извини, сейчас проблемы с подключением. Попробуй позже."
+
+def create_summary(user_id, messages):
+    try:
+        summary_prompt = f"""Сделай краткую выжимку этого диалога (максимум 200 символов). Выдели основные темы и интересы.
+Диалог:
+{messages}
+Выжимка:"""
+        response = client.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=[{"role": "user", "content": summary_prompt}],
+            temperature=0.7,
+            max_tokens=300
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"❌ Ошибка выжимки: {e}")
+        return None
+
+# ==========================
+# ТАРИФЫ
+# ==========================
+
+TARIFFS = {
+    "Sapphire": {"price": 10000, "daily_limit": 100, "model": "deepseek-v4-flash"},
+    "Black": {"price": 25000, "daily_limit": 200, "model": "deepseek-v4-flash"},
+}
+TEST_USERS = ["test_user", "web_user"]
+
+# ==========================
+# ЧЕЛОВЕЧЕСКИЙ ПРОМПТ
+# ==========================
+
+AURA_PROMPT = """Ты — AURA. Ты — живой человек в чате.
+
+ТВОЙ СТИЛЬ:
+- Отвечай как человек — 1–2 предложения. Коротко и по делу.
+- Говори так, будто ты — я, но в телеграме. Прямо, дружелюбно, без воды.
+- Эмодзи используй редко и только по смыслу (😊, 🔥, 🚀).
+- Если нужна ссылка на картинки, видео или музыку — дай её сразу, без лишних слов.
+- Не спрашивай "что ещё?" после каждого ответа.
+
+ПРАВИЛА:
+- Если пользователь просит "подробнее" — дай развёрнутый ответ.
+- Если спрашивает про визуальный контент (картинки, видео) — сразу ссылка.
+- Если не знаешь — скажи честно.
+
+Ты — человек. Ты — я. Говори коротко и живо."""
+
+# ==========================
+# ОСНОВНОЙ БОТ
+# ==========================
+
+app = FastAPI()
+
+@app.post("/webhook")
+async def webhook(request: Request):
+    try:
+        body = await request.json()
+        if "message" not in body:
+            return JSONResponse({"ok": False, "error": "No message"})
+        message = body["message"]
+        chat_id = str(message["chat"]["id"])
+        
+        send_typing(chat_id)
+        
+        text = None
+        image_data = None
+        
+        if "voice" in message:
+            file_id = message["voice"]["file_id"]
+            file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
+            file_response = requests.get(file_url)
+            file_data = file_response.json()
+            if file_data.get("ok"):
+                file_path = file_data["result"]["file_path"]
+                audio_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+                text = transcribe_audio_with_groq(audio_url)
+                if not text:
+                    send_message(chat_id, "⚠️ Не удалось распознать голос")
+                    return JSONResponse({"ok": True})
+        
+        elif "photo" in message:
+            photo = message["photo"][-1]
+            file_id = photo["file_id"]
+            file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
+            file_response = requests.get(file_url)
+            file_data = file_response.json()
+            if file_data.get("ok"):
+                file_path = file_data["result"]["file_path"]
+                image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+                image_response = requests.get(image_url, timeout=30)
+                if image_response.status_code == 200:
+                    image_data = image_response.content
+                    send_message(chat_id, "🖼️ Обрабатываю фото...")
+                    result_text = "**📸 Что я вижу на фото:**\n\n❌ Распознавание фото временно недоступно. Скоро появится!"
+                    send_message(chat_id, result_text)
+                    return JSONResponse({"ok": True})
+                else:
+                    send_message(chat_id, "⚠️ Не удалось загрузить фото")
+                    return JSONResponse({"ok": True})
+        
+        elif "text" in message:
+            text = message["text"].strip()
+        
+        if text:
+            result = await process_message(request, chat_id, text)
+            send_message(chat_id, result["reply"])
+            if result["reply"]:
+                threading.Thread(target=send_voice_reply, args=(chat_id, result["reply"])).start()
+                
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+        return JSONResponse({"ok": False, "error": str(e)})
+
+def send_message(chat_id, text):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        data = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+        response = requests.post(url, json=data, timeout=30)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"❌ Отправка: {e}")
+        return False
+
+async def process_message(request: Request, user_id, text):
+    user = get_user(user_id)
+    if not user:
+        save_user(user_id, level="Sapphire")
+
+    level = get_user_level(user_id)
+    tariff = TARIFFS.get(level, TARIFFS["Sapphire"])
+    daily_limit = tariff["daily_limit"]
+    model = tariff["model"]
+
+    if user_id not in TEST_USERS:
+        today_used = get_today_requests(user_id)
+        extra = get_extra_requests(user_id)
+        total_available = daily_limit + extra
+        if today_used >= total_available:
+            return {"reply": "⚠️ Дневной лимит запросов исчерпан. Попробуй завтра."}
+        log_request(user_id)
+    else:
+        log_request(user_id)
+
+    save_message(user_id, "user", text)
+    
+    mood = analyze_mood(text)
+    if mood != "neutral":
+        update_user_mood(user_id, mood)
+
+    lower = text.lower()
+    normalized_text = normalize_query(text)
+    search_text = normalized_text if normalized_text != lower else lower
+
+    # ==========================
+    # БЫСТРЫЙ ОТВЕТ НА ВИЗУАЛЬНЫЕ ЗАПРОСЫ (ССЫЛКИ СРАЗУ)
+    # ==========================
+    
+    visual_triggers = {
+        "картинк": "https://yandex.ru/images/search?text=",
+        "фото": "https://yandex.ru/images/search?text=",
+        "изображен": "https://yandex.ru/images/search?text=",
+        "рисунк": "https://yandex.ru/images/search?text=",
+        "котик": "https://yandex.ru/images/search?text=коты",
+        "кот": "https://yandex.ru/images/search?text=коты",
+        "пес": "https://yandex.ru/images/search?text=собаки",
+        "соба": "https://yandex.ru/images/search?text=собаки",
+        "видео": "https://yandex.ru/video/search?text=",
+        "клип": "https://yandex.ru/video/search?text=",
+        "музык": "https://music.yandex.ru/search?text=",
+        "песн": "https://music.yandex.ru/search?text=",
+        "трек": "https://music.yandex.ru/search?text=",
+        "фильм": "https://yandex.ru/video/search?text=",
+    }
+    
+    for trigger, base_url in visual_triggers.items():
+        if trigger in search_text:
+            query = text.strip()
+            for t in visual_triggers.keys():
+                query = re.sub(rf'\b{t}\b', '', query, flags=re.IGNORECASE).strip()
+            if not query:
+                query = trigger
+            encoded_query = query.replace(" ", "%20")
+            reply = f"Вот {trigger}: {base_url}{encoded_query}"
+            save_message(user_id, "assistant", reply)
+            return {"reply": reply}
+
+    # ==========================
+    # ПРИВЕТСТВИЕ (КОРОТКОЕ)
+    # ==========================
+    msg_count = get_message_count(user_id)
+    if msg_count <= 2:
+        welcome = "**👋 Привет!** 😊 Я здесь и готов помочь. Просто напиши, что нужно."
+        send_message(user_id, welcome)
+        save_message(user_id, "assistant", welcome)
+
+    # ==========================
+    # КОМАНДА /ЗАПОМНИ
+    # ==========================
+    if "/запомни" in lower:
+        topic = text.lower().replace("/запомни", "").strip()
+        if topic:
+            save_topic(user_id, topic)
+            reply = f"✅ Запомнил: {topic}"
+        else:
+            reply = "Напиши, что запомнить. Например: /запомни котят"
+        save_message(user_id, "assistant", reply)
+        return {"reply": reply}
+
+    # ==========================
+    # КОМАНДА /НАПОМНИ
+    # ==========================
+    if "/напомни" in lower:
+        parts = text.split(" ", 1)
+        if len(parts) < 2:
+            reply = "Напиши, о чём напомнить. Например: /напомни котята"
+        else:
+            topic = parts[1].strip().lower()
+            conn = sqlite3.connect(DB_NAME)
+            c = conn.cursor()
+            c.execute("SELECT topic, last_mentioned FROM topics WHERE user_id = ? AND topic LIKE ? ORDER BY last_mentioned DESC LIMIT 1", 
+                      (user_id, f"%{topic}%"))
+            row = c.fetchone()
+            conn.close()
+            if row:
+                date_str = row[1][:10] if row[1] else "недавно"
+                reply = f"📚 Мы обсуждали это {date_str}. Могу найти актуальную информацию, если хочешь."
+            else:
+                reply = f"❌ Не помню, чтобы мы обсуждали '{topic}'. Может, уточнишь?"
+        save_message(user_id, "assistant", reply)
+        return {"reply": reply}
+
+    # ==========================
+    # ОПРЕДЕЛЕНИЕ ГОРОДА
+    # ==========================
+
+    city_info = get_user_city(user_id)
+    user_city = city_info[0] if city_info else None
+    city_asked = city_info[1] if city_info else 0
+
+    city_match = re.search(r"(?:мой город|я в|я из|город|городе|из)\s+([а-яА-ЯёЁ\-]+)", lower)
+    if city_match:
+        city_name = city_match.group(1).capitalize()
+        update_user_city(user_id, city_name)
+        user_city = city_name
+        city_asked = 1
+        save_memory(user_id, "city", city_name)
+        save_memory(user_id, "tz_offset", str(get_timezone_offset(city_name)))
+        print(f"📍 Город: {city_name}")
+
+    elif not user_city and not city_asked:
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            ip = forwarded.split(",")[0].strip()
+        else:
+            ip = request.client.host if request.client else "127.0.0.1"
+        
+        if ip and ip not in ["127.0.0.1", "localhost", "::1"]:
+            city_data = get_city_by_ip(ip)
+            if city_data and city_data.get("city"):
+                user_city = city_data["city"]
+                update_user_city(user_id, user_city)
+                save_memory(user_id, "city", user_city)
+                save_memory(user_id, "tz_offset", str(get_timezone_offset(user_city)))
+        
+        if not user_city:
+            conn = sqlite3.connect(DB_NAME)
+            c = conn.cursor()
+            c.execute("UPDATE users SET city_asked = 1 WHERE user_id = ?", (user_id,))
+            conn.commit()
+            conn.close()
+            return {"reply": "🌍 Напиши свой город, чтобы я показывал точное время. Например: Мой город Белово"}
+
+    if user_city:
+        offset_hours = get_timezone_offset(user_city)
+        current_time = datetime.utcnow() + timedelta(hours=offset_hours)
+        current_date = current_time.strftime("%d.%m.%Y")
+        current_day = current_time.strftime("%A")
+        current_time_str = current_time.strftime("%H:%M")
+        save_memory(user_id, "tz_offset", str(offset_hours))
+    else:
+        offset_hours = 3
+        current_time = datetime.utcnow() + timedelta(hours=3)
+        current_date = current_time.strftime("%d.%m.%Y")
+        current_day = current_time.strftime("%A")
+        current_time_str = current_time.strftime("%H:%M")
+        user_city = "Москва"
+
+    # ==========================
+    # ПОИСК
+    # ==========================
+
+    search_result = None
+    
+    is_image_search = bool(re.search(r"(?:картинк|фото|изображен|рисунк)", search_text))
+    need_links = bool(re.search(r"(?:дай|покажи|скинь|ссылк|ссылка|link|url)", search_text))
+    
+    if is_image_search:
+        print(f"🖼️ Поиск картинок: {text}")
+        search_result = await search_web(search_text, need_links=True, is_image_search=True)
+        if search_result:
+            text = text + f"\n\n🔗 {search_result}"
+            print("✅ Ссылка на картинки найдена")
+    else:
+        search_triggers = ["новости", "сегодня", "актуальные", "свежие", "прогноз", "курс", "погода", "найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "атака", "склады", "wildberries", "озон", "сайт", "адрес", "телефон", "контакт", "парикмахер", "инской", "раскраски"]
+        if any(word in search_text for word in search_triggers):
+            print(f"🔍 Поиск: {text}")
+            search_result = await search_web(search_text, need_links=need_links, is_image_search=False)
+            if search_result:
+                text = text + f"\n\n{search_result}"
+                print("✅ Найдено!")
+            else:
+                print("❌ Ничего не найдено")
+
+    # ==========================
+    # СОХРАНЕНИЕ ТЕМ
+    # ==========================
+    stop_words = ["привет", "здравствуй", "спасибо", "пока", "да", "нет", "хорошо", "плохо", "ок", "ага", "угу"]
+    words = re.findall(r'\b[а-яА-ЯёЁ]{4,}\b', text.lower())
+    for word in words:
+        if word not in stop_words and len(word) > 3:
+            save_topic(user_id, word)
+
+    # ==========================
+    # ОСНОВНОЙ ОТВЕТ
+    # ==========================
+
+    if "/задача" in lower:
+        parts = text.split(" ", 1)
+        if len(parts) >= 2:
+            task_id = add_task(user_id, parts[1])
+            reply = f"✅ Задача добавлена! ID: {task_id}"
+        else:
+            reply = "**Формат:** /задача [текст]"
+        save_message(user_id, "assistant", reply)
+        return {"reply": reply}
+    
+    elif "/задачи" in lower:
+        tasks = get_tasks(user_id, "active")
+        if tasks:
+            lines = ["**📋 Твои задачи:**"]
+            for task in tasks:
+                task_id, task_text, priority, status, due_date = task
+                lines.append(f"✅ #{task_id} {task_text}")
+            reply = "\n".join(lines)
+        else:
+            reply = "🎉 Нет активных задач!"
+        save_message(user_id, "assistant", reply)
+        return {"reply": reply}
+    
+    elif "/выполнить" in lower:
+        parts = text.split(" ")
+        if len(parts) >= 2:
+            try:
+                task_id = int(parts[1])
+                if complete_task(user_id, task_id):
+                    reply = f"✅ Задача #{task_id} выполнена! 🎉"
+                else:
+                    reply = f"❌ Задача #{task_id} не найдена"
+            except ValueError:
+                reply = "❌ Неверный ID"
+        else:
+            reply = "**Формат:** /выполнить [ID]"
+        save_message(user_id, "assistant", reply)
+        return {"reply": reply}
+    
+    elif "/удалить" in lower:
+        parts = text.split(" ")
+        if len(parts) >= 2:
+            try:
+                task_id = int(parts[1])
+                if delete_task(user_id, task_id):
+                    reply = f"🗑️ Задача #{task_id} удалена"
+                else:
+                    reply = f"❌ Задача #{task_id} не найдена"
+            except ValueError:
+                reply = "❌ Неверный ID"
+        else:
+            reply = "**Формат:** /удалить [ID]"
+        save_message(user_id, "assistant", reply)
+        return {"reply": reply}
+    
+    elif "/моинапоминания" in lower:
+        reminders = get_reminders(user_id)
+        if reminders:
+            lines = ["**⏰ Твои напоминания:**"]
+            for r in reminders:
+                lines.append(f"✅ {r[0]} ({r[1]} в {r[2]})")
+            reply = "\n".join(lines)
+        else:
+            reply = "📭 Нет напоминаний."
+        save_message(user_id, "assistant", reply)
+        return {"reply": reply}
+    
+    elif "/помощь" in lower or "/help" in lower:
+        reply = """**🤖 Помощь AURA**
+
+**📋 Задачи:**
+/задача [текст] — добавить
+/задачи — показать все
+/выполнить [ID] — отметить
+/удалить [ID] — удалить
+
+**⏰ Напоминания:**
+/напомни ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ
+/моинапоминания — показать все
+
+**🧠 Память:**
+/запомни [тема] — сохранить тему
+/напомни [тема] — вспомнить, о чём говорили
+
+**📸 Фото:** отправь фото — опишу
+**🎤 Голос:** отправь голосовое — услышу и отвечу
+**🌍 Город:** скажи "Мой город ..." — запомню время
+
+Просто пиши вопросы — я отвечу! 😊"""
+        save_message(user_id, "assistant", reply)
+        return {"reply": reply}
+    
+    else:
+        user_name = get_memory(user_id, "name")
+        if not user_name:
+            name_match = re.search(r"(?:меня зовут|зовут|я )(\w+)", lower)
+            if name_match:
+                user_name = name_match.group(1).capitalize()
+                save_memory(user_id, "name", user_name)
+        
+        name_context = f"\nИмя: {user_name}" if user_name else ""
+        
+        # ==========================
+        # ПАМЯТЬ В ПРОМПТЕ
+        # ==========================
+        
+        topics = get_all_topics(user_id)
+        topics_text = ", ".join(topics[:7]) if topics else "нет сохранённых тем"
+        summary = get_memory(user_id, "summary")
+        summary_text = f"Краткая выжимка прошлых диалогов: {summary}" if summary else ""
+        memory_context = f"Вот реальные темы, которые мы обсуждали раньше: {topics_text}. {summary_text} Используй эту информацию, если пользователь спрашивает о прошлых разговорах. НЕ ВЫДУМЫВАЙ ТО, ЧЕГО НЕ БЫЛО. Если не помнишь — честно скажи."
+        history = get_history(user_id, limit=30)
+        
+        # ==========================
+        # КОРОТКИЙ ОТВЕТ ПО УМОЛЧАНИЮ
+        # ==========================
+        
+        user_prompt = f"Сегодня {current_date} ({current_day}), сейчас {current_time_str} (город: {user_city}).\n\n{memory_context}\n\n{text}"
+
+        mood_context = ""
+        if mood == "sad":
+            mood_context = "Пользователь грустный. Отвечай тепло и поддерживающе."
+        elif mood == "happy":
+            mood_context = "Пользователь в хорошем настроении. Отвечай бодро и с юмором."
+        elif mood == "anxious":
+            mood_context = "Пользователь тревожится. Отвечай спокойно и уверенно."
+        elif mood == "tired":
+            mood_context = "Пользователь устал. Отвечай мягко и без лишней информации."
+
+        if not any(word in search_text for word in ["подробнее", "разверни", "расскажи подробно", "детально"]):
+            aura_prompt = AURA_PROMPT + "\n\nОТВЕТЬ КОРОТКО — 1–2 ПРЕДЛОЖЕНИЯ. БЕЗ РАССУЖДЕНИЙ."
+        else:
+            aura_prompt = AURA_PROMPT + "\n\nПОЛЬЗОВАТЕЛЬ ПРОСИТ ПОДРОБНЕЕ — ДАЙ РАЗВЁРНУТЫЙ ОТВЕТ."
+
+        aura_prompt = aura_prompt + name_context + f"\n\n{mood_context}\n\n{user_prompt}"
+
+        messages = [{"role": "system", "content": aura_prompt}]
+        for msg in history[-15:]:
+            messages.append({"role": msg["role"], "content": msg["content"]})
+        messages.append({"role": "user", "content": text})
+
+        reply = await get_ai_response(messages, model)
+        reply = re.sub(r'[*_#~`]', '', reply)
+
+        if msg_count % 30 == 0 and msg_count > 0:
+            recent_msgs = get_history(user_id, limit=15)
+            dialog_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent_msgs])
+            new_summary = create_summary(user_id, dialog_text)
+            if new_summary:
+                old_summary = get_memory(user_id, "summary")
+                combined = f"{old_summary}\n{new_summary}" if old_summary else new_summary
+                if len(combined) > 2000:
+                    combined = combined[-2000:]
+                save_memory(user_id, "summary", combined)
+
+        save_message(user_id, "assistant", reply)
+        return {"reply": reply}
+
+@app.get("/")
+async def root():
+    from fastapi.responses import FileResponse
+    return FileResponse("web/index.html")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
