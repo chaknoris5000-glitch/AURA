@@ -26,6 +26,7 @@ from bs4 import BeautifulSoup
 import base64
 import io
 from PIL import Image
+import urllib.parse
 
 load_dotenv()
 
@@ -46,6 +47,7 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 EMAIL_SENDER = os.getenv("EMAIL_SENDER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
+YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")  # Для Yandex Search
 
 print("🔍 Проверка ключей...")
 if not DEEPSEEK_API_KEY:
@@ -54,8 +56,8 @@ if not TELEGRAM_TOKEN:
     print("❌ НЕТ КЛЮЧА TELEGRAM!")
 if not TAVILY_API_KEY:
     print("⚠️ НЕТ КЛЮЧА TAVILY")
-if not GROQ_API_KEY:
-    print("⚠️ НЕТ КЛЮЧА GROQ (будет использоваться как запасной)")
+if not YANDEX_API_KEY:
+    print("⚠️ НЕТ КЛЮЧА YANDEX (поиск по .ru будет работать через SearXNG)")
 
 tavily_client = None
 if TavilyClient and TAVILY_API_KEY:
@@ -103,6 +105,18 @@ def send_voice_reply(chat_id, text):
         return False
 
 # ==========================
+# СТАТУС "ПЕЧАТАЕТ..."
+# ==========================
+
+def send_typing(chat_id):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction"
+        data = {"chat_id": chat_id, "action": "typing"}
+        requests.post(url, json=data, timeout=3)
+    except Exception as e:
+        print(f"❌ Ошибка typing: {e}")
+
+# ==========================
 # НОРМАЛИЗАЦИЯ
 # ==========================
 
@@ -148,18 +162,26 @@ def normalize_query(text):
     return normalized
 
 # ==========================
-# ПАРСИНГ САЙТОВ
+# ПАРСИНГ САЙТОВ (ГЛУБОКИЙ)
 # ==========================
 
 def parse_site_for_info(url):
+    """Открывает сайт и вытаскивает телефоны, адреса, email, текст"""
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept-Language": "ru-RU,ru;q=0.9"
+        }
         response = requests.get(url, headers=headers, timeout=15)
         soup = BeautifulSoup(response.text, 'html.parser')
-        for script in soup(["script", "style"]):
+        
+        for script in soup(["script", "style", "nav", "footer", "header"]):
             script.decompose()
+        
         text = soup.get_text(separator="\n", strip=True)
         result = {}
+        
+        # Телефоны
         phone_patterns = [r'\+7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'8\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}']
         phones = []
         for pattern in phone_patterns:
@@ -168,18 +190,153 @@ def parse_site_for_info(url):
         phones = list(set(phones))[:5]
         if phones:
             result["phones"] = phones
+        
+        # Email
         email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
         emails = list(set(re.findall(email_pattern, text)))[:3]
         if emails:
             result["emails"] = emails
-        address_pattern = r'(?:ул\.|улица|проспект|пр\.|переулок|пер\.|площадь|пл\.)\s+[А-Яа-я0-9\-\.\s,]+'
+        
+        # Адреса
+        address_pattern = r'(?:ул\.|улица|проспект|пр\.|переулок|пер\.|площадь|пл\.|шоссе|бульвар)\s+[А-Яа-я0-9\-\.\s,]+'
         addresses = list(set(re.findall(address_pattern, text)))[:3]
         if addresses:
             result["addresses"] = addresses
+        
+        # Первые 500 символов текста
+        result["snippet"] = text[:500].replace("\n", " ")
+        
         return result
     except Exception as e:
         print(f"❌ Ошибка парсинга: {e}")
         return None
+
+# ==========================
+# ПОИСК ПО .RU САЙТАМ (ЯНДЕКС + SEARXNG)
+# ==========================
+
+async def search_yandex(query):
+    """Поиск через Yandex Search API (только .ru)"""
+    if not YANDEX_API_KEY:
+        return None
+    
+    try:
+        encoded_query = urllib.parse.quote(query)
+        url = f"https://yandex.ru/search/xml?text={encoded_query}&l10n=ru&sortby=rlv&filter=strict"
+        headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}"}
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'xml')
+            results = []
+            for doc in soup.find_all('doc')[:5]:
+                title = doc.find('title')
+                url_elem = doc.find('url')
+                snippet = doc.find('snippet')
+                if title and url_elem:
+                    results.append({
+                        "title": title.text.strip(),
+                        "url": url_elem.text.strip(),
+                        "snippet": snippet.text.strip()[:300] if snippet else ""
+                    })
+            return results if results else None
+        else:
+            print(f"⚠️ Yandex API ошибка: {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"❌ Yandex поиск ошибка: {e}")
+        return None
+
+async def search_searxng(query):
+    """Поиск через SearXNG (агрегатор, ищет по Яндекс, Google, Mail.ru)"""
+    try:
+        encoded_query = urllib.parse.quote(query)
+        # Используем публичный инстанс SearXNG
+        url = f"https://searx.be/search?q={encoded_query}&format=json&categories=general&language=ru"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            results = []
+            for r in data.get("results", [])[:5]:
+                title = r.get("title", "")
+                url_elem = r.get("url", "")
+                snippet = r.get("content", "")[:300]
+                if title and url_elem:
+                    results.append({
+                        "title": title.strip(),
+                        "url": url_elem.strip(),
+                        "snippet": snippet.strip()
+                    })
+            return results if results else None
+        else:
+            return None
+    except Exception as e:
+        print(f"❌ SearXNG ошибка: {e}")
+        return None
+
+async def search_ru_deep(query):
+    """Глубокий поиск по .ru сайтам (Яндекс → SearXNG → Tavily)"""
+    
+    # 1. Пробуем Яндекс
+    print(f"🔍 Поиск по .ru: {query}")
+    results = await search_yandex(query)
+    
+    # 2. Если Яндекс не дал результатов — SearXNG
+    if not results:
+        print("🔄 Яндекс не дал результатов, пробую SearXNG...")
+        results = await search_searxng(query)
+    
+    # 3. Если ничего не нашли — пробуем Tavily (западный поиск)
+    if not results:
+        print("🔄 SearXNG не дал результатов, пробую Tavily...")
+        if tavily_client:
+            try:
+                response = tavily_client.search(
+                    query=query,
+                    search_depth="advanced",
+                    max_results=5,
+                    include_answer=True,
+                    include_images=False
+                )
+                if response.get('results'):
+                    results = []
+                    for r in response['results'][:5]:
+                        results.append({
+                            "title": r.get('title', ''),
+                            "url": r.get('url', ''),
+                            "snippet": r.get('content', '')[:300]
+                        })
+            except Exception as e:
+                print(f"❌ Tavily ошибка: {e}")
+    
+    return results
+
+async def search_web(query, need_links=False, is_image_search=False):
+    """Основная функция поиска (с приоритетом .ru)"""
+    if is_image_search:
+        encoded_query = query.replace(" ", "%20")
+        return f"https://yandex.ru/images/search?text={encoded_query}"
+    
+    # Поиск по .ru
+    results = await search_ru_deep(query)
+    
+    if not results:
+        return "❌ Ничего не найдено."
+    
+    formatted = []
+    for r in results:
+        title = r.get('title', '')
+        url = r.get('url', '')
+        snippet = r.get('snippet', '')[:250]
+        
+        formatted.append(f"**{title}**\n{snippet}...")
+        if need_links:
+            formatted.append(f"🔗 {url}")
+        formatted.append("")
+    
+    return "\n".join(formatted).strip()
 
 # ==========================
 # VISION (ОТКЛЮЧЕНА)
@@ -603,85 +760,6 @@ def get_timezone_offset(city_name):
     return 3
 
 # ==========================
-# ПОИСК
-# ==========================
-
-async def search_duckduckgo(query):
-    try:
-        url = f"https://html.duckduckgo.com/html/?q={query}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        results = []
-        for result in soup.select('.result')[:5]:
-            title = result.select_one('.result__title')
-            if title:
-                link = result.select_one('.result__url')
-                text_elem = result.select_one('.result__snippet')
-                if text_elem and link:
-                    results.append({
-                        "title": title.text.strip(),
-                        "snippet": text_elem.text.strip()[:300],
-                        "url": link.text.strip()
-                    })
-        return results if results else None
-    except Exception as e:
-        print(f"❌ DuckDuckGo: {e}")
-        return None
-
-async def search_web(query, need_links=False, is_image_search=False):
-    if is_image_search:
-        encoded_query = query.replace(" ", "%20")
-        return f"https://yandex.ru/images/search?text={encoded_query}"
-    if tavily_client:
-        try:
-            response = tavily_client.search(
-                query=query,
-                search_depth="advanced",
-                max_results=5,
-                include_answer=True,
-                include_images=False
-            )
-            results = []
-            urls = []
-            if response.get('answer'):
-                results.append(response['answer'])
-            if response.get('results'):
-                for r in response['results'][:5]:
-                    title = r.get('title', '')
-                    url = r.get('url', '')
-                    content = r.get('content', '')[:300]
-                    if title and url:
-                        urls.append(url)
-                        results.append(f"**{title}**\n{content}...")
-                        if need_links:
-                            results.append(f"🔗 {url}")
-            if "телефон" in query.lower() or "адрес" in query.lower() or "номер" in query.lower():
-                print("📞 Ищем контакты...")
-                parsed_info = []
-                for url in urls[:3]:
-                    info = parse_site_for_info(url)
-                    if info:
-                        info_text = f"🔗 {url}\n"
-                        if info.get("phones"):
-                            info_text += f"📞 {', '.join(info['phones'])}\n"
-                        if info.get("addresses"):
-                            info_text += f"📍 {', '.join(info['addresses'])}\n"
-                        parsed_info.append(info_text)
-                if parsed_info:
-                    results.append("\n".join(parsed_info))
-            return "\n\n".join(results) if results else None
-        except Exception as e:
-            print(f"❌ Tavily: {e}")
-    duck_results = await search_duckduckgo(query)
-    if duck_results:
-        results = []
-        for r in duck_results:
-            results.append(f"**{r['title']}**\n{r['snippet']}...")
-        return "\n\n".join(results) if results else None
-    return None
-
-# ==========================
 # ГОЛОС (ВХОД)
 # ==========================
 
@@ -802,6 +880,9 @@ async def webhook(request: Request):
             return JSONResponse({"ok": False, "error": "No message"})
         message = body["message"]
         chat_id = str(message["chat"]["id"])
+        
+        send_typing(chat_id)
+        
         text = None
         image_data = None
         
@@ -926,11 +1007,31 @@ async def process_message(request: Request, user_id, text):
             return {"reply": reply}
 
     # ==========================
-    # ПРОСТОЕ ПРИВЕТСТВИЕ
+    # ПРИВЕТСТВИЕ (НОВОЕ)
     # ==========================
     msg_count = get_message_count(user_id)
     if msg_count <= 2:
-        welcome = "**👋 Привет!** Я AURA — твой помощник. 😊\n\n✅ Ищу информацию в интернете\n✅ Нахожу телефоны и адреса\n✅ Отвечаю голосом\n\nЧем могу помочь?"
+        welcome = """**👋 Привет! Я — AURA, твой умный и живой помощник.**
+
+Я общаюсь как человек — тепло, прямо и по делу.
+
+🚀 **Что я уже умею:**
+✅ **Искать информацию** в интернете (включая .ru сайты)
+✅ **Находить телефоны и адреса** организаций
+✅ **Отвечать голосом** (текст + аудио)
+✅ **Запоминать** всё, что мы обсуждали
+✅ **Напоминать** о важном в нужное время
+✅ **Давать ссылки** на картинки, видео и музыку
+✅ **Понимать опечатки** и исправлять их
+
+🔮 **Скоро добавлю:**
+⚡ **Распознавание изображений** (описание фото)
+⚡ **Чтение PDF, DOCX, Excel** (извлечение данных)
+⚡ **Автоматические напоминания** (бот напишет сам)
+⚡ **Интеграция с почтой и календарём**
+⚡ **Управление проектами и задачами**
+
+💬 **Я — человек в чате. Говори со мной как с другом. Что нужно сделать?**"""
         send_message(user_id, welcome)
         save_message(user_id, "assistant", welcome)
 
@@ -1027,7 +1128,7 @@ async def process_message(request: Request, user_id, text):
         user_city = "Москва"
 
     # ==========================
-    # ПОИСК
+    # ПОИСК (С ПРИОРИТЕТОМ .RU)
     # ==========================
 
     search_result = None
