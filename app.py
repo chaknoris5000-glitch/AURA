@@ -49,7 +49,6 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 
-# === ЗАЩИТА ОТ ДУБЛЯЖА ГОЛОСА ===
 LAST_VOICE_MESSAGE = {}
 
 print("🔍 Проверка ключей...")
@@ -76,8 +75,8 @@ if TavilyClient and TAVILY_API_KEY:
 
 def set_bot_description():
     description = """Привет! Я — AURA.
-Ищу информацию, даю ссылки, отвечаю голосом, запоминаю всё.
-Есть подписки для полного доступа. Напиши /buy для покупки."""
+7 дней пробного доступа — все функции бесплатно!
+После триала — подписка через /buy"""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setMyDescription"
         data = {"description": description}
@@ -319,46 +318,45 @@ reminder_thread = threading.Thread(target=check_reminders, daemon=True)
 reminder_thread.start()
 
 # ==========================
-# МОНЕТИЗАЦИЯ (ПОДПИСКИ)
+# МОНЕТИЗАЦИЯ (ПОДПИСКИ + ПРОБНЫЙ ПЕРИОД, БЕЗ ЛИМИТОВ)
 # ==========================
 
 TARIFFS = {
-    "free": {"name": "Бесплатный", "daily_limit": 5, "price": 0, "features": []},
-    "собеседник": {"name": "Собеседник", "daily_limit": 50, "price": 50, "features": ["голос"]},
-    "партнёр": {"name": "Партнёр", "daily_limit": 150, "price": 120, "features": ["голос", "фото"]},
-    "агент_жизни": {"name": "Агент жизни", "daily_limit": 500, "price": 250, "features": ["голос", "фото", "документы", "напоминания"]}
+    "free": {"name": "Бесплатный", "price": 0, "access": False},
+    "собеседник": {"name": "Собеседник", "price": 50, "access": True},
+    "партнёр": {"name": "Партнёр", "price": 120, "access": True},
+    "агент_жизни": {"name": "Агент жизни", "price": 250, "access": True}
 }
+
+TRIAL_DAYS = 7
 
 def get_user_subscription(user_id):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute("SELECT subscription FROM users WHERE user_id = ?", (user_id,))
+    c.execute("SELECT subscription, trial_start FROM users WHERE user_id = ?", (user_id,))
     row = c.fetchone()
     conn.close()
-    return row[0] if row else "free"
+    return row if row else ("free", None)
 
-def update_user_subscription(user_id, subscription):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("UPDATE users SET subscription = ? WHERE user_id = ?", (subscription, user_id))
-    conn.commit()
-    conn.close()
+def is_trial_active(trial_start):
+    if not trial_start:
+        return False
+    trial_date = datetime.fromisoformat(trial_start)
+    return datetime.now() - trial_date < timedelta(days=TRIAL_DAYS)
 
-def check_user_limit(user_id):
-    subscription = get_user_subscription(user_id)
-    tariff = TARIFFS.get(subscription, TARIFFS["free"])
-    daily_limit = tariff["daily_limit"]
+def has_access(user_id):
+    subscription, trial_start = get_user_subscription(user_id)
     
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    today = datetime.now().date().isoformat()
-    c.execute("SELECT COUNT(*) FROM history WHERE user_id = ? AND date(created_at) = ?", (user_id, today))
-    count = c.fetchone()[0]
-    conn.close()
+    # Если триал активен — доступ есть
+    if is_trial_active(trial_start):
+        return True
     
-    if count >= daily_limit:
-        return {"allowed": False, "message": f"⚠️ Дневной лимит ({daily_limit}) исчерпан. Купи подписку: /buy"}
-    return {"allowed": True}
+    # Если есть подписка (не free) — доступ есть
+    if subscription != "free":
+        return True
+    
+    # Иначе — доступа нет
+    return False
 
 # ==========================
 # БЭКАП
@@ -447,6 +445,7 @@ def init_db():
         name TEXT,
         city TEXT DEFAULT NULL,
         subscription TEXT DEFAULT 'free',
+        trial_start TEXT DEFAULT NULL,
         created_at TEXT
     )""")
     c.execute("""CREATE TABLE IF NOT EXISTS history (
@@ -488,10 +487,11 @@ def get_user(user_id):
     return row
 
 def save_user(user_id, name=None, city=None):
+    now = datetime.now().isoformat()
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO users (user_id, name, city, created_at) VALUES (?, ?, ?, ?)",
-              (user_id, name or "Пользователь", city, datetime.now().isoformat()))
+    c.execute("INSERT OR REPLACE INTO users (user_id, name, city, trial_start, created_at) VALUES (?, ?, ?, ?, ?)",
+              (user_id, name or "Пользователь", city, now, now))
     conn.commit()
     conn.close()
 
@@ -555,6 +555,13 @@ def save_reminder(user_id, text, remind_time, chat_id):
     c = conn.cursor()
     c.execute("INSERT INTO reminders (user_id, text, remind_time, chat_id) VALUES (?, ?, ?, ?)",
               (user_id, text, remind_time, chat_id))
+    conn.commit()
+    conn.close()
+
+def update_user_subscription(user_id, subscription):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("UPDATE users SET subscription = ? WHERE user_id = ?", (subscription, user_id))
     conn.commit()
     conn.close()
 
@@ -644,7 +651,7 @@ async def webhook(request: Request):
                 tariff = TARIFFS.get(subscription)
                 if tariff:
                     update_user_subscription(chat_id, subscription)
-                    send_message(chat_id, f"✅ Подписка **{tariff['name']}** активирована! Лимит: {tariff['daily_limit']} запросов/день.")
+                    send_message(chat_id, f"✅ Подписка **{tariff['name']}** активирована! Теперь у тебя полный доступ.")
                 return JSONResponse({"ok": True})
             
             elif data == "cancel":
@@ -721,23 +728,46 @@ async def webhook(request: Request):
             text = message["text"].strip()
         
         if text:
+            # === ОБРАБОТКА /start ===
+            if text.startswith("/start"):
+                user = get_user(chat_id)
+                if not user:
+                    save_user(chat_id)
+                
+                subscription, trial_start = get_user_subscription(chat_id)
+                if is_trial_active(trial_start):
+                    days_left = TRIAL_DAYS - (datetime.now() - datetime.fromisoformat(trial_start)).days
+                    welcome = f"👋 Привет! У тебя {days_left} дней пробного доступа. Все функции доступны бесплатно!"
+                elif has_access(chat_id):
+                    welcome = "👋 Привет! У тебя есть подписка. Все функции доступны!"
+                else:
+                    welcome = "👋 Привет! Пробный период закончился. Купи подписку: /buy"
+                send_message(chat_id, welcome)
+                return JSONResponse({"ok": True})
+            
+            # === ОБРАБОТКА /buy ===
             if text.startswith("/buy"):
                 keyboard = [
-                    [{"text": "⭐ Собеседник (50 запросов/день) — 50 Stars", "callback_data": "buy_собеседник"}],
-                    [{"text": "⭐ Партнёр (150 запросов/день) — 120 Stars", "callback_data": "buy_партнёр"}],
-                    [{"text": "⭐ Агент жизни (500 запросов/день) — 250 Stars", "callback_data": "buy_агент_жизни"}],
+                    [{"text": "⭐ Собеседник — 50 Stars", "callback_data": "buy_собеседник"}],
+                    [{"text": "⭐ Партнёр — 120 Stars", "callback_data": "buy_партнёр"}],
+                    [{"text": "⭐ Агент жизни — 250 Stars", "callback_data": "buy_агент_жизни"}],
                     [{"text": "❌ Отмена", "callback_data": "cancel"}]
                 ]
                 url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
                 data = {
                     "chat_id": chat_id,
-                    "text": "💳 **Выбери подписку:**",
+                    "text": "💳 **Выбери подписку:**\n\n"
+                            "⭐ Собеседник — 50 Stars\n"
+                            "⭐ Партнёр — 120 Stars\n"
+                            "⭐ Агент жизни — 250 Stars\n\n"
+                            "После покупки — полный доступ без ограничений!",
                     "parse_mode": "Markdown",
                     "reply_markup": json.dumps({"inline_keyboard": keyboard})
                 }
                 requests.post(url, json=data)
                 return JSONResponse({"ok": True})
             
+            # === ОБРАБОТКА /remind ===
             if text.startswith("/remind"):
                 parts = text.split(" ", 3)
                 if len(parts) >= 4:
@@ -754,10 +784,9 @@ async def webhook(request: Request):
                     send_message(chat_id, "❌ Формат: /remind ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ")
                 return JSONResponse({"ok": True})
             
-            # Проверка лимитов
-            limit_check = check_user_limit(chat_id)
-            if not limit_check["allowed"]:
-                send_message(chat_id, limit_check["message"])
+            # === ПРОВЕРКА ДОСТУПА ===
+            if not has_access(chat_id):
+                send_message(chat_id, "⚠️ Пробный период закончился. Купи подписку: /buy")
                 return JSONResponse({"ok": True})
             
             result = await process_message(chat_id, text)
