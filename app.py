@@ -146,7 +146,6 @@ def send_voice_reply(chat_id, text):
     voice_text = re.sub(r'\s+', ' ', voice_text).strip()                          # лишние пробелы
     
     if len(voice_text) < 10:
-        # Если после очистки текст слишком короткий — берём второе предложение
         sentences = text.split('.')
         for s in sentences[1:3]:
             clean = re.sub(r'https?://\S+', '', s)
