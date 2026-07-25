@@ -935,29 +935,40 @@ async def process_message(request: Request, user_id, text):
         save_message(user_id, "assistant", welcome)
 
     # ==========================
-    # КОМАНДА /НАПОМНИ
+    # КОМАНДА /ЗАПОМНИ (РУЧНОЕ СОХРАНЕНИЕ ТЕМЫ)
+    # ==========================
+    if "/запомни" in lower:
+        topic = text.lower().replace("/запомни", "").strip()
+        if topic:
+            save_topic(user_id, topic)
+            reply = f"✅ Запомнил: {topic}"
+        else:
+            reply = "Напиши, что запомнить. Например: /запомни котят"
+        save_message(user_id, "assistant", reply)
+        return {"reply": reply}
+
+    # ==========================
+    # КОМАНДА /НАПОМНИ (ПОИСК ПО ЧАСТИ СЛОВА)
     # ==========================
     if "/напомни" in lower:
-    # Извлекаем тему (всё, что после /напомни)
-    parts = text.split(" ", 1)
-    if len(parts) < 2:
-        reply = "Напиши, о чём напомнить. Например: /напомни котята"
-    else:
-        topic = parts[1].strip().lower()
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        # Ищем тему, которая содержит слово из запроса
-        c.execute("SELECT topic, last_mentioned FROM topics WHERE user_id = ? AND topic LIKE ? ORDER BY last_mentioned DESC LIMIT 1", 
-                  (user_id, f"%{topic}%"))
-        row = c.fetchone()
-        conn.close()
-        if row:
-            date_str = row[1][:10] if row[1] else "недавно"
-            reply = f"📚 Мы обсуждали это {date_str}. Могу найти актуальную информацию, если хочешь."
+        parts = text.split(" ", 1)
+        if len(parts) < 2:
+            reply = "Напиши, о чём напомнить. Например: /напомни котята"
         else:
-            reply = f"❌ Не помню, чтобы мы обсуждали '{topic}'. Может, уточнишь?"
-    save_message(user_id, "assistant", reply)
-    return {"reply": reply}
+            topic = parts[1].strip().lower()
+            conn = sqlite3.connect(DB_NAME)
+            c = conn.cursor()
+            c.execute("SELECT topic, last_mentioned FROM topics WHERE user_id = ? AND topic LIKE ? ORDER BY last_mentioned DESC LIMIT 1", 
+                      (user_id, f"%{topic}%"))
+            row = c.fetchone()
+            conn.close()
+            if row:
+                date_str = row[1][:10] if row[1] else "недавно"
+                reply = f"📚 Мы обсуждали это {date_str}. Могу найти актуальную информацию, если хочешь."
+            else:
+                reply = f"❌ Не помню, чтобы мы обсуждали '{topic}'. Может, уточнишь?"
+        save_message(user_id, "assistant", reply)
+        return {"reply": reply}
 
     # ==========================
     # ОПРЕДЕЛЕНИЕ ГОРОДА
@@ -1042,6 +1053,15 @@ async def process_message(request: Request, user_id, text):
                 print("❌ Ничего не найдено")
 
     # ==========================
+    # СОХРАНЕНИЕ ТЕМ (ЛЮБЫЕ СЛОВА, КРОМЕ СТОП-СЛОВ)
+    # ==========================
+    stop_words = ["привет", "здравствуй", "спасибо", "пока", "да", "нет", "хорошо", "плохо", "ок", "ага", "угу"]
+    words = re.findall(r'\b[а-яА-ЯёЁ]{4,}\b', text.lower())
+    for word in words:
+        if word not in stop_words and len(word) > 3:
+            save_topic(user_id, word)
+
+    # ==========================
     # ОСНОВНОЙ ОТВЕТ (С ПАМЯТЬЮ)
     # ==========================
 
@@ -1092,9 +1112,6 @@ async def process_message(request: Request, user_id, text):
         else:
             reply = "**Формат:** /удалить [ID]"
     
-    elif "/напомни" in lower:
-        reply = "Напиши, о чём напомнить. Например: /напомни котята"
-    
     elif "/моинапоминания" in lower:
         reminders = get_reminders(user_id)
         if reminders:
@@ -1119,6 +1136,7 @@ async def process_message(request: Request, user_id, text):
 /моинапоминания — показать все
 
 **🧠 Память:**
+/запомни [тема] — сохранить тему
 /напомни [тема] — вспомнить, о чём говорили
 
 **📸 Фото:** отправь фото — опишу
