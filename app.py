@@ -937,24 +937,27 @@ async def process_message(request: Request, user_id, text):
     # ==========================
     # КОМАНДА /НАПОМНИ
     # ==========================
-    if "/напомни" in lower and len(text.split()) > 1:
-        topic = text.lower().replace("/напомни", "").strip()
-        if not topic:
-            reply = "Напиши, о чём напомнить. Например: /напомни котята"
+    if "/напомни" in lower:
+    # Извлекаем тему (всё, что после /напомни)
+    parts = text.split(" ", 1)
+    if len(parts) < 2:
+        reply = "Напиши, о чём напомнить. Например: /напомни котята"
+    else:
+        topic = parts[1].strip().lower()
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        # Ищем тему, которая содержит слово из запроса
+        c.execute("SELECT topic, last_mentioned FROM topics WHERE user_id = ? AND topic LIKE ? ORDER BY last_mentioned DESC LIMIT 1", 
+                  (user_id, f"%{topic}%"))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            date_str = row[1][:10] if row[1] else "недавно"
+            reply = f"📚 Мы обсуждали это {date_str}. Могу найти актуальную информацию, если хочешь."
         else:
-            conn = sqlite3.connect(DB_NAME)
-            c = conn.cursor()
-            c.execute("SELECT topic, last_mentioned FROM topics WHERE user_id = ? AND topic LIKE ? ORDER BY last_mentioned DESC LIMIT 1", 
-                      (user_id, f"%{topic}%"))
-            row = c.fetchone()
-            conn.close()
-            if row:
-                date_str = row[1][:10] if row[1] else "недавно"
-                reply = f"📚 Мы обсуждали это {date_str}. Могу найти актуальную информацию, если хочешь."
-            else:
-                reply = f"❌ Не помню, чтобы мы обсуждали '{topic}'. Может, уточнишь?"
-        save_message(user_id, "assistant", reply)
-        return {"reply": reply}
+            reply = f"❌ Не помню, чтобы мы обсуждали '{topic}'. Может, уточнишь?"
+    save_message(user_id, "assistant", reply)
+    return {"reply": reply}
 
     # ==========================
     # ОПРЕДЕЛЕНИЕ ГОРОДА
