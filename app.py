@@ -49,7 +49,7 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 
-# === ЗАЩИТА ОТ ДУБЛЯЖА ГОЛОСА ===
+# === ЗАЩИТА ОТ ДУБЛЯЖА ===
 LAST_VOICE_MESSAGE = {}
 
 print("🔍 Проверка ключей...")
@@ -75,16 +75,18 @@ if TavilyClient and TAVILY_API_KEY:
 # ==========================
 
 def set_bot_description():
-    description = """Привет! Я — AURA, твой помощник.
+    description = """Привет! Я — AURA, твой умный помощник.
 
-Вот что я могу для тебя сделать:
-- Запомню всё и напомню вовремя.
-- Найду нужную информацию за секунды.
-- Помогу спланировать день и решить задачи.
-- Запомню контекст — не нужно объяснять дважды.
-- Работаю с текстом, фото, документами и голосом.
+🚀 Что я умею:
+✅ Находить и открывать сайты
+✅ Строить маршруты и проверять адреса
+✅ Запоминать всё, что мы обсуждали
+✅ Отвечать голосом
+✅ Читать документы (PDF, DOCX)
+✅ Распознавать фото
+✅ Напоминать о важном
 
-Напиши, что нужно — я рядом."""
+Напиши, что нужно — я сделаю!"""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setMyDescription"
         data = {"description": description}
@@ -117,22 +119,18 @@ def send_voice_reply(chat_id, text):
     if not text:
         return False
     
-    # Защита от дубляжа
     text_hash = hash(text)
     if LAST_VOICE_MESSAGE.get(chat_id) == text_hash:
         print(f"⏭️ Пропускаем дубляж голоса для {chat_id}")
         return True
     
-    # Берём только ПЕРВОЕ предложение (основную мысль)
     voice_text = text.split('\n')[0] if '\n' in text else text
-    
-    # Убираем ссылки, номера телефонов, эмодзи
-    voice_text = re.sub(r'https?://\S+', '', voice_text)                           # ссылки
-    voice_text = re.sub(r'\+7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', '', voice_text)  # +7 XXX XXX XX XX
-    voice_text = re.sub(r'8\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', '', voice_text)   # 8 XXX XXX XX XX
-    voice_text = re.sub(r'[#*_~`]', '', voice_text)                               # маркдаун
-    voice_text = re.sub(r'[✅❌👉📌⚡🔮🚀😊🔥💬📸🎤🌍]', '', voice_text)             # эмодзи
-    voice_text = re.sub(r'\s+', ' ', voice_text).strip()                          # лишние пробелы
+    voice_text = re.sub(r'https?://\S+', '', voice_text)
+    voice_text = re.sub(r'\+7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', '', voice_text)
+    voice_text = re.sub(r'8\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', '', voice_text)
+    voice_text = re.sub(r'[#*_~`]', '', voice_text)
+    voice_text = re.sub(r'[✅❌👉📌⚡🔮🚀😊🔥💬📸🎤🌍]', '', voice_text)
+    voice_text = re.sub(r'\s+', ' ', voice_text).strip()
     
     if len(voice_text) < 10:
         sentences = text.split('.')
@@ -234,19 +232,26 @@ def normalize_query(text):
     return normalized
 
 # ==========================
-# ПАРСИНГ САЙТОВ
+# ПАРСИНГ САЙТОВ (ГЛУБОКИЙ)
 # ==========================
 
 def parse_site_for_info(url):
+    """Открывает сайт и вытаскивает телефоны, адреса, email, текст"""
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Accept-Language": "ru-RU,ru;q=0.9"}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept-Language": "ru-RU,ru;q=0.9"
+        }
         response = requests.get(url, headers=headers, timeout=15)
         soup = BeautifulSoup(response.text, 'html.parser')
+        
         for script in soup(["script", "style", "nav", "footer", "header"]):
             script.decompose()
+        
         text = soup.get_text(separator="\n", strip=True)
         result = {}
         
+        # Телефоны
         phone_patterns = [r'\+7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'8\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}']
         phones = []
         for pattern in phone_patterns:
@@ -256,17 +261,27 @@ def parse_site_for_info(url):
         if phones:
             result["phones"] = phones
         
+        # Email
         email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
         emails = list(set(re.findall(email_pattern, text)))[:3]
         if emails:
             result["emails"] = emails
         
+        # Адреса
         address_pattern = r'(?:ул\.|улица|проспект|пр\.|переулок|пер\.|площадь|пл\.|шоссе|бульвар)\s+[А-Яа-я0-9\-\.\s,]+'
         addresses = list(set(re.findall(address_pattern, text)))[:3]
         if addresses:
             result["addresses"] = addresses
         
+        # Сайт (если есть)
+        site_pattern = r'(?:https?://)?(?:www\.)?([a-zA-Z0-9\-]+\.(?:ru|рф|com|org|net))'
+        sites = list(set(re.findall(site_pattern, text)))[:3]
+        if sites:
+            result["sites"] = sites
+        
+        # Первые 500 символов текста
         result["snippet"] = text[:500].replace("\n", " ")
+        
         return result
     except Exception as e:
         print(f"❌ Ошибка парсинга: {e}")
@@ -377,14 +392,186 @@ async def search_web(query, need_links=False, is_image_search=False):
     return "\n".join(formatted).strip()
 
 # ==========================
-# VISION (ОТКЛЮЧЕНА)
+# ГЕО-ПРОВЕРКА АДРЕСОВ (2GIS)
+# ==========================
+
+async def check_address(city, address):
+    """Проверяет адрес через 2GIS (бесплатно)"""
+    try:
+        query = f"{city} {address}"
+        encoded_query = urllib.parse.quote(query)
+        url = f"https://catalog.api.2gis.com/3.0/items?q={encoded_query}&fields=items.point,items.address&key=test"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("result", {}).get("items"):
+                items = data["result"]["items"]
+                if items:
+                    item = items[0]
+                    address_full = item.get("address", {}).get("full_name", "")
+                    point = item.get("point", {})
+                    lat = point.get("lat", "")
+                    lon = point.get("lon", "")
+                    if address_full:
+                        return {
+                            "address": address_full,
+                            "lat": lat,
+                            "lon": lon,
+                            "url": f"https://2gis.ru/{city}/geo/{lon},{lat}"
+                        }
+        return None
+    except Exception as e:
+        print(f"❌ 2GIS ошибка: {e}")
+        return None
+
+# ==========================
+# VISION (РАСПОЗНАВАНИЕ ФОТО)
 # ==========================
 
 def describe_image_with_groq(image_data):
-    return None
+    try:
+        import groq
+        if isinstance(image_data, bytes):
+            img = Image.open(io.BytesIO(image_data))
+        else:
+            img = Image.open(io.BytesIO(image_data))
+        
+        max_size = 512
+        if max(img.size) > max_size:
+            ratio = max_size / max(img.size)
+            new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+            img = img.resize(new_size, Image.Resampling.LANCZOS)
+        
+        buffer = io.BytesIO()
+        img.convert('RGB').save(buffer, format='JPEG', quality=80)
+        compressed_data = buffer.getvalue()
+        base64_image = base64.b64encode(compressed_data).decode('utf-8')
+        
+        client = groq.Groq(api_key=GROQ_API_KEY)
+        response = client.chat.completions.create(
+            model="llama-3.2-11b-vision-preview",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Опиши, что ты видишь на этой картинке. Если там есть текст, напиши его. Ответ дай на русском."},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                    ]
+                }
+            ],
+            temperature=0.7,
+            max_tokens=300
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"❌ Groq Vision ошибка: {e}")
+        return None
 
 def ocr_yandex(image_data):
-    return None
+    if not YANDEX_API_KEY:
+        return None
+    try:
+        if isinstance(image_data, bytes):
+            img = Image.open(io.BytesIO(image_data))
+        else:
+            img = Image.open(io.BytesIO(image_data))
+        
+        max_size = 2048
+        if max(img.size) > max_size:
+            ratio = max_size / max(img.size)
+            new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+            img = img.resize(new_size, Image.Resampling.LANCZOS)
+        
+        buffer = io.BytesIO()
+        img.save(buffer, format='JPEG', quality=90)
+        compressed_data = buffer.getvalue()
+        base64_image = base64.b64encode(compressed_data).decode('utf-8')
+        
+        url = "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze"
+        headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}"}
+        payload = {
+            "analyze_specs": [{
+                "content": base64_image,
+                "features": [{"type": "TEXT_DETECTION"}]
+            }]
+        }
+        response = requests.post(url, headers=headers, json=payload, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            text_blocks = []
+            for result in data.get("results", []):
+                for block in result.get("textDetection", {}).get("blocks", []):
+                    for line in block.get("lines", []):
+                        text_blocks.append(line.get("text", ""))
+            return "\n".join(text_blocks) if text_blocks else None
+        else:
+            return None
+    except Exception as e:
+        print(f"❌ Yandex OCR: {e}")
+        return None
+
+# ==========================
+# ЧТЕНИЕ ДОКУМЕНТОВ (PDF, DOCX, TXT)
+# ==========================
+
+def read_file(file_data, file_name):
+    try:
+        if file_name.endswith('.txt'):
+            return file_data.decode('utf-8')
+        elif file_name.endswith('.pdf'):
+            try:
+                import PyPDF2
+                from io import BytesIO
+                pdf_reader = PyPDF2.PdfReader(BytesIO(file_data))
+                text = ""
+                for page in pdf_reader.pages:
+                    text += page.extract_text()
+                return text
+            except:
+                return "⚠️ Не удалось прочитать PDF. Возможно, файл защищён или повреждён."
+        elif file_name.endswith('.docx'):
+            try:
+                import docx
+                from io import BytesIO
+                doc = docx.Document(BytesIO(file_data))
+                text = "\n".join([para.text for para in doc.paragraphs])
+                return text
+            except:
+                return "⚠️ Не удалось прочитать DOCX. Возможно, файл защищён или повреждён."
+        else:
+            return "⚠️ Формат файла не поддерживается. Поддерживаются: TXT, PDF, DOCX."
+    except Exception as e:
+        print(f"❌ Ошибка чтения файла: {e}")
+        return f"⚠️ Не удалось прочитать файл: {e}"
+
+# ==========================
+# АВТОМАТИЧЕСКИЕ НАПОМИНАНИЯ
+# ==========================
+
+def check_reminders():
+    """Проверяет напоминания и отправляет сообщения"""
+    while True:
+        try:
+            time.sleep(60)
+            now = datetime.now().strftime("%Y-%m-%d %H:%M")
+            conn = sqlite3.connect(DB_NAME)
+            c = conn.cursor()
+            c.execute("SELECT user_id, text, chat_id FROM reminders WHERE remind_date <= ? AND status = 'pending'", (now,))
+            rows = c.fetchall()
+            for row in rows:
+                user_id, text, chat_id = row
+                send_message(chat_id, f"⏰ Напоминание: {text}")
+                c.execute("UPDATE reminders SET status = 'done' WHERE user_id = ? AND text = ?", (user_id, text))
+                print(f"✅ Напоминание отправлено пользователю {user_id}")
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"❌ Ошибка в планировщике: {e}")
+
+# Запускаем планировщик напоминаний
+reminder_thread = threading.Thread(target=check_reminders, daemon=True)
+reminder_thread.start()
+print("🔄 Планировщик напоминаний запущен")
 
 # ==========================
 # БЭКАП
@@ -499,7 +686,9 @@ def init_db():
         text TEXT,
         remind_date TEXT,
         remind_time TEXT,
-        created_at TEXT
+        created_at TEXT,
+        chat_id TEXT,
+        status TEXT DEFAULT 'pending'
     )""")
     c.execute("""CREATE TABLE IF NOT EXISTS requests (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -534,6 +723,14 @@ def init_db():
         status TEXT DEFAULT 'active',
         created_at TEXT,
         due_date TEXT
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS saved_urls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
+        url TEXT,
+        title TEXT,
+        description TEXT,
+        created_at TEXT
     )""")
     conn.commit()
     conn.close()
@@ -618,11 +815,11 @@ def get_message_count(user_id):
     conn.close()
     return count
 
-def save_reminder(user_id, text, remind_date, remind_time):
+def save_reminder(user_id, text, remind_date, remind_time, chat_id):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute("INSERT INTO reminders (user_id, text, remind_date, remind_time, created_at) VALUES (?, ?, ?, ?, ?)",
-              (user_id, text, remind_date, remind_time, datetime.now().isoformat()))
+    c.execute("INSERT INTO reminders (user_id, text, remind_date, remind_time, created_at, chat_id, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+              (user_id, text, remind_date, remind_time, datetime.now().isoformat(), chat_id, "pending"))
     conn.commit()
     conn.close()
 
@@ -630,7 +827,7 @@ def get_reminders(user_id):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     today = datetime.now().date().isoformat()
-    c.execute("SELECT text, remind_date, remind_time FROM reminders WHERE user_id = ? AND remind_date >= ? ORDER BY remind_date, remind_time", (user_id, today))
+    c.execute("SELECT text, remind_date, remind_time FROM reminders WHERE user_id = ? AND remind_date >= ? AND status = 'pending' ORDER BY remind_date, remind_time", (user_id, today))
     rows = c.fetchall()
     conn.close()
     return rows
@@ -699,6 +896,22 @@ def get_memory(user_id, key):
     row = c.fetchone()
     conn.close()
     return row[0] if row else None
+
+def save_url(user_id, url, title, description=""):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("INSERT INTO saved_urls (user_id, url, title, description, created_at) VALUES (?, ?, ?, ?, ?)",
+              (user_id, url, title, description, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+def get_saved_urls(user_id, limit=10):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT url, title, description, created_at FROM saved_urls WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", (user_id, limit))
+    rows = c.fetchall()
+    conn.close()
+    return rows
 
 # ==========================
 # ЗАДАЧИ
@@ -896,10 +1109,8 @@ AURA_PROMPT = """Ты — AURA. Ты — живой человек в чате.
 - Эмодзи используй редко и только по смыслу (😊, 🔥, 🚀).
 - Если нужна ссылка на картинки, видео или музыку — дай её сразу, без лишних слов.
 - Не спрашивай "что ещё?" после каждого ответа.
-
-ПРАВИЛА:
 - Если пользователь просит "подробнее" — дай развёрнутый ответ.
-- Если спрашивает про визуальный контент (картинки, видео) — сразу ссылка.
+- Если пользователь спрашивает про адрес или маршрут — проверь через карты и дай ссылку.
 - Если не знаешь — скажи честно.
 
 Ты — человек. Ты — я. Говори коротко и живо."""
@@ -923,14 +1134,16 @@ async def webhook(request: Request):
         
         text = None
         image_data = None
+        file_data = None
+        file_name = None
         
         if "voice" in message:
             file_id = message["voice"]["file_id"]
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
             file_response = requests.get(file_url)
-            file_data = file_response.json()
-            if file_data.get("ok"):
-                file_path = file_data["result"]["file_path"]
+            file_data_resp = file_response.json()
+            if file_data_resp.get("ok"):
+                file_path = file_data_resp["result"]["file_path"]
                 audio_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
                 text = transcribe_audio_with_groq(audio_url)
                 if not text:
@@ -942,19 +1155,53 @@ async def webhook(request: Request):
             file_id = photo["file_id"]
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
             file_response = requests.get(file_url)
-            file_data = file_response.json()
-            if file_data.get("ok"):
-                file_path = file_data["result"]["file_path"]
+            file_data_resp = file_response.json()
+            if file_data_resp.get("ok"):
+                file_path = file_data_resp["result"]["file_path"]
                 image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
                 image_response = requests.get(image_url, timeout=30)
                 if image_response.status_code == 200:
                     image_data = image_response.content
                     send_message(chat_id, "🖼️ Обрабатываю фото...")
-                    result_text = "**📸 Что я вижу на фото:**\n\n❌ Распознавание фото временно недоступно. Скоро появится!"
+                    vision_result = describe_image_with_groq(image_data)
+                    ocr_result = ocr_yandex(image_data)
+                    result_text = "**📸 Что я вижу на фото:**\n\n"
+                    if vision_result:
+                        result_text += f"{vision_result}\n\n"
+                    else:
+                        result_text += "❌ Не удалось описать фото.\n\n"
+                    if ocr_result:
+                        result_text += f"**📝 Текст на фото:**\n{ocr_result}"
+                    else:
+                        result_text += "📝 Текст на фото не найден."
                     send_message(chat_id, result_text)
                     return JSONResponse({"ok": True})
                 else:
                     send_message(chat_id, "⚠️ Не удалось загрузить фото")
+                    return JSONResponse({"ok": True})
+        
+        elif "document" in message:
+            document = message["document"]
+            file_id = document["file_id"]
+            file_name = document.get("file_name", "unknown")
+            file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
+            file_response = requests.get(file_url)
+            file_data_resp = file_response.json()
+            if file_data_resp.get("ok"):
+                file_path = file_data_resp["result"]["file_path"]
+                file_url_full = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+                file_response_full = requests.get(file_url_full, timeout=30)
+                if file_response_full.status_code == 200:
+                    file_data = file_response_full.content
+                    send_message(chat_id, f"📄 Обрабатываю файл: {file_name}...")
+                    file_text = read_file(file_data, file_name)
+                    result_text = f"**📄 Содержимое файла:**\n\n{file_text[:3000]}"
+                    if len(file_text) > 3000:
+                        result_text += "\n\n... (файл обрезан, слишком длинный)"
+                    send_message(chat_id, result_text)
+                    return JSONResponse({"ok": True})
+                else:
+                    send_message(chat_id, "⚠️ Не удалось загрузить файл")
                     return JSONResponse({"ok": True})
         
         elif "text" in message:
@@ -963,7 +1210,7 @@ async def webhook(request: Request):
         if text:
             result = await process_message(request, chat_id, text)
             send_message(chat_id, result["reply"])
-            if result["reply"]:
+            if result["reply"] and not result.get("is_welcome", False):
                 threading.Thread(target=send_voice_reply, args=(chat_id, result["reply"])).start()
                 
         return JSONResponse({"ok": True})
@@ -1054,42 +1301,6 @@ async def process_message(request: Request, user_id, text):
         save_message(user_id, "assistant", welcome)
 
     # ==========================
-    # КОМАНДА /ЗАПОМНИ
-    # ==========================
-    if "/запомни" in lower:
-        topic = text.lower().replace("/запомни", "").strip()
-        if topic:
-            save_topic(user_id, topic)
-            reply = f"✅ Запомнил: {topic}"
-        else:
-            reply = "Напиши, что запомнить. Например: /запомни котят"
-        save_message(user_id, "assistant", reply)
-        return {"reply": reply}
-
-    # ==========================
-    # КОМАНДА /НАПОМНИ
-    # ==========================
-    if "/напомни" in lower:
-        parts = text.split(" ", 1)
-        if len(parts) < 2:
-            reply = "Напиши, о чём напомнить. Например: /напомни котята"
-        else:
-            topic = parts[1].strip().lower()
-            conn = sqlite3.connect(DB_NAME)
-            c = conn.cursor()
-            c.execute("SELECT topic, last_mentioned FROM topics WHERE user_id = ? AND topic LIKE ? ORDER BY last_mentioned DESC LIMIT 1", 
-                      (user_id, f"%{topic}%"))
-            row = c.fetchone()
-            conn.close()
-            if row:
-                date_str = row[1][:10] if row[1] else "недавно"
-                reply = f"📚 Мы обсуждали это {date_str}. Могу найти актуальную информацию, если хочешь."
-            else:
-                reply = f"❌ Не помню, чтобы мы обсуждали '{topic}'. Может, уточнишь?"
-        save_message(user_id, "assistant", reply)
-        return {"reply": reply}
-
-    # ==========================
     # ОПРЕДЕЛЕНИЕ ГОРОДА
     # ==========================
 
@@ -1144,6 +1355,22 @@ async def process_message(request: Request, user_id, text):
         current_day = current_time.strftime("%A")
         current_time_str = current_time.strftime("%H:%M")
         user_city = "Москва"
+
+    # ==========================
+    # ГЕО-ПРОВЕРКА АДРЕСОВ (ЕСЛИ ЗАПРОС СОДЕРЖИТ АДРЕС)
+    # ==========================
+    
+    address_match = re.search(r"(?:улица|ул\.|проспект|пр\.|переулок|пер\.|площадь|пл\.)\s+([а-яА-Я0-9\-\.\s,]+)", lower)
+    if address_match and user_city:
+        address = address_match.group(1).strip()
+        print(f"📍 Проверяю адрес: {user_city}, {address}")
+        geo_result = await check_address(user_city, address)
+        if geo_result:
+            save_memory(user_id, "last_address", geo_result["address"])
+            save_memory(user_id, "last_address_url", geo_result["url"])
+            reply = f"📍 Нашёл адрес: {geo_result['address']}\n🗺️ {geo_result['url']}"
+            save_message(user_id, "assistant", reply)
+            return {"reply": reply}
 
     # ==========================
     # ПОИСК
@@ -1239,6 +1466,53 @@ async def process_message(request: Request, user_id, text):
         save_message(user_id, "assistant", reply)
         return {"reply": reply}
     
+    elif "/запомни" in lower:
+        topic = text.lower().replace("/запомни", "").strip()
+        if topic:
+            save_topic(user_id, topic)
+            reply = f"✅ Запомнил: {topic}"
+        else:
+            reply = "Напиши, что запомнить. Например: /запомни котят"
+        save_message(user_id, "assistant", reply)
+        return {"reply": reply}
+
+    elif "/напомни" in lower:
+        parts = text.split(" ", 1)
+        if len(parts) < 2:
+            reply = "Напиши, о чём напомнить. Например: /напомни котята"
+        else:
+            topic = parts[1].strip().lower()
+            conn = sqlite3.connect(DB_NAME)
+            c = conn.cursor()
+            c.execute("SELECT topic, last_mentioned FROM topics WHERE user_id = ? AND topic LIKE ? ORDER BY last_mentioned DESC LIMIT 1", 
+                      (user_id, f"%{topic}%"))
+            row = c.fetchone()
+            conn.close()
+            if row:
+                date_str = row[1][:10] if row[1] else "недавно"
+                reply = f"📚 Мы обсуждали это {date_str}. Могу найти актуальную информацию, если хочешь."
+            else:
+                reply = f"❌ Не помню, чтобы мы обсуждали '{topic}'. Может, уточнишь?"
+        save_message(user_id, "assistant", reply)
+        return {"reply": reply}
+    
+    elif "/напомни_создать" in lower:
+        parts = text.split(" ", 3)
+        if len(parts) >= 4:
+            date_str = parts[1]
+            time_str = parts[2]
+            reminder_text = parts[3]
+            try:
+                dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+                save_reminder(user_id, reminder_text, dt.isoformat(), time_str, user_id)
+                reply = f"⏰ Запомнил: {reminder_text} на {date_str} в {time_str}"
+            except:
+                reply = "❌ Неверный формат. Используй: /напомни_создать ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ"
+        else:
+            reply = "**Формат:** /напомни_создать ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ"
+        save_message(user_id, "assistant", reply)
+        return {"reply": reply}
+    
     elif "/моинапоминания" in lower:
         reminders = get_reminders(user_id)
         if reminders:
@@ -1261,16 +1535,18 @@ async def process_message(request: Request, user_id, text):
 /удалить [ID] — удалить
 
 **⏰ Напоминания:**
-/напомни ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ
+/напомни_создать ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ — создать
 /моинапоминания — показать все
 
 **🧠 Память:**
 /запомни [тема] — сохранить тему
 /напомни [тема] — вспомнить, о чём говорили
 
-**📸 Фото:** отправь фото — опишу
+**📸 Фото:** отправь фото — опишу и распознаю текст
+**📄 Документы:** отправь PDF, DOCX, TXT — прочитаю
 **🎤 Голос:** отправь голосовое — услышу и отвечу
-**🌍 Город:** скажи "Мой город ..." — запомню время
+**🌍 Город:** скажи "Мой город ..." — запомню время и адреса
+**🗺️ Адрес:** напиши "улица ..." — найду на карте
 
 Просто пиши вопросы — я отвечу! 😊"""
         save_message(user_id, "assistant", reply)
