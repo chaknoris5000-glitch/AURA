@@ -47,7 +47,10 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 EMAIL_SENDER = os.getenv("EMAIL_SENDER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
-YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")  # Для Yandex Search
+YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
+
+# === ЗАЩИТА ОТ ДУБЛЯЖА ГОЛОСА ===
+LAST_VOICE_MESSAGE = {}
 
 print("🔍 Проверка ключей...")
 if not DEEPSEEK_API_KEY:
@@ -85,13 +88,47 @@ def google_tts(text):
 def send_voice_reply(chat_id, text):
     if not text:
         return False
-    voice_text = text.split('\n')[0][:300]
-    if not voice_text:
+    
+    # Защита от дубляжа
+    text_hash = hash(text[:100])
+    if LAST_VOICE_MESSAGE.get(chat_id) == text_hash:
+        print(f"⏭️ Пропускаем дубляж голоса для {chat_id}")
+        return True
+    
+    # Берём только ПЕРВОЕ предложение (основную мысль)
+    voice_text = text.split('\n')[0] if '\n' in text else text
+    
+    # Убираем ссылки, номера телефонов, лишние символы
+    voice_text = re.sub(r'https?://\S+', '', voice_text)  # убираем ссылки
+    voice_text = re.sub(r'\+?\d[\d\s\-\(\)]+', '', voice_text)  # убираем номера телефонов
+    voice_text = re.sub(r'[#*_~`]', '', voice_text)  # убираем маркдаун
+    voice_text = re.sub(r'\s+', ' ', voice_text).strip()  # убираем лишние пробелы
+    
+    if len(voice_text) < 10:
+        # Если после очистки текст слишком короткий — берём второе предложение
+        sentences = text.split('.')
+        for s in sentences[1:3]:
+            clean = re.sub(r'https?://\S+', '', s)
+            clean = re.sub(r'\+?\d[\d\s\-\(\)]+', '', clean)
+            clean = re.sub(r'[#*_~`]', '', clean).strip()
+            if len(clean) > 10:
+                voice_text = clean
+                break
+    
+    if len(voice_text) > 300:
+        voice_text = voice_text[:300] + "..."
+    
+    if not voice_text or len(voice_text) < 5:
+        print("⚠️ Текст слишком короткий для голоса, пропускаю")
         return False
+    
+    print(f"🎤 Озвучиваю: {voice_text[:50]}...")
+    
     audio_path = google_tts(voice_text)
     if not audio_path:
         print("❌ Голос не синтезирован")
         return False
+    
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
         with open(audio_path, 'rb') as f:
@@ -99,7 +136,11 @@ def send_voice_reply(chat_id, text):
             data = {'chat_id': chat_id}
             response = requests.post(url, files=files, data=data, timeout=30)
         os.unlink(audio_path)
-        return response.status_code == 200
+        if response.status_code == 200:
+            LAST_VOICE_MESSAGE[chat_id] = text_hash
+            print("✅ Голосовое сообщение отправлено!")
+            return True
+        return False
     except Exception as e:
         print(f"❌ Отправка голоса: {e}")
         return False
@@ -162,26 +203,19 @@ def normalize_query(text):
     return normalized
 
 # ==========================
-# ПАРСИНГ САЙТОВ (ГЛУБОКИЙ)
+# ПАРСИНГ САЙТОВ
 # ==========================
 
 def parse_site_for_info(url):
-    """Открывает сайт и вытаскивает телефоны, адреса, email, текст"""
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept-Language": "ru-RU,ru;q=0.9"
-        }
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Accept-Language": "ru-RU,ru;q=0.9"}
         response = requests.get(url, headers=headers, timeout=15)
         soup = BeautifulSoup(response.text, 'html.parser')
-        
         for script in soup(["script", "style", "nav", "footer", "header"]):
             script.decompose()
-        
         text = soup.get_text(separator="\n", strip=True)
         result = {}
         
-        # Телефоны
         phone_patterns = [r'\+7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'8\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}']
         phones = []
         for pattern in phone_patterns:
@@ -191,41 +225,34 @@ def parse_site_for_info(url):
         if phones:
             result["phones"] = phones
         
-        # Email
         email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
         emails = list(set(re.findall(email_pattern, text)))[:3]
         if emails:
             result["emails"] = emails
         
-        # Адреса
         address_pattern = r'(?:ул\.|улица|проспект|пр\.|переулок|пер\.|площадь|пл\.|шоссе|бульвар)\s+[А-Яа-я0-9\-\.\s,]+'
         addresses = list(set(re.findall(address_pattern, text)))[:3]
         if addresses:
             result["addresses"] = addresses
         
-        # Первые 500 символов текста
         result["snippet"] = text[:500].replace("\n", " ")
-        
         return result
     except Exception as e:
         print(f"❌ Ошибка парсинга: {e}")
         return None
 
 # ==========================
-# ПОИСК ПО .RU САЙТАМ (ЯНДЕКС + SEARXNG)
+# ПОИСК ПО .RU (Яндекс + SearXNG)
 # ==========================
 
 async def search_yandex(query):
-    """Поиск через Yandex Search API (только .ru)"""
     if not YANDEX_API_KEY:
         return None
-    
     try:
         encoded_query = urllib.parse.quote(query)
         url = f"https://yandex.ru/search/xml?text={encoded_query}&l10n=ru&sortby=rlv&filter=strict"
         headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}"}
         response = requests.get(url, headers=headers, timeout=10)
-        
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'xml')
             results = []
@@ -241,21 +268,17 @@ async def search_yandex(query):
                     })
             return results if results else None
         else:
-            print(f"⚠️ Yandex API ошибка: {response.status_code}")
             return None
     except Exception as e:
         print(f"❌ Yandex поиск ошибка: {e}")
         return None
 
 async def search_searxng(query):
-    """Поиск через SearXNG (агрегатор, ищет по Яндекс, Google, Mail.ru)"""
     try:
         encoded_query = urllib.parse.quote(query)
-        # Используем публичный инстанс SearXNG
         url = f"https://searx.be/search?q={encoded_query}&format=json&categories=general&language=ru"
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers, timeout=10)
-        
         if response.status_code == 200:
             data = response.json()
             results = []
@@ -270,25 +293,17 @@ async def search_searxng(query):
                         "snippet": snippet.strip()
                     })
             return results if results else None
-        else:
-            return None
+        return None
     except Exception as e:
         print(f"❌ SearXNG ошибка: {e}")
         return None
 
 async def search_ru_deep(query):
-    """Глубокий поиск по .ru сайтам (Яндекс → SearXNG → Tavily)"""
-    
-    # 1. Пробуем Яндекс
     print(f"🔍 Поиск по .ru: {query}")
     results = await search_yandex(query)
-    
-    # 2. Если Яндекс не дал результатов — SearXNG
     if not results:
         print("🔄 Яндекс не дал результатов, пробую SearXNG...")
         results = await search_searxng(query)
-    
-    # 3. Если ничего не нашли — пробуем Tavily (западный поиск)
     if not results:
         print("🔄 SearXNG не дал результатов, пробую Tavily...")
         if tavily_client:
@@ -310,32 +325,24 @@ async def search_ru_deep(query):
                         })
             except Exception as e:
                 print(f"❌ Tavily ошибка: {e}")
-    
     return results
 
 async def search_web(query, need_links=False, is_image_search=False):
-    """Основная функция поиска (с приоритетом .ru)"""
     if is_image_search:
         encoded_query = query.replace(" ", "%20")
         return f"https://yandex.ru/images/search?text={encoded_query}"
-    
-    # Поиск по .ru
     results = await search_ru_deep(query)
-    
     if not results:
         return "❌ Ничего не найдено."
-    
     formatted = []
     for r in results:
         title = r.get('title', '')
         url = r.get('url', '')
         snippet = r.get('snippet', '')[:250]
-        
         formatted.append(f"**{title}**\n{snippet}...")
         if need_links:
             formatted.append(f"🔗 {url}")
         formatted.append("")
-    
     return "\n".join(formatted).strip()
 
 # ==========================
@@ -1007,7 +1014,7 @@ async def process_message(request: Request, user_id, text):
             return {"reply": reply}
 
     # ==========================
-    # ПРИВЕТСТВИЕ (НОВОЕ)
+    # ПРИВЕТСТВИЕ
     # ==========================
     msg_count = get_message_count(user_id)
     if msg_count <= 2:
@@ -1036,7 +1043,7 @@ async def process_message(request: Request, user_id, text):
         save_message(user_id, "assistant", welcome)
 
     # ==========================
-    # КОМАНДА /ЗАПОМНИ (РУЧНОЕ СОХРАНЕНИЕ ТЕМЫ)
+    # КОМАНДА /ЗАПОМНИ
     # ==========================
     if "/запомни" in lower:
         topic = text.lower().replace("/запомни", "").strip()
@@ -1049,7 +1056,7 @@ async def process_message(request: Request, user_id, text):
         return {"reply": reply}
 
     # ==========================
-    # КОМАНДА /НАПОМНИ (ПОИСК ПО ЧАСТИ СЛОВА)
+    # КОМАНДА /НАПОМНИ
     # ==========================
     if "/напомни" in lower:
         parts = text.split(" ", 1)
@@ -1128,7 +1135,7 @@ async def process_message(request: Request, user_id, text):
         user_city = "Москва"
 
     # ==========================
-    # ПОИСК (С ПРИОРИТЕТОМ .RU)
+    # ПОИСК
     # ==========================
 
     search_result = None
@@ -1154,7 +1161,7 @@ async def process_message(request: Request, user_id, text):
                 print("❌ Ничего не найдено")
 
     # ==========================
-    # СОХРАНЕНИЕ ТЕМ (ЛЮБЫЕ СЛОВА, КРОМЕ СТОП-СЛОВ)
+    # СОХРАНЕНИЕ ТЕМ
     # ==========================
     stop_words = ["привет", "здравствуй", "спасибо", "пока", "да", "нет", "хорошо", "плохо", "ок", "ага", "угу"]
     words = re.findall(r'\b[а-яА-ЯёЁ]{4,}\b', text.lower())
@@ -1163,7 +1170,7 @@ async def process_message(request: Request, user_id, text):
             save_topic(user_id, word)
 
     # ==========================
-    # ОСНОВНОЙ ОТВЕТ (С ПАМЯТЬЮ)
+    # ОСНОВНОЙ ОТВЕТ
     # ==========================
 
     if "/задача" in lower:
@@ -1283,7 +1290,6 @@ async def process_message(request: Request, user_id, text):
         elif mood == "tired":
             mood_context = "Пользователь устал. Отвечай мягко и без лишней информации."
 
-        # Если запрос не требует развёрнутого ответа — коротко
         if not any(word in search_text for word in ["подробнее", "разверни", "расскажи подробно", "детально"]):
             aura_prompt = AURA_PROMPT + "\n\nОТВЕТЬ КОРОТКО — 1–2 ПРЕДЛОЖЕНИЯ. БЕЗ РАССУЖДЕНИЙ."
         else:
