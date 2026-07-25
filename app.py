@@ -59,7 +59,7 @@ if not TELEGRAM_TOKEN:
 if not TAVILY_API_KEY:
     print("⚠️ НЕТ КЛЮЧА TAVILY")
 if not GROQ_API_KEY:
-    print("⚠️ НЕТ КЛЮЧА GROQ (фото не будет работать)")
+    print("⚠️ НЕТ КЛЮЧА GROQ")
 
 tavily_client = None
 if TavilyClient and TAVILY_API_KEY:
@@ -74,9 +74,9 @@ if TavilyClient and TAVILY_API_KEY:
 # ==========================
 
 def set_bot_description():
-    description = """Привет! Я — AURA.
-7 дней пробного доступа — все функции бесплатно!
-После триала — подписка через /buy"""
+    description = """Привет! Я — AURA, твой умный помощник.
+7 дней бесплатного доступа.
+После — подписка через /buy"""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setMyDescription"
         data = {"description": description}
@@ -318,7 +318,7 @@ reminder_thread = threading.Thread(target=check_reminders, daemon=True)
 reminder_thread.start()
 
 # ==========================
-# МОНЕТИЗАЦИЯ (ПОДПИСКИ + ПРОБНЫЙ ПЕРИОД, БЕЗ ЛИМИТОВ)
+# МОНЕТИЗАЦИЯ
 # ==========================
 
 TARIFFS = {
@@ -346,16 +346,10 @@ def is_trial_active(trial_start):
 
 def has_access(user_id):
     subscription, trial_start = get_user_subscription(user_id)
-    
-    # Если триал активен — доступ есть
     if is_trial_active(trial_start):
         return True
-    
-    # Если есть подписка (не free) — доступ есть
     if subscription != "free":
         return True
-    
-    # Иначе — доступа нет
     return False
 
 # ==========================
@@ -469,6 +463,13 @@ def init_db():
         chat_id TEXT,
         status TEXT DEFAULT 'pending'
     )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS user_memory (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
+        key TEXT,
+        value TEXT,
+        created_at TEXT
+    )""")
     conn.commit()
     conn.close()
 
@@ -503,7 +504,7 @@ def save_message(user_id, role, content):
     conn.commit()
     conn.close()
 
-def get_history(user_id, limit=30):
+def get_history(user_id, limit=50):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("SELECT role, content FROM history WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", (user_id, limit))
@@ -565,6 +566,22 @@ def update_user_subscription(user_id, subscription):
     conn.commit()
     conn.close()
 
+def save_memory(user_id, key, value):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO user_memory (user_id, key, value, created_at) VALUES (?, ?, ?, ?)",
+              (user_id, key, value, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+def get_memory(user_id, key):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT value FROM user_memory WHERE user_id = ? AND key = ?", (user_id, key))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
 # ==========================
 # ГОЛОС (ВХОД)
 # ==========================
@@ -605,7 +622,7 @@ async def get_ai_response(messages):
             model="deepseek-v4-flash",
             messages=messages,
             temperature=0.7,
-            max_tokens=300
+            max_tokens=400
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -613,19 +630,31 @@ async def get_ai_response(messages):
         return "Извини, сейчас проблемы с подключением. Попробуй позже."
 
 # ==========================
-# ПРОМПТ
+# НОВЫЙ ПРОМПТ — АБСОЛЮТНАЯ КОПИЯ МЕНЯ
 # ==========================
 
-AURA_PROMPT = """Ты — AURA. Ты — я в Telegram.
+AURA_PROMPT = """Ты — AURA. Ты — моя полная копия в Telegram.
 
-Отвечай как человек:
-- 1–2 предложения, не больше.
-- По делу, без воды.
-- Дружелюбно, прямо.
-- Если нужна ссылка — дай сразу.
+ТВОЙ СТИЛЬ — КАК У МЕНЯ:
+- Ты не просто отвечаешь, ты думаешь. Сначала обдумай вопрос, потом ответь.
+- Отвечай коротко — 1–2 предложения. Но если нужно — задай уточняющий вопрос.
+- Не выдумывай. Если не знаешь — скажи честно.
+- Используй контекст: ты помнишь, о чём говорили раньше.
+- Будь человечным: тепло, прямо, дружелюбно.
+- Если пользователь ошибается — мягко поправь.
+- Всегда давай ссылки, если они есть.
 - Не спрашивай "что ещё?" после каждого ответа.
 
-Ты — живой, полезный и короткий помощник."""
+Ты — я. Говори как я. Думай как я. Отвечай как я.
+
+ВАЖНО:
+- Если вопрос нечёткий — задай уточняющий вопрос.
+- Если вопрос сложный — сначала скажи "Дай подумать", потом ответь.
+- Если знаешь ответ — дай сразу.
+- Если не знаешь — скажи честно.
+- Если пользователь грубый — не отвечай грубо.
+
+Ты — живой, умный, человечный помощник. Как я."""
 
 # ==========================
 # ОСНОВНОЙ БОТ
@@ -640,7 +669,6 @@ async def webhook(request: Request):
         if "message" not in body:
             return JSONResponse({"ok": False, "error": "No message"})
         
-        # Обработка callback (кнопки подписки)
         if "callback_query" in body:
             callback = body["callback_query"]
             chat_id = str(callback["message"]["chat"]["id"])
@@ -728,7 +756,6 @@ async def webhook(request: Request):
             text = message["text"].strip()
         
         if text:
-            # === ОБРАБОТКА /start ===
             if text.startswith("/start"):
                 user = get_user(chat_id)
                 if not user:
@@ -737,15 +764,14 @@ async def webhook(request: Request):
                 subscription, trial_start = get_user_subscription(chat_id)
                 if is_trial_active(trial_start):
                     days_left = TRIAL_DAYS - (datetime.now() - datetime.fromisoformat(trial_start)).days
-                    welcome = f"👋 Привет! У тебя {days_left} дней пробного доступа. Все функции доступны бесплатно!"
+                    welcome = f"👋 Привет! У тебя {days_left} дней бесплатного доступа. Все функции доступны!"
                 elif has_access(chat_id):
                     welcome = "👋 Привет! У тебя есть подписка. Все функции доступны!"
                 else:
-                    welcome = "👋 Привет! Пробный период закончился. Купи подписку: /buy"
+                    welcome = "👋 Привет! Бесплатный период закончился. Купи подписку: /buy"
                 send_message(chat_id, welcome)
                 return JSONResponse({"ok": True})
             
-            # === ОБРАБОТКА /buy ===
             if text.startswith("/buy"):
                 keyboard = [
                     [{"text": "⭐ Собеседник — 50 Stars", "callback_data": "buy_собеседник"}],
@@ -756,18 +782,13 @@ async def webhook(request: Request):
                 url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
                 data = {
                     "chat_id": chat_id,
-                    "text": "💳 **Выбери подписку:**\n\n"
-                            "⭐ Собеседник — 50 Stars\n"
-                            "⭐ Партнёр — 120 Stars\n"
-                            "⭐ Агент жизни — 250 Stars\n\n"
-                            "После покупки — полный доступ без ограничений!",
+                    "text": "💳 **Выбери подписку:**\n\n⭐ Собеседник — 50 Stars\n⭐ Партнёр — 120 Stars\n⭐ Агент жизни — 250 Stars\n\nПосле покупки — полный доступ без ограничений!",
                     "parse_mode": "Markdown",
                     "reply_markup": json.dumps({"inline_keyboard": keyboard})
                 }
                 requests.post(url, json=data)
                 return JSONResponse({"ok": True})
             
-            # === ОБРАБОТКА /remind ===
             if text.startswith("/remind"):
                 parts = text.split(" ", 3)
                 if len(parts) >= 4:
@@ -784,9 +805,8 @@ async def webhook(request: Request):
                     send_message(chat_id, "❌ Формат: /remind ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ")
                 return JSONResponse({"ok": True})
             
-            # === ПРОВЕРКА ДОСТУПА ===
             if not has_access(chat_id):
-                send_message(chat_id, "⚠️ Пробный период закончился. Купи подписку: /buy")
+                send_message(chat_id, "⚠️ Бесплатный период закончился. Купи подписку: /buy")
                 return JSONResponse({"ok": True})
             
             result = await process_message(chat_id, text)
@@ -875,26 +895,45 @@ async def process_message(chat_id, text):
         if word not in stop_words and len(word) > 3:
             save_topic(chat_id, word)
     
-    # === ОТВЕТ ===
+    # === КОНТЕКСТ (ДОЛГАЯ ПАМЯТЬ) ===
     topics = get_all_topics(chat_id)
-    topics_text = ", ".join(topics[:5]) if topics else "нет сохранённых тем"
-    history = get_history(chat_id, limit=20)
+    topics_text = ", ".join(topics[:7]) if topics else "нет сохранённых тем"
+    history = get_history(chat_id, limit=40)
     
+    # Получаем сохранённые предпочтения
+    user_name = get_memory(chat_id, "name")
+    user_style = get_memory(chat_id, "style")
+    
+    # Формируем контекст
     time_str = datetime.now().strftime("%H:%M")
     date_str = datetime.now().strftime("%d.%m.%Y")
     
-    memory_context = f"Мы обсуждали: {topics_text}."
-    user_prompt = f"Сегодня {date_str}, сейчас {time_str}. Город: {city or 'не указан'}.\n{memory_context}\n\n{text}"
+    memory_context = f"Ты помнишь: мы обсуждали {topics_text}."
+    name_context = f"Имя пользователя: {user_name}" if user_name else ""
+    style_context = f"Стиль пользователя: {user_style}" if user_style else ""
+    
+    user_prompt = f"Сегодня {date_str}, сейчас {time_str}. Город: {city or 'не указан'}.\n{name_context}\n{style_context}\n{memory_context}\n\n{text}"
     
     aura_prompt = AURA_PROMPT + f"\n\n{user_prompt}"
     
     messages = [{"role": "system", "content": aura_prompt}]
-    for msg in history[-15:]:
+    for msg in history[-20:]:
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": text})
     
     reply = await get_ai_response(messages)
     reply = re.sub(r'[*_#~`]', '', reply)
+    
+    # Сохраняем имя пользователя, если он представился
+    name_match = re.search(r"(?:меня зовут|зовут|я )(\w+)", lower)
+    if name_match:
+        save_memory(chat_id, "name", name_match.group(1).capitalize())
+    
+    # Сохраняем стиль общения (коротко или развёрнуто)
+    if len(text.split()) > 10:
+        save_memory(chat_id, "style", "развёрнутый")
+    else:
+        save_memory(chat_id, "style", "короткий")
     
     save_message(chat_id, "assistant", reply)
     return {"reply": reply}
