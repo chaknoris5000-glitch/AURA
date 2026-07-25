@@ -51,6 +51,7 @@ YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 
 # === ЗАЩИТА ОТ ДУБЛЯЖА ГОЛОСА ===
 LAST_VOICE_MESSAGE = {}
+VOICE_QUEUE = {}  # Очередь голосовых сообщений
 
 print("🔍 Проверка ключей...")
 if not DEEPSEEK_API_KEY:
@@ -75,27 +76,16 @@ if TavilyClient and TAVILY_API_KEY:
 # ==========================
 
 def set_bot_description():
-    description = """Я — AURA, твой умный и живой помощник.
+    description = """Привет! Я — AURA, твой помощник.
 
-Я общаюсь как человек — тепло, прямо и по делу.
+Вот что я могу для тебя сделать:
+- Запомню всё и напомню вовремя.
+- Найду нужную информацию за секунды.
+- Помогу спланировать день и решить задачи.
+- Запомню контекст — не нужно объяснять дважды.
+- Работаю с текстом, фото, документами и голосом.
 
-🚀 Что я уже умею:
-✅ Искать информацию в интернете (включая .ru сайты)
-✅ Находить телефоны и адреса организаций
-✅ Отвечать голосом (текст + аудио)
-✅ Запоминать всё, что мы обсуждали
-✅ Напоминать о важном в нужное время
-✅ Давать ссылки на картинки, видео и музыку
-✅ Понимать опечатки и исправлять их
-
-🔮 Скоро добавлю:
-⚡ Распознавание изображений (описание фото)
-⚡ Чтение PDF, DOCX, Excel (извлечение данных)
-⚡ Автоматические напоминания (бот напишет сам)
-⚡ Интеграция с почтой и календарём
-⚡ Управление проектами и задачами
-
-💬 Я — человек в чате. Говори со мной как с другом. Что нужно сделать?"""
+Напиши, что нужно — я рядом."""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setMyDescription"
         data = {"description": description}
@@ -138,12 +128,12 @@ def send_voice_reply(chat_id, text):
     voice_text = text.split('\n')[0] if '\n' in text else text
     
     # Убираем ссылки, номера телефонов, эмодзи
-    voice_text = re.sub(r'https?://\S+', '', voice_text)                           # ссылки
-    voice_text = re.sub(r'\+7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', '', voice_text)  # +7 XXX XXX XX XX
-    voice_text = re.sub(r'8\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', '', voice_text)   # 8 XXX XXX XX XX
-    voice_text = re.sub(r'[#*_~`]', '', voice_text)                               # маркдаун
-    voice_text = re.sub(r'[✅❌👉📌⚡🔮🚀😊🔥💬📸🎤🌍]', '', voice_text)             # эмодзи
-    voice_text = re.sub(r'\s+', ' ', voice_text).strip()                          # лишние пробелы
+    voice_text = re.sub(r'https?://\S+', '', voice_text)
+    voice_text = re.sub(r'\+7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', '', voice_text)
+    voice_text = re.sub(r'8\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', '', voice_text)
+    voice_text = re.sub(r'[#*_~`]', '', voice_text)
+    voice_text = re.sub(r'[✅❌👉📌⚡🔮🚀😊🔥💬📸🎤🌍]', '', voice_text)
+    voice_text = re.sub(r'\s+', ' ', voice_text).strip()
     
     if len(voice_text) < 10:
         sentences = text.split('.')
@@ -974,7 +964,8 @@ async def webhook(request: Request):
         if text:
             result = await process_message(request, chat_id, text)
             send_message(chat_id, result["reply"])
-            if result["reply"]:
+            # Отправляем голос только если это НЕ приветствие
+            if result["reply"] and not result.get("is_welcome", False):
                 threading.Thread(target=send_voice_reply, args=(chat_id, result["reply"])).start()
                 
         return JSONResponse({"ok": True})
@@ -1007,7 +998,7 @@ async def process_message(request: Request, user_id, text):
         extra = get_extra_requests(user_id)
         total_available = daily_limit + extra
         if today_used >= total_available:
-            return {"reply": "⚠️ Дневной лимит запросов исчерпан. Попробуй завтра."}
+            return {"reply": "⚠️ Дневной лимит запросов исчерпан. Попробуй завтра.", "is_welcome": False}
         log_request(user_id)
     else:
         log_request(user_id)
@@ -1053,16 +1044,17 @@ async def process_message(request: Request, user_id, text):
             encoded_query = query.replace(" ", "%20")
             reply = f"Вот {trigger}: {base_url}{encoded_query}"
             save_message(user_id, "assistant", reply)
-            return {"reply": reply}
+            return {"reply": reply, "is_welcome": False}
 
     # ==========================
-    # ПРИВЕТСТВИЕ (КОРОТКОЕ)
+    # ПРИВЕТСТВИЕ (ТОЛЬКО 1 РАЗ, НЕ ОЗВУЧИВАЕТСЯ)
     # ==========================
     msg_count = get_message_count(user_id)
-    if msg_count <= 2:
+    if msg_count == 1:  # Только ПЕРВОЕ сообщение пользователя
         welcome = "**👋 Привет!** 😊 Я здесь и готов помочь. Просто напиши, что нужно."
         send_message(user_id, welcome)
         save_message(user_id, "assistant", welcome)
+        return {"reply": welcome, "is_welcome": True}
 
     # ==========================
     # КОМАНДА /ЗАПОМНИ
@@ -1075,7 +1067,7 @@ async def process_message(request: Request, user_id, text):
         else:
             reply = "Напиши, что запомнить. Например: /запомни котят"
         save_message(user_id, "assistant", reply)
-        return {"reply": reply}
+        return {"reply": reply, "is_welcome": False}
 
     # ==========================
     # КОМАНДА /НАПОМНИ
@@ -1098,7 +1090,7 @@ async def process_message(request: Request, user_id, text):
             else:
                 reply = f"❌ Не помню, чтобы мы обсуждали '{topic}'. Может, уточнишь?"
         save_message(user_id, "assistant", reply)
-        return {"reply": reply}
+        return {"reply": reply, "is_welcome": False}
 
     # ==========================
     # ОПРЕДЕЛЕНИЕ ГОРОДА
@@ -1139,7 +1131,7 @@ async def process_message(request: Request, user_id, text):
             c.execute("UPDATE users SET city_asked = 1 WHERE user_id = ?", (user_id,))
             conn.commit()
             conn.close()
-            return {"reply": "🌍 Напиши свой город, чтобы я показывал точное время. Например: Мой город Белово"}
+            return {"reply": "🌍 Напиши свой город, чтобы я показывал точное время. Например: Мой город Белово", "is_welcome": False}
 
     if user_city:
         offset_hours = get_timezone_offset(user_city)
@@ -1202,6 +1194,8 @@ async def process_message(request: Request, user_id, text):
             reply = f"✅ Задача добавлена! ID: {task_id}"
         else:
             reply = "**Формат:** /задача [текст]"
+        save_message(user_id, "assistant", reply)
+        return {"reply": reply, "is_welcome": False}
     
     elif "/задачи" in lower:
         tasks = get_tasks(user_id, "active")
@@ -1213,6 +1207,8 @@ async def process_message(request: Request, user_id, text):
             reply = "\n".join(lines)
         else:
             reply = "🎉 Нет активных задач!"
+        save_message(user_id, "assistant", reply)
+        return {"reply": reply, "is_welcome": False}
     
     elif "/выполнить" in lower:
         parts = text.split(" ")
@@ -1227,6 +1223,8 @@ async def process_message(request: Request, user_id, text):
                 reply = "❌ Неверный ID"
         else:
             reply = "**Формат:** /выполнить [ID]"
+        save_message(user_id, "assistant", reply)
+        return {"reply": reply, "is_welcome": False}
     
     elif "/удалить" in lower:
         parts = text.split(" ")
@@ -1241,6 +1239,8 @@ async def process_message(request: Request, user_id, text):
                 reply = "❌ Неверный ID"
         else:
             reply = "**Формат:** /удалить [ID]"
+        save_message(user_id, "assistant", reply)
+        return {"reply": reply, "is_welcome": False}
     
     elif "/моинапоминания" in lower:
         reminders = get_reminders(user_id)
@@ -1251,6 +1251,8 @@ async def process_message(request: Request, user_id, text):
             reply = "\n".join(lines)
         else:
             reply = "📭 Нет напоминаний."
+        save_message(user_id, "assistant", reply)
+        return {"reply": reply, "is_welcome": False}
     
     elif "/помощь" in lower or "/help" in lower:
         reply = """**🤖 Помощь AURA**
@@ -1274,6 +1276,8 @@ async def process_message(request: Request, user_id, text):
 **🌍 Город:** скажи "Мой город ..." — запомню время
 
 Просто пиши вопросы — я отвечу! 😊"""
+        save_message(user_id, "assistant", reply)
+        return {"reply": reply, "is_welcome": False}
     
     else:
         user_name = get_memory(user_id, "name")
@@ -1338,8 +1342,8 @@ async def process_message(request: Request, user_id, text):
                     combined = combined[-2000:]
                 save_memory(user_id, "summary", combined)
 
-    save_message(user_id, "assistant", reply)
-    return {"reply": reply}
+        save_message(user_id, "assistant", reply)
+        return {"reply": reply, "is_welcome": False}
 
 @app.get("/")
 async def root():
