@@ -28,7 +28,6 @@ import io
 from PIL import Image
 import urllib.parse
 import asyncio
-import edge_tts
 
 load_dotenv()
 
@@ -87,6 +86,15 @@ set_bot_description()
 # === ГОЛОСОВЫЕ ОТВЕТЫ AURA — EDGE TTS (МУЖСКОЙ) ===
 # ============================================================
 
+# Пытаемся импортировать edge_tts
+try:
+    import edge_tts
+    EDGE_AVAILABLE = True
+    print("✅ Edge TTS инициализирован")
+except ImportError:
+    EDGE_AVAILABLE = False
+    print("⚠️ Edge TTS не установлен, использую gTTS")
+
 def clean_text_for_voice(text):
     """Очищает текст от эмодзи, ссылок, номеров телефонов"""
     if not text:
@@ -121,10 +129,13 @@ def clean_text_for_voice(text):
     
     return text
 
-async def edge_tts_generate(text):
+async def generate_audio_edge(text):
     """Генерирует аудио через Edge TTS (мужской голос)"""
+    if not EDGE_AVAILABLE:
+        return None
+    
     try:
-        # ✅ Самый реалистичный мужской голос
+        # Самый реалистичный мужской голос
         voice = "ru-RU-DmitryNeural"
         
         # Создаём временный файл
@@ -141,14 +152,38 @@ async def edge_tts_generate(text):
         print(f"❌ Edge TTS ошибка: {e}")
         return None
 
-def text_to_speech(text):
-    """Синхронная обёртка для Edge TTS"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+def generate_audio_fallback(text):
+    """Запасной вариант через gTTS"""
     try:
-        return loop.run_until_complete(edge_tts_generate(text))
-    finally:
-        loop.close()
+        from gtts import gTTS
+        tts = gTTS(text=text, lang='ru', slow=False)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+            tts.save(tmp.name)
+            return tmp.name
+    except Exception as e:
+        print(f"❌ gTTS ошибка: {e}")
+        return None
+
+def text_to_speech(text):
+    """Генерирует аудио (Edge TTS или gTTS запасной)"""
+    
+    # Пробуем Edge TTS (асинхронно)
+    if EDGE_AVAILABLE:
+        try:
+            # Запускаем асинхронную функцию синхронно
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                result = loop.run_until_complete(generate_audio_edge(text))
+                if result:
+                    return result
+            finally:
+                loop.close()
+        except Exception as e:
+            print(f"❌ Edge TTS ошибка: {e}")
+    
+    # Запасной: gTTS
+    return generate_audio_fallback(text)
 
 def send_voice_reply(chat_id, text):
     """Отправляет голосовое сообщение"""
@@ -189,8 +224,11 @@ def send_voice_reply(chat_id, text):
         
         if response.status_code == 200:
             LAST_VOICE_MESSAGE[chat_id] = text_hash
+            print(f"✅ Голосовое отправлено для {chat_id}")
             return True
-        return False
+        else:
+            print(f"❌ Ошибка отправки: {response.status_code}")
+            return False
     except Exception as e:
         print(f"❌ Отправка голоса: {e}")
         return False
@@ -1047,6 +1085,7 @@ async def webhook(request: Request):
             result = await process_message(request, chat_id, text)
             send_message(chat_id, result["reply"])
             if result["reply"] and not text.startswith("/"):
+                # Запускаем голос в отдельном потоке
                 threading.Thread(target=send_voice_reply, args=(chat_id, result["reply"])).start()
                 
         return JSONResponse({"ok": True})
