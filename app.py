@@ -998,27 +998,28 @@ async def process_message(request: Request, chat_id, text):
     elif mood == "tired":
         mood_context = "Пользователь устал. Отвечай мягко и без лишней информации."
     
-    # ============================================================
-    # === УМНОЕ ОПРЕДЕЛЕНИЕ ГОРОДА (ЛЮБАЯ ФОРМА) ===
-    # ============================================================
+    # === ОПРЕДЕЛЕНИЕ ГОРОДА ===
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        ip = forwarded.split(",")[0].strip()
+    else:
+        ip = request.client.host if request.client else "127.0.0.1"
+    
     city = get_user_city(chat_id)
     if not city:
         city_found = False
         
-        # 1. Ищем: "город Белово", "мой город Белово", "я в Белово", "я из Белово"
         city_match = re.search(r"(?:мой город|я в|я из|город|городе|из|в)\s+([а-яА-ЯёЁ\-]+)", lower)
         if city_match:
             city = city_match.group(1).capitalize()
             city_found = True
         
-        # 2. Ищем: "Белово город" (слово "город" ПОСЛЕ названия)
         if not city_found:
             city_match = re.search(r"\b([а-яА-ЯёЁ\-]+)\s+город", lower)
             if city_match:
                 city = city_match.group(1).capitalize()
                 city_found = True
         
-        # 3. Ищем просто "белово" (без слова "город")
         if not city_found:
             known_cities = ["белово", "кемерово", "новокузнецк", "прокопьевск", "киселёвск", "междуреченск", "москва", "санкт-петербург", "новосибирск", "екатеринбург", "красноярск", "иркутск", "владивосток", "омск"]
             for known in known_cities:
@@ -1029,56 +1030,48 @@ async def process_message(request: Request, chat_id, text):
         
         if city_found:
             update_user_city(chat_id, city)
-            send_message(chat_id, "✅ Принято! Чем могу помочь? Задавай любой вопрос?")
-            # Сохраняем город в память
             save_memory(chat_id, "city", city)
+            send_message(chat_id, "✅ Принято! Чем могу помочь? Задавай любой вопрос?")
             return {"reply": "✅ Принято! Чем могу помочь? Задавай любой вопрос?"}
         else:
             send_message(chat_id, "🌍 Напиши свой город, чтобы я показывал точное время и искал информацию рядом с тобой. Например: Белово")
             return {"reply": "🌍 Напиши свой город."}
     
-    # ============================================================
-    # === ВРЕМЯ ===
-    # ============================================================
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        ip = forwarded.split(",")[0].strip()
-    else:
-        ip = request.client.host if request.client else "127.0.0.1"
+    # === ЕСЛИ ЗАПРОС ПРО ВРЕМЯ (БЕЗ DEEPSEEK) ===
+    if "время" in lower or "час" in lower or "сколько" in lower or "который час" in lower:
+        current_time, city = get_current_time_for_user(chat_id, ip)
+        time_str = current_time.strftime("%H:%M")
+        date_str = current_time.strftime("%d.%m.%Y")
+        reply = f"🕐 Сейчас {time_str} {date_str} (город: {city})"
+        save_message(chat_id, "assistant", reply)
+        return {"reply": reply}
     
+    # === ВРЕМЯ ДЛЯ КОНТЕКСТА ===
     current_time, city = get_current_time_for_user(chat_id, ip)
     time_str = current_time.strftime("%H:%M")
     date_str = current_time.strftime("%d.%m.%Y")
     day_str = current_time.strftime("%A")
     
-    # ============================================================
     # === ПРИВЕТСТВИЕ ===
-    # ============================================================
     msg_count = get_message_count(chat_id)
     if msg_count <= 2:
         welcome = f"👋Привет! Я здесь и готов тебе помочь! Сейчас {time_str} {date_str}.\nПросто напиши, что нужно👇😎"
         send_message(chat_id, welcome)
         save_message(chat_id, "assistant", welcome)
     
-    # ============================================================
     # === ПРОШЛЫЕ ТЕМЫ ===
-    # ============================================================
     if msg_count <= 5:
         last_topics = get_all_topics(chat_id)
         if last_topics:
             topics_text = ", ".join(last_topics[:3])
             send_message(chat_id, f"📚 Мы уже говорили о: {topics_text}. Хочешь продолжить?")
     
-    # ============================================================
     # === ИНИЦИАТИВА ===
-    # ============================================================
     last_msg_time = get_last_message_time(chat_id)
     if last_msg_time and (datetime.now() - last_msg_time) > timedelta(hours=24):
         send_message(chat_id, "👋 Давно не общались! Как дела? Чем могу помочь сегодня?")
     
-    # ============================================================
     # === БЫСТРЫЙ ОТВЕТ НА ВИЗУАЛ ===
-    # ============================================================
     visual_triggers = {
         "картинк": "https://yandex.ru/images/search?text=",
         "фото": "https://yandex.ru/images/search?text=",
@@ -1102,9 +1095,7 @@ async def process_message(request: Request, chat_id, text):
             save_message(chat_id, "assistant", reply)
             return {"reply": reply}
     
-    # ============================================================
     # === ГЛУБОКИЙ ПОИСК ===
-    # ============================================================
     search_result = None
     search_triggers = ["новости", "погода", "найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "парикмахер", "wildberries", "валдберис", "озон", "авито"]
     if any(word in search_text for word in search_triggers):
@@ -1113,18 +1104,14 @@ async def process_message(request: Request, chat_id, text):
         if search_result:
             text = text + f"\n\n🔍 Актуальная информация:\n{search_result}"
     
-    # ============================================================
     # === СОХРАНЕНИЕ ТЕМ ===
-    # ============================================================
     stop_words = ["привет", "здравствуй", "спасибо", "пока", "да", "нет", "хорошо", "плохо"]
     words = re.findall(r'\b[а-яА-ЯёЁ]{4,}\b', text.lower())
     for word in words:
         if word not in stop_words and len(word) > 3:
             save_topic(chat_id, word)
     
-    # ============================================================
     # === КОНТЕКСТ ===
-    # ============================================================
     topics = get_all_topics(chat_id)
     topics_text = ", ".join(topics[:7]) if topics else "нет сохранённых тем"
     history = get_history(chat_id, limit=100)
@@ -1152,32 +1139,24 @@ async def process_message(request: Request, chat_id, text):
     reply = await get_ai_response(messages)
     reply = re.sub(r'[*_#~`]', '', reply)
     
-    # ============================================================
     # === ЗАПОМИНАНИЕ ИМЕНИ ===
-    # ============================================================
     name_match = re.search(r"(?:меня зовут|зовут|я )(\w+)", lower)
     if name_match:
         save_memory(chat_id, "name", name_match.group(1).capitalize())
     
-    # ============================================================
     # === ЗАПОМИНАНИЕ ОТНОШЕНИЯ ===
-    # ============================================================
     if "нравится" in lower:
         save_memory(chat_id, "likes", text)
     if "не нравится" in lower:
         save_memory(chat_id, "dislikes", text)
     
-    # ============================================================
     # === СТИЛЬ ОБЩЕНИЯ ===
-    # ============================================================
     if len(text.split()) > 10:
         save_memory(chat_id, "style", "развёрнутый")
     else:
         save_memory(chat_id, "style", "короткий")
     
-    # ============================================================
     # === ВОПРОС В КОНЦЕ ===
-    # ============================================================
     if not reply.endswith("?") and len(reply) < 300:
         reply += "\n\nЧто думаешь? Хочешь, чтобы я уточнил или нашёл ещё что-то? 😊"
     
