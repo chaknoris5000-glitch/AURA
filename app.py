@@ -54,8 +54,8 @@ ADMIN_USERS = ["5818548555"]
 LAST_VOICE_MESSAGE = {}
 
 print("🔍 Проверка ключей...")
-if not DEEPSEEK_API_KEY:
-    print("❌ НЕТ КЛЮЧА DEEPSEEK!")
+if not GROQ_API_KEY:
+    print("⚠️ НЕТ КЛЮЧА GROQ (бот не будет отвечать!)")
 if not TELEGRAM_TOKEN:
     print("❌ НЕТ КЛЮЧА TELEGRAM!")
 if not TAVILY_API_KEY:
@@ -746,22 +746,23 @@ def transcribe_audio_with_groq(audio_url):
         print(f"❌ Groq: {e}")
         return None
 
-client = OpenAI(
-    api_key=DEEPSEEK_API_KEY,
-    base_url=DEEPSEEK_BASE_URL
-)
+# ============================================================
+# === ОСНОВНОЙ ДВИЖОК — GROQ (ВМЕСТО DEEPSEEK) ===
+# ============================================================
 
 async def get_ai_response(messages):
     try:
-        response = client.chat.completions.create(
-            model="deepseek-v4",
+        from groq import Groq
+        groq_client = Groq(api_key=GROQ_API_KEY)
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
             messages=messages,
             temperature=0.9,
             max_tokens=600
         )
         return response.choices[0].message.content
     except Exception as e:
-        print(f"❌ AI: {e}")
+        print(f"❌ Groq: {e}")
         return "Извини, сейчас проблемы с подключением. Попробуй позже."
 
 AURA_PROMPT = """Ты — AURA. Ты — я в Telegram.
@@ -1037,7 +1038,7 @@ async def process_message(request: Request, chat_id, text):
             send_message(chat_id, "🌍 Напиши свой город, чтобы я показывал точное время и искал информацию рядом с тобой. Например: Белово")
             return {"reply": "🌍 Напиши свой город."}
     
-    # === ЕСЛИ ЗАПРОС ПРО ВРЕМЯ (БЕЗ DEEPSEEK) ===
+    # === ЕСЛИ ЗАПРОС ПРО ВРЕМЯ (БЕЗ GROQ) ===
     if "время" in lower or "час" in lower or "сколько" in lower or "который час" in lower:
         current_time, city = get_current_time_for_user(chat_id, ip)
         time_str = current_time.strftime("%H:%M")
