@@ -3,12 +3,10 @@ import re
 import time
 import sqlite3
 import asyncio
-import httpx
 import requests
 from datetime import datetime, timedelta
-from typing import Optional, Dict, List
-import json
 import random
+import json
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -19,9 +17,8 @@ from tavily import TavilyClient
 from groq import Groq
 from gtts import gTTS
 from bs4 import BeautifulSoup
-import threading
 
-# Загрузка переменных окружения
+# Загрузка переменных
 load_dotenv()
 
 # ==================== НАСТРОЙКИ ====================
@@ -41,22 +38,13 @@ deepseek_client = AsyncOpenAI(
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# ==================== FastAPI ====================
+# ==================== FASTAPI ====================
 app = FastAPI()
-
-@app.get("/")
-async def root():
-    return {"status": "AURA is running", "version": "2.0"}
-
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
 
 # ==================== БАЗА ДАННЫХ ====================
 def init_db():
     conn = sqlite3.connect('aura.db')
     cur = conn.cursor()
-    
     cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
             chat_id TEXT PRIMARY KEY,
@@ -72,7 +60,6 @@ def init_db():
             name TEXT
         )
     ''')
-    
     cur.execute('''
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,7 +69,6 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    
     cur.execute('''
         CREATE TABLE IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,7 +79,6 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    
     conn.commit()
     conn.close()
 
@@ -178,7 +163,6 @@ def analyze_mood(text):
     tired_words = ['устал', 'утом', 'спат', 'сон', 'вымота']
     
     text_lower = text.lower()
-    
     if any(word in text_lower for word in sad_words):
         return 'sad'
     elif any(word in text_lower for word in anxious_words):
@@ -194,28 +178,56 @@ def check_subscription(chat_id):
     user = get_user(chat_id)
     if not user:
         return False
-    
     if str(chat_id) in ADMIN_USERS:
         return True
-    
     subscription_type = user[5]
     subscription_end = user[6]
-    
     if subscription_type == 'free':
         return False
-    
     if subscription_end:
         end_date = datetime.strptime(subscription_end, '%Y-%m-%d')
         if datetime.now().date() <= end_date.date():
             return True
-    
     return False
 
-# ==================== ПОИСКОВЫЕ ФУНКЦИИ ====================
+def send_telegram_message(chat_id, text):
+    """Отправка сообщения через Telegram API напрямую"""
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        data = {'chat_id': chat_id, 'text': text, 'parse_mode': 'HTML'}
+        response = requests.post(url, data=data)
+        return response.json()
+    except Exception as e:
+        print(f"Send message error: {e}")
+        return None
+
+def send_telegram_voice(chat_id, text):
+    """Отправка голосового через Telegram API напрямую"""
+    try:
+        clean_text = clean_text_for_voice(text)
+        if not clean_text or len(clean_text) < 5:
+            return None
+        
+        tts = gTTS(text=clean_text, lang='ru', slow=False)
+        audio_file = f"voice_{chat_id}_{int(time.time())}.mp3"
+        tts.save(audio_file)
+        
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendVoice"
+        with open(audio_file, 'rb') as f:
+            files = {'voice': f}
+            data = {'chat_id': chat_id}
+            response = requests.post(url, files=files, data=data)
+        
+        os.remove(audio_file)
+        return response.json()
+    except Exception as e:
+        print(f"Voice send error: {e}")
+        return None
+
+# ==================== ПОИСК ====================
 
 async def search_web(query):
     results = []
-    
     try:
         tavily_results = tavily_client.search(query, max_results=5)
         for result in tavily_results.get('results', []):
@@ -232,7 +244,6 @@ async def search_web(query):
             ddg_url = f"https://html.duckduckgo.com/html/?q={query}"
             response = requests.get(ddg_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
             soup = BeautifulSoup(response.text, 'html.parser')
-            
             for result in soup.select('.result')[:3]:
                 title_elem = result.select_one('.result__a')
                 snippet_elem = result.select_one('.result__snippet')
@@ -244,82 +255,15 @@ async def search_web(query):
                     })
         except Exception as e:
             print(f"DuckDuckGo error: {e}")
-    
     return results
 
-async def search_web_ru(query):
-    results = []
-    try:
-        url = "https://yandex.ru/search/xml"
-        params = {
-            'user': YANDEX_API_KEY,
-            'query': query,
-            'lr': 225
-        }
-        response = requests.get(url, params=params, timeout=10)
-        soup = BeautifulSoup(response.text, 'xml')
-        
-        for doc in soup.find_all('doc')[:5]:
-            title = doc.find('title').text if doc.find('title') else ''
-            content = doc.find('passage').text if doc.find('passage') else ''
-            url_elem = doc.find('url').text if doc.find('url') else ''
-            results.append({
-                'title': title,
-                'content': content,
-                'url': url_elem
-            })
-    except Exception as e:
-        print(f"Yandex error: {e}")
-    
-    return results
-
-# ==================== ГОЛОСОВЫЕ ФУНКЦИИ ====================
-
-async def transcribe_voice(file_path):
-    try:
-        with open(file_path, 'rb') as f:
-            transcription = groq_client.audio.transcriptions.create(
-                file=f,
-                model="whisper-large-v3-turbo",
-                response_format="text"
-            )
-        return transcription
-    except Exception as e:
-        print(f"Voice transcription error: {e}")
-        return None
-
-async def send_voice_reply(chat_id, text):
-    try:
-        clean_text = clean_text_for_voice(text)
-        
-        if not clean_text or len(clean_text) < 5:
-            return
-        
-        tts = gTTS(text=clean_text, lang='ru', slow=False)
-        audio_file = f"voice_{chat_id}_{int(time.time())}.mp3"
-        tts.save(audio_file)
-        
-        # Используем requests для отправки через Telegram API напрямую
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendVoice"
-        with open(audio_file, 'rb') as f:
-            files = {'voice': f}
-            data = {'chat_id': chat_id}
-            response = requests.post(url, files=files, data=data)
-        
-        os.remove(audio_file)
-        
-    except Exception as e:
-        print(f"Voice error: {e}")
-
-# ==================== ОСНОВНАЯ ФУНКЦИЯ ОТВЕТА ====================
+# ==================== ОСНОВНАЯ ЛОГИКА ====================
 
 AURA_PROMPT = """Ты — AURA. Ты — мой цифровой партнёр в Telegram.
 - Ты чувствуешь настроение собеседника и адаптируешься.
 - Отвечай как человек: тепло, прямо, с эмпатией.
 - Всегда в конце добавляй вопрос, чтобы продолжить диалог.
 - Используй контекст прошлых диалогов.
-- Если не знаешь ответа — скажи честно и предложи поискать.
-- Если видишь, что собеседник грустит — поддержи.
 - Отвечай коротко (1-2 предложения), если не просят подробнее."""
 
 async def get_aura_response(chat_id, text):
@@ -338,15 +282,12 @@ async def get_aura_response(chat_id, text):
     conn.close()
     
     history = get_history(chat_id, 10)
-    
     messages = [{"role": "system", "content": AURA_PROMPT}]
     
     if user:
         user_info = []
         if user[3]:
             user_info.append(f"Город: {user[3]}")
-        if user[4]:
-            user_info.append("Город подтверждён")
         if user[8]:
             user_info.append(f"Настроение: {user[8]}")
         if user_info:
@@ -373,166 +314,114 @@ async def get_aura_response(chat_id, text):
             temperature=0.7,
             max_tokens=500
         )
-        
         reply = response.choices[0].message.content
-        
         if len(reply) < 10:
             reply += " Что думаешь? Хочешь, продолжу?"
-        
         if not reply.endswith("?") and not reply.endswith("..."):
             reply += " Что думаешь?"
-        
         save_message(chat_id, 'assistant', reply)
-        
         return reply
-        
     except Exception as e:
         print(f"DeepSeek error: {e}")
-        return "Извини, сейчас проблемы с подключением. Попробуй позже. Что думаешь? Может, другой вопрос?"
+        return "Извини, сейчас проблемы с подключением. Попробуй позже."
 
-# ==================== ОБРАБОТЧИКИ TELEGRAM (через webhook) ====================
+# ==================== WEBHOOK ОБРАБОТЧИК ====================
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, CallbackQueryHandler, ContextTypes
-
-# Создаём приложение бота
-bot_app = Application.builder().token(TELEGRAM_TOKEN).build()
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    username = update.effective_user.username
-    first_name = update.effective_user.first_name
-    
-    create_user(chat_id, username, first_name)
-    
-    user = get_user(chat_id)
-    
-    if user and user[4] == 1:
-        reply = f"👋 Привет, {first_name or 'друг'}! Я AURA. Чем могу помочь сегодня?"
-        await update.message.reply_text(reply)
-    else:
-        reply = "👋 Привет! Я — AURA, твой цифровой партнёр.\n\nНапиши свой город, чтобы я показывал точное время и искал информацию рядом с тобой."
-        await update.message.reply_text(reply)
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    reply = """🤖 Что умеет AURA:
-
-• Общаться как человек
-• Искать информацию в интернете
-• Запоминать важное
-• Напоминать о задачах
-• Анализировать настроение
-• Отвечать голосом
-
-Просто напиши мне что-нибудь!"""
-    await update.message.reply_text(reply)
-    await send_voice_reply(str(update.effective_chat.id), reply)
-
-async def subscription_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("💬 Собеседник — 5 000 ₽", callback_data="sub_speaker")],
-        [InlineKeyboardButton("🤝 Партнёр — 12 000 ₽", callback_data="sub_partner")],
-        [InlineKeyboardButton("🌟 Агент жизни — 25 000 ₽", callback_data="sub_agent")],
-        [InlineKeyboardButton("🎁 7 дней бесплатно", callback_data="sub_trial")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    reply = "💎 **Выбери тариф:**\n\n• Собеседник — 5 000 ₽/мес\n• Партнёр — 12 000 ₽/мес  \n• Агент жизни — 25 000 ₽/мес\n\n🎁 7 дней бесплатного доступа"
-    await update.message.reply_text(reply, reply_markup=reply_markup, parse_mode='Markdown')
-
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    chat_id = str(query.message.chat.id)
-    data = query.data
-    
-    if data == "sub_trial":
-        end_date = (datetime.now() + timedelta(days=7)).strftime('%Y-%m-%d')
-        conn = sqlite3.connect('aura.db')
-        cur = conn.cursor()
-        cur.execute("UPDATE users SET subscription_type = 'trial', subscription_end = ? WHERE chat_id = ?", (end_date, chat_id))
-        conn.commit()
-        conn.close()
-        
-        reply = f"🎉 Поздравляю! У тебя 7 дней бесплатного доступа к тарифу «Агент жизни» до {end_date}.\n\nЗадавай любые вопросы!"
-        await query.edit_message_text(reply)
-        await send_voice_reply(chat_id, reply)
-    
-    elif data.startswith("sub_"):
-        reply = "💳 Оплата через Telegram Stars пока в разработке. Напиши администратору @chaknoris5000"
-        await query.edit_message_text(reply)
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    text = update.message.text
-    
-    if not text:
-        return
-    
-    user = get_user(chat_id)
-    if not user:
-        create_user(chat_id, update.effective_user.username, update.effective_user.first_name)
-        user = get_user(chat_id)
-    
-    if user and user[4] == 0:
-        if len(text) < 30 and not any(keyword in text.lower() for keyword in ['привет', 'здравствуй', 'как дела']):
-            update_user_city(chat_id, text)
-            reply = f"✅ Принято! Город {text} сохранён. Чем могу помочь?"
-            await update.message.reply_text(reply)
-            if len(reply) > 10:
-                await send_voice_reply(chat_id, reply)
-            return
-        else:
-            await update.message.reply_text("📍 Напиши свой город, чтобы я мог показывать актуальную информацию для твоего региона.")
-            return
-    
-    reply = await get_aura_response(chat_id, text)
-    
-    await update.message.reply_text(reply)
-    
-    if len(reply) > 10:
-        await send_voice_reply(chat_id, reply)
-
-async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    
+@app.post("/webhook")
+async def webhook(request: Request):
     try:
-        voice_file = await update.message.voice.get_file()
-        file_path = f"voice_in_{chat_id}_{int(time.time())}.ogg"
-        await voice_file.download_to_drive(file_path)
+        data = await request.json()
+        print(f"Webhook received: {json.dumps(data, ensure_ascii=False)[:200]}")
         
-        text = await transcribe_voice(file_path)
-        os.remove(file_path)
+        # Обрабатываем сообщение
+        if 'message' in data:
+            message = data['message']
+            chat_id = str(message['chat']['id'])
+            
+            # Текстовое сообщение
+            if 'text' in message:
+                text = message['text']
+                
+                # Проверяем команды
+                if text.startswith('/start'):
+                    reply = "👋 Привет! Я AURA. Напиши свой город."
+                    send_telegram_message(chat_id, reply)
+                    return {"status": "ok"}
+                
+                if text.startswith('/help'):
+                    reply = "🤖 Я умею: общаться, искать информацию, напоминать, анализировать настроение, отвечать голосом."
+                    send_telegram_message(chat_id, reply)
+                    return {"status": "ok"}
+                
+                # Обработка города
+                user = get_user(chat_id)
+                if not user:
+                    create_user(chat_id, message['chat'].get('username'), message['chat'].get('first_name'))
+                    user = get_user(chat_id)
+                
+                if user and user[4] == 0:
+                    if len(text) < 30 and not any(kw in text.lower() for kw in ['привет', 'здравствуй']):
+                        update_user_city(chat_id, text)
+                        reply = f"✅ Город {text} сохранён! Чем могу помочь?"
+                        send_telegram_message(chat_id, reply)
+                        send_telegram_voice(chat_id, reply)
+                        return {"status": "ok"}
+                    else:
+                        send_telegram_message(chat_id, "📍 Напиши свой город.")
+                        return {"status": "ok"}
+                
+                # Основной ответ
+                reply = await get_aura_response(chat_id, text)
+                send_telegram_message(chat_id, reply)
+                send_telegram_voice(chat_id, reply)
+            
+            # Голосовое сообщение
+            elif 'voice' in message:
+                # Получаем файл
+                file_id = message['voice']['file_id']
+                file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
+                file_response = requests.get(file_url).json()
+                
+                if file_response.get('ok'):
+                    file_path = file_response['result']['file_path']
+                    file_download = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+                    
+                    # Скачиваем
+                    audio_response = requests.get(file_download)
+                    audio_file = f"voice_in_{chat_id}_{int(time.time())}.ogg"
+                    with open(audio_file, 'wb') as f:
+                        f.write(audio_response.content)
+                    
+                    # Распознаём через Groq
+                    try:
+                        with open(audio_file, 'rb') as f:
+                            transcription = groq_client.audio.transcriptions.create(
+                                file=f,
+                                model="whisper-large-v3-turbo",
+                                response_format="text"
+                            )
+                        text = transcription
+                        os.remove(audio_file)
+                        
+                        if text:
+                            send_telegram_message(chat_id, f"🎤 Распознано: {text}")
+                            reply = await get_aura_response(chat_id, text)
+                            send_telegram_message(chat_id, reply)
+                            send_telegram_voice(chat_id, reply)
+                    except Exception as e:
+                        print(f"Transcription error: {e}")
+                        send_telegram_message(chat_id, "Не удалось распознать голосовое.")
         
-        if text:
-            await update.message.reply_text(f"🎤 Распознано: {text}")
-            reply = await get_aura_response(chat_id, text)
-            await update.message.reply_text(reply)
-            if len(reply) > 10:
-                await send_voice_reply(chat_id, reply)
-        else:
-            await update.message.reply_text("Не удалось распознать голосовое. Попробуй ещё раз или напиши текстом.")
+        return {"status": "ok"}
     except Exception as e:
-        print(f"Voice handling error: {e}")
-        await update.message.reply_text("Ошибка при обработке голосового сообщения.")
-
-# ==================== НАСТРОЙКА ХЕНДЛЕРОВ ====================
-
-bot_app.add_handler(CommandHandler("start", start_command))
-bot_app.add_handler(CommandHandler("help", help_command))
-bot_app.add_handler(CommandHandler("subscription", subscription_command))
-bot_app.add_handler(CommandHandler("sub", subscription_command))
-bot_app.add_handler(CallbackQueryHandler(button_callback))
-bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-bot_app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+        print(f"Webhook error: {e}")
+        return {"status": "error"}
 
 # ==================== ФОНОВЫЕ ЗАДАЧИ ====================
 
 async def check_inactivity():
     while True:
         await asyncio.sleep(3600)
-        
         try:
             conn = sqlite3.connect('aura.db')
             cur = conn.cursor()
@@ -546,27 +435,19 @@ async def check_inactivity():
             
             for user in inactive_users:
                 chat_id = user[0]
-                try:
-                    reply = random.choice([
-                        "👋 Давно не общались! Как дела? Что нового?",
-                        "Привет! Скучал по нашему общению. Как ты?",
-                        "Эй! Долго не писал. Всё хорошо? Рассказывай."
-                    ])
-                    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-                    data = {'chat_id': chat_id, 'text': reply}
-                    requests.post(url, data=data)
-                    
-                    if len(reply) > 10:
-                        await send_voice_reply(chat_id, reply)
-                except Exception as e:
-                    print(f"Inactivity message error: {e}")
+                reply = random.choice([
+                    "👋 Давно не общались! Как дела?",
+                    "Привет! Скучал по нашему общению!",
+                    "Эй! Долго не писал. Всё хорошо?"
+                ])
+                send_telegram_message(chat_id, reply)
+                send_telegram_voice(chat_id, reply)
         except Exception as e:
-            print(f"Inactivity check error: {e}")
+            print(f"Inactivity error: {e}")
 
 async def check_reminders():
     while True:
         await asyncio.sleep(60)
-        
         try:
             conn = sqlite3.connect('aura.db')
             cur = conn.cursor()
@@ -576,70 +457,37 @@ async def check_reminders():
                 AND done = 0
             ''')
             tasks = cur.fetchall()
-            
             for task_id, chat_id, task in tasks:
-                try:
-                    reply = f"⏰ Напоминание: {task}"
-                    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-                    data = {'chat_id': chat_id, 'text': reply}
-                    requests.post(url, data=data)
-                    
-                    if len(reply) > 10:
-                        await send_voice_reply(chat_id, reply)
-                    
-                    cur.execute("UPDATE tasks SET done = 1 WHERE id = ?", (task_id,))
-                    conn.commit()
-                except Exception as e:
-                    print(f"Reminder error: {e}")
-            
+                reply = f"⏰ Напоминание: {task}"
+                send_telegram_message(chat_id, reply)
+                send_telegram_voice(chat_id, reply)
+                cur.execute("UPDATE tasks SET done = 1 WHERE id = ?", (task_id,))
+                conn.commit()
             conn.close()
         except Exception as e:
-            print(f"Reminder check error: {e}")
+            print(f"Reminder error: {e}")
 
 # ==================== ЗАПУСК ====================
 
-async def run_bot():
-    """Запуск бота с webhook"""
-    # Устанавливаем webhook
-    webhook_url = "https://aura-zatq.onrender.com/webhook"
-    await bot_app.bot.set_webhook(webhook_url)
-    print(f"✅ Webhook set to {webhook_url}")
-    
-    # Запускаем фоновые задачи
+@app.on_event("startup")
+async def startup():
+    print("🚀 AURA запускается...")
     asyncio.create_task(check_inactivity())
     asyncio.create_task(check_reminders())
     
-    # Запускаем бота в режиме webhook
-    await bot_app.initialize()
-    await bot_app.start()
-    
-    # FastAPI будет обрабатывать webhook
-    return bot_app
+    # Устанавливаем webhook
+    webhook_url = "https://aura-zatq.onrender.com/webhook"
+    set_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={webhook_url}"
+    response = requests.get(set_url)
+    print(f"✅ Webhook set: {response.json()}")
 
-# ==================== FASTAPI WEBHOOK ====================
+@app.get("/")
+async def root():
+    return {"status": "AURA is running", "version": "3.0"}
 
-@app.post("/webhook")
-async def webhook(request: Request):
-    """Обработка входящих обновлений от Telegram"""
-    try:
-        data = await request.json()
-        update = Update.de_json(data, bot_app.bot)
-        await bot_app.process_update(update)
-        return {"status": "ok"}
-    except Exception as e:
-        print(f"Webhook error: {e}")
-        return {"status": "error"}
-
-# ==================== ИНИЦИАЛИЗАЦИЯ ПРИ ЗАПУСКЕ ====================
-
-@app.on_event("startup")
-async def startup_event():
-    """Действия при старте FastAPI"""
-    print("🚀 AURA запускается...")
-    await run_bot()
-    print("✅ AURA готова к работе!")
-
-# ==================== ТОЧКА ВХОДА ====================
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
