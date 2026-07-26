@@ -747,23 +747,37 @@ def transcribe_audio_with_groq(audio_url):
         return None
 
 # ============================================================
-# === ОСНОВНОЙ ДВИЖОК — GROQ (ВМЕСТО DEEPSEEK) ===
+# === ОСНОВНОЙ ДВИЖОК — DEEPSEEK V4 PRO ===
 # ============================================================
 
 async def get_ai_response(messages):
     try:
-        from groq import Groq
-        groq_client = Groq(api_key=GROQ_API_KEY)
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+        client = OpenAI(
+            api_key=DEEPSEEK_API_KEY,
+            base_url=DEEPSEEK_BASE_URL
+        )
+        response = client.chat.completions.create(
+            model="deepseek-v4-pro",  # ✅ ФЛАГМАНСКАЯ МОДЕЛЬ!
             messages=messages,
             temperature=0.9,
             max_tokens=600
         )
         return response.choices[0].message.content
     except Exception as e:
-        print(f"❌ Groq: {e}")
-        return "Извини, сейчас проблемы с подключением. Попробуй позже."
+        print(f"❌ DeepSeek V4 Pro: {e}")
+        # Резерв на Groq если DeepSeek упал
+        try:
+            from groq import Groq
+            groq_client = Groq(api_key=GROQ_API_KEY)
+            response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=messages,
+                temperature=0.9,
+                max_tokens=600
+            )
+            return response.choices[0].message.content
+        except:
+            return "Извини, сейчас проблемы с подключением. Попробуй позже."
 
 AURA_PROMPT = """Ты — AURA. Ты — я в Telegram.
 
