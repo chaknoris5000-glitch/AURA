@@ -49,6 +49,7 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 
+# === ТВОЙ ID АДМИНИСТРАТОРА ===
 ADMIN_USERS = ["5818548555"]
 
 LAST_VOICE_MESSAGE = {}
@@ -88,42 +89,7 @@ def set_bot_description():
 set_bot_description()
 
 # ==========================
-# НОВАЯ ФУНКЦИЯ: ОЧИСТКА ТЕКСТА ДЛЯ ГОЛОСА
-# ==========================
-
-def clean_text_for_voice(text):
-    """Очищает текст от эмодзи, ссылок, номеров телефонов"""
-    # Удаляем эмодзи
-    emoji_pattern = re.compile(
-        "[\U0001F600-\U0001F64F"
-        "\U0001F300-\U0001F5FF"
-        "\U0001F680-\U0001F6FF"
-        "\U0001F700-\U0001F77F"
-        "\U0001F780-\U0001F7FF"
-        "\U0001F800-\U0001F8FF"
-        "\U0001F900-\U0001F9FF"
-        "\U0001FA00-\U0001FA6F"
-        "\U0001FA70-\U0001FAFF"
-        "\U00002702-\U000027B0"
-        "\U000024C2-\U0001F251"
-        "]+",
-        flags=re.UNICODE
-    )
-    text = emoji_pattern.sub('', text)
-    
-    # Удаляем ссылки
-    text = re.sub(r'https?://\S+|www\.\S+', '', text)
-    
-    # Удаляем номера телефонов
-    text = re.sub(r'\+?\d[\d\s\-\(\)]{7,}\d', '', text)
-    
-    # Удаляем лишние пробелы
-    text = re.sub(r'\s+', ' ', text).strip()
-    
-    return text
-
-# ==========================
-# ИСПРАВЛЕННАЯ ГОЛОСОВАЯ ФУНКЦИЯ
+# ГОЛОС
 # ==========================
 
 def google_tts(text):
@@ -140,24 +106,15 @@ def google_tts(text):
 def send_voice_reply(chat_id, text):
     if not text:
         return False
-    
-    # Очищаем текст от эмодзи, ссылок, телефонов
-    clean_text = clean_text_for_voice(text)
-    if not clean_text or len(clean_text) < 5:
-        return False
-    
-    # Берем только первую фразу
-    voice_text = clean_text.split('\n')[0][:300]
-    
-    # Убираем дублирование
-    text_hash = hash(voice_text)
+    text_hash = hash(text)
     if LAST_VOICE_MESSAGE.get(chat_id) == text_hash:
         return True
-    
+    voice_text = text.split('\n')[0][:300]
+    if not voice_text:
+        return False
     audio_path = google_tts(voice_text)
     if not audio_path:
         return False
-    
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
         with open(audio_path, 'rb') as f:
@@ -241,7 +198,7 @@ def analyze_mood(text):
     return "neutral"
 
 # ==========================
-# ГЛУБОКИЙ ПАРСИНГ
+# ПАРСИНГ САЙТОВ
 # ==========================
 
 def parse_site_for_info(url):
@@ -297,7 +254,6 @@ def parse_site_for_info(url):
             result["product_description"] = desc.text.strip()[:500]
         
         result["snippet"] = text[:1000].replace("\n", " ")
-        
         return result
     except Exception as e:
         print(f"❌ Ошибка парсинга: {e}")
@@ -501,7 +457,7 @@ def has_access(user_id):
     return False
 
 # ==========================
-# ОПРЕДЕЛЕНИЕ ВРЕМЕНИ
+# ВРЕМЯ И ГОРОД
 # ==========================
 
 def get_timezone_offset(city_name):
@@ -1120,18 +1076,17 @@ async def process_message(request: Request, chat_id, text):
     elif mood == "tired":
         mood_context = "Пользователь устал. Отвечай мягко и без лишней информации."
     
-    # === ПРОВЕРКА ГОРОДА (ИСПРАВЛЕНО) ===
+    # === ПРОВЕРКА ГОРОДА ===
     city = get_user_city(chat_id)
     if not city:
-        # Если пользователь написал что-то похожее на город (не вопрос и не приветствие)
-        if not any(word in lower for word in ['привет', 'здравствуй', 'как дела', 'помоги', 'что', 'как', 'зачем', 'почему']) and len(text) < 30:
-            city = text.strip().capitalize()
+        city_match = re.search(r"(?:мой город|я в|я из|город)\s+([а-яА-ЯёЁ\-]+)", lower)
+        if city_match:
+            city = city_match.group(1).capitalize()
             update_user_city(chat_id, city)
-            reply = f"✅ Принято! Город {city} сохранён. Чем могу помочь?"
-            send_message(chat_id, reply)
-            return {"reply": reply}
+            send_message(chat_id, "✅ Принято! Чем могу помочь? Задавай любой вопрос?")
+            return {"reply": "✅ Принято! Чем могу помочь? Задавай любой вопрос?"}
         else:
-            send_message(chat_id, "🌍 Напиши свой город, чтобы я показывал актуальную информацию для твоего региона. Например: Белово")
+            send_message(chat_id, "🌍 Напиши свой город, чтобы я показывал точное время и искал информацию рядом с тобой. Например: Белово")
             return {"reply": "🌍 Напиши свой город."}
     
     # === ВРЕМЯ ===
@@ -1146,9 +1101,9 @@ async def process_message(request: Request, chat_id, text):
     date_str = current_time.strftime("%d.%m.%Y")
     day_str = current_time.strftime("%A")
     
-    # === ПРИВЕТСТВИЕ (ТОЛЬКО ПЕРВОЕ СООБЩЕНИЕ - ИСПРАВЛЕНО) ===
+    # === ПРИВЕТСТВИЕ ===
     msg_count = get_message_count(chat_id)
-    if msg_count <= 1:
+    if msg_count <= 2:
         welcome = f"👋Привет! Я здесь и готов тебе помочь! Сейчас {time_str} {date_str}.\nПросто напиши, что нужно👇😎"
         send_message(chat_id, welcome)
         save_message(chat_id, "assistant", welcome)
