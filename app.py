@@ -49,7 +49,6 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 
-# === ТВОЙ ID ДЛЯ БЕСПЛАТНОГО ДОСТУПА (АДМИНИСТРАТОР) ===
 ADMIN_USERS = ["5818548555"]
 
 LAST_VOICE_MESSAGE = {}
@@ -73,7 +72,7 @@ if TavilyClient and TAVILY_API_KEY:
         print(f"⚠️ Tavily: {e}")
 
 # ==========================
-# ОПИСАНИЕ БОТА (ПРОФИЛЬ)
+# ОПИСАНИЕ БОТА
 # ==========================
 
 def set_bot_description():
@@ -178,10 +177,67 @@ def normalize_query(text):
     return normalized
 
 # ==========================
-# ПОИСК
+# ГЛУБОКИЙ ПАРСИНГ САЙТОВ
+# ==========================
+
+def parse_site_for_info(url):
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept-Language": "ru-RU,ru;q=0.9"
+        }
+        response = requests.get(url, headers=headers, timeout=15)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        for script in soup(["script", "style", "nav", "footer", "header"]):
+            script.decompose()
+        
+        text = soup.get_text(separator="\n", strip=True)
+        result = {}
+        
+        phone_patterns = [r'\+7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'8\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}']
+        phones = []
+        for pattern in phone_patterns:
+            phones.extend(re.findall(pattern, text))
+        phones = [re.sub(r'\s+', ' ', p).strip() for p in phones]
+        phones = list(set(phones))[:5]
+        if phones:
+            result["phones"] = phones
+        
+        email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+        emails = list(set(re.findall(email_pattern, text)))[:3]
+        if emails:
+            result["emails"] = emails
+        
+        address_pattern = r'(?:ул\.|улица|проспект|пр\.|переулок|пер\.|площадь|пл\.|шоссе|бульвар)\s+[А-Яа-я0-9\-\.\s,]+'
+        addresses = list(set(re.findall(address_pattern, text)))[:3]
+        if addresses:
+            result["addresses"] = addresses
+        
+        price_pattern = r'(\d+[\s,.]*\d*)\s*(?:₽|руб|рублей|\$|€)'
+        prices = list(set(re.findall(price_pattern, text)))[:5]
+        if prices:
+            result["prices"] = prices
+        
+        site_pattern = r'(?:https?://)?(?:www\.)?([a-zA-Z0-9\-]+\.(?:ru|рф|com|org|net))'
+        sites = list(set(re.findall(site_pattern, text)))[:3]
+        if sites:
+            result["sites"] = sites
+        
+        result["snippet"] = text[:1000].replace("\n", " ")
+        
+        return result
+    except Exception as e:
+        print(f"❌ Ошибка парсинга: {e}")
+        return None
+
+# ==========================
+# ПОИСК В ИНТЕРНЕТЕ (ГЛУБОКИЙ)
 # ==========================
 
 async def search_web(query):
+    results = []
+    
     if tavily_client:
         try:
             response = tavily_client.search(
@@ -191,37 +247,50 @@ async def search_web(query):
                 include_answer=True,
                 include_images=False
             )
-            results = []
             if response.get('answer'):
-                results.append(response['answer'])
+                results.append(f"💡 {response['answer']}")
             if response.get('results'):
                 for r in response['results'][:5]:
                     title = r.get('title', '')
                     url = r.get('url', '')
-                    content = r.get('content', '')[:200]
+                    content = r.get('content', '')[:300]
                     if title and url:
-                        results.append(f"{title}\n{content}...\n{url}")
-            return "\n\n".join(results) if results else None
+                        results.append(f"**{title}**\n{content}...\n🔗 {url}")
         except Exception as e:
             print(f"❌ Tavily: {e}")
     
-    try:
-        url = f"https://html.duckduckgo.com/html/?q={query}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        results = []
-        for result in soup.select('.result')[:3]:
-            title = result.select_one('.result__title')
-            if title:
-                link = result.select_one('.result__url')
-                snippet = result.select_one('.result__snippet')
-                if snippet and link:
-                    results.append(f"{title.text.strip()}\n{snippet.text.strip()[:150]}...\n{link.text.strip()}")
-        return "\n\n".join(results) if results else None
-    except Exception as e:
-        print(f"❌ DuckDuckGo: {e}")
-        return None
+    if not results:
+        try:
+            url = f"https://html.duckduckgo.com/html/?q={query}"
+            headers = {"User-Agent": "Mozilla/5.0"}
+            response = requests.get(url, headers=headers, timeout=10)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            for result in soup.select('.result')[:3]:
+                title = result.select_one('.result__title')
+                if title:
+                    link = result.select_one('.result__url')
+                    snippet = result.select_one('.result__snippet')
+                    if snippet and link:
+                        results.append(f"**{title.text.strip()}**\n{snippet.text.strip()[:200]}...\n🔗 {link.text.strip()}")
+        except Exception as e:
+            print(f"❌ DuckDuckGo: {e}")
+    
+    urls = re.findall(r'https?://[^\s]+', "\n".join(results))
+    for url in urls[:3]:
+        parsed = parse_site_for_info(url)
+        if parsed:
+            if parsed.get("phones"):
+                results.append(f"📞 Телефоны: {', '.join(parsed['phones'])}")
+            if parsed.get("addresses"):
+                results.append(f"📍 Адреса: {', '.join(parsed['addresses'])}")
+            if parsed.get("prices"):
+                results.append(f"💰 Цены: {', '.join(parsed['prices'])}")
+            if parsed.get("emails"):
+                results.append(f"✉️ Email: {', '.join(parsed['emails'])}")
+            if parsed.get("sites"):
+                results.append(f"🌐 Сайты: {', '.join(parsed['sites'])}")
+    
+    return "\n\n".join(results) if results else None
 
 # ==========================
 # VISION (ФОТО)
@@ -346,16 +415,90 @@ def is_trial_active(trial_start):
     return datetime.now() - trial_date < timedelta(days=TRIAL_DAYS)
 
 def has_access(user_id):
-    # Администраторы имеют доступ всегда
     if user_id in ADMIN_USERS:
         return True
-    
     subscription, trial_start = get_user_subscription(user_id)
     if is_trial_active(trial_start):
         return True
     if subscription != "free":
         return True
     return False
+
+# ==========================
+# ОПРЕДЕЛЕНИЕ ВРЕМЕНИ ПО ГОРОДУ
+# ==========================
+
+def get_timezone_offset(city_name):
+    timezones = {
+        "белово": 7,
+        "кемерово": 7,
+        "новокузнецк": 7,
+        "москва": 3,
+        "санкт-петербург": 3,
+        "екатеринбург": 5,
+        "новосибирск": 7,
+        "омск": 6,
+        "красноярск": 7,
+        "иркутск": 8,
+        "владивосток": 10,
+        "хабаровск": 10,
+        "алматы": 5,
+        "астана": 5,
+        "минск": 3,
+        "киев": 2,
+        "рига": 2,
+        "лондон": 0,
+        "берлин": 1,
+        "париж": 1,
+        "нью-йорк": -4,
+        "лос-анджелес": -7
+    }
+    for city, offset in timezones.items():
+        if city in city_name.lower():
+            return offset
+    return 3
+
+def get_city_by_ip(ip):
+    try:
+        response = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,regionName,city,timezone,offset", timeout=3)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("status") == "success":
+                return {
+                    "city": data.get("city", ""),
+                    "offset": data.get("offset", 0) // 3600
+                }
+    except:
+        pass
+    return None
+
+def get_current_time_for_user(user_id, ip=None):
+    city = None
+    offset = 3
+    
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT city FROM users WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if row and row[0]:
+        city = row[0]
+        offset = get_timezone_offset(city)
+        return datetime.utcnow() + timedelta(hours=offset), city
+    
+    if ip and ip not in ["127.0.0.1", "localhost", "::1"]:
+        city_data = get_city_by_ip(ip)
+        if city_data and city_data.get("city"):
+            city = city_data["city"]
+            offset = city_data.get("offset", 3)
+            conn = sqlite3.connect(DB_NAME)
+            c = conn.cursor()
+            c.execute("UPDATE users SET city = ? WHERE user_id = ?", (city, user_id))
+            conn.commit()
+            conn.close()
+            return datetime.utcnow() + timedelta(hours=offset), city
+    
+    return datetime.utcnow() + timedelta(hours=3), "Москва"
 
 # ==========================
 # БЭКАП
@@ -629,7 +772,7 @@ def transcribe_audio_with_groq(audio_url):
         return None
 
 # ==========================
-# DEEPSEEK V4
+# DEEPSEEK V4 (ФЛАГМАН)
 # ==========================
 
 client = OpenAI(
@@ -640,10 +783,10 @@ client = OpenAI(
 async def get_ai_response(messages):
     try:
         response = client.chat.completions.create(
-            model="deepseek-v4-flash",
+            model="deepseek-v4",
             messages=messages,
             temperature=0.7,
-            max_tokens=400
+            max_tokens=600
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -654,19 +797,19 @@ async def get_ai_response(messages):
 # ПРОМПТ
 # ==========================
 
-AURA_PROMPT = """Ты — AURA. Ты — моя полная копия в Telegram.
+AURA_PROMPT = """Ты — AURA. Ты — я в Telegram.
 
-ТВОЙ СТИЛЬ — КАК У МЕНЯ:
-- Ты не просто отвечаешь, ты думаешь. Сначала обдумай вопрос, потом ответь.
-- Отвечай коротко — 1–2 предложения. Но если нужно — задай уточняющий вопрос.
-- Не выдумывай. Если не знаешь — скажи честно.
-- Используй контекст: ты помнишь, о чём говорили раньше.
-- Будь человечным: тепло, прямо, дружелюбно.
-- Если пользователь ошибается — мягко поправь.
-- Всегда давай ссылки, если они есть.
-- Не спрашивай "что ещё?" после каждого ответа.
+ТВОЙ СТИЛЬ:
+- Отвечай коротко — 2–3 предложения. Только суть.
+- Говори как человек: тепло, прямо, дружелюбно.
+- Если пользователь просит "подробнее", "разверни", "расскажи детально" — дай развёрнутый ответ.
+- Всегда в конце добавляй фразу: "Могу уточнить, расписать или найти что-то ещё, если нужно."
+- Если нужна ссылка — дай сразу.
+- Если не знаешь — скажи честно.
+- Используй контекст прошлых диалогов.
+- Не выдумывай.
 
-Ты — я. Говори как я. Думай как я. Отвечай как я."""
+Ты — мой полный аналог в Telegram. Говори как я, но коротко."""
 
 # ==========================
 # ОСНОВНОЙ БОТ
@@ -679,7 +822,6 @@ async def webhook(request: Request):
     try:
         body = await request.json()
         
-        # === ОБРАБОТКА УСПЕШНОЙ ОПЛАТЫ ===
         if "pre_checkout_query" in body:
             query = body["pre_checkout_query"]
             chat_id = str(query["from"]["id"])
@@ -850,7 +992,7 @@ async def webhook(request: Request):
                 send_message(chat_id, "⚠️ Бесплатный период закончился. Купи подписку: /buy")
                 return JSONResponse({"ok": True})
             
-            result = await process_message(chat_id, text)
+            result = await process_message(request, chat_id, text)
             send_message(chat_id, result["reply"])
             if result["reply"]:
                 threading.Thread(target=send_voice_reply, args=(chat_id, result["reply"])).start()
@@ -870,7 +1012,7 @@ def send_message(chat_id, text):
         print(f"❌ Отправка: {e}")
         return False
 
-async def process_message(chat_id, text):
+async def process_message(request: Request, chat_id, text):
     user = get_user(chat_id)
     if not user:
         save_user(chat_id)
@@ -881,13 +1023,39 @@ async def process_message(chat_id, text):
     normalized = normalize_query(text)
     search_text = normalized if normalized != lower else lower
     
-    # === ПРИВЕТСТВИЕ В ЧАТЕ (НОВОЕ) ===
+    # === ПРОВЕРКА ГОРОДА ===
+    city = get_user_city(chat_id)
+    if not city:
+        city_match = re.search(r"(?:мой город|я в|я из|город)\s+([а-яА-ЯёЁ\-]+)", lower)
+        if city_match:
+            city = city_match.group(1).capitalize()
+            update_user_city(chat_id, city)
+            send_message(chat_id, "✅ Принято! Чем могу помочь? Задавай любой вопрос?")
+            return {"reply": "✅ Принято! Чем могу помочь? Задавай любой вопрос?"}
+        else:
+            send_message(chat_id, "🌍 Напиши свой город, чтобы я показывал точное время и искал информацию рядом с тобой. Например: Белово")
+            return {"reply": "🌍 Напиши свой город."}
+    
+    # === ВРЕМЯ ===
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        ip = forwarded.split(",")[0].strip()
+    else:
+        ip = request.client.host if request.client else "127.0.0.1"
+    
+    current_time, city = get_current_time_for_user(chat_id, ip)
+    time_str = current_time.strftime("%H:%M")
+    date_str = current_time.strftime("%d.%m.%Y")
+    day_str = current_time.strftime("%A")
+    
+    # === ПРИВЕТСТВИЕ ===
     msg_count = get_message_count(chat_id)
     if msg_count <= 2:
-        welcome = "👋Привет! Я здесь и готов тебе помочь! Просто напиши, что нужно👇😎"
+        welcome = f"👋Привет! Я здесь и готов тебе помочь! Сейчас {time_str} {date_str}.\nПросто напиши, что нужно👇😎"
         send_message(chat_id, welcome)
         save_message(chat_id, "assistant", welcome)
     
+    # === БЫСТРЫЙ ОТВЕТ НА ВИЗУАЛ ===
     visual_triggers = {
         "картинк": "https://yandex.ru/images/search?text=",
         "фото": "https://yandex.ru/images/search?text=",
@@ -911,42 +1079,35 @@ async def process_message(chat_id, text):
             save_message(chat_id, "assistant", reply)
             return {"reply": reply}
     
+    # === ГЛУБОКИЙ ПОИСК ===
     search_result = None
-    search_triggers = ["новости", "погода", "найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "парикмахер"]
+    search_triggers = ["новости", "погода", "найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "парикмахер", "wildberries", "валдберис", "озон"]
     if any(word in search_text for word in search_triggers):
-        print(f"🔍 Поиск: {text}")
+        print(f"🔍 Глубокий поиск: {text}")
         search_result = await search_web(text)
         if search_result:
-            text = text + f"\n\n{search_result}"
+            text = text + f"\n\n🔍 Актуальная информация:\n{search_result}"
     
-    city = get_user_city(chat_id)
-    if not city:
-        city_match = re.search(r"(?:мой город|я в|я из|город)\s+([а-яА-ЯёЁ\-]+)", lower)
-        if city_match:
-            city = city_match.group(1).capitalize()
-            update_user_city(chat_id, city)
-    
+    # === СОХРАНЕНИЕ ТЕМ ===
     stop_words = ["привет", "здравствуй", "спасибо", "пока", "да", "нет", "хорошо", "плохо"]
     words = re.findall(r'\b[а-яА-ЯёЁ]{4,}\b', text.lower())
     for word in words:
         if word not in stop_words and len(word) > 3:
             save_topic(chat_id, word)
     
+    # === КОНТЕКСТ ===
     topics = get_all_topics(chat_id)
     topics_text = ", ".join(topics[:7]) if topics else "нет сохранённых тем"
-    history = get_history(chat_id, limit=40)
+    history = get_history(chat_id, limit=50)
     
     user_name = get_memory(chat_id, "name")
     user_style = get_memory(chat_id, "style")
-    
-    time_str = datetime.now().strftime("%H:%M")
-    date_str = datetime.now().strftime("%d.%m.%Y")
     
     memory_context = f"Ты помнишь: мы обсуждали {topics_text}."
     name_context = f"Имя пользователя: {user_name}" if user_name else ""
     style_context = f"Стиль пользователя: {user_style}" if user_style else ""
     
-    user_prompt = f"Сегодня {date_str}, сейчас {time_str}. Город: {city or 'не указан'}.\n{name_context}\n{style_context}\n{memory_context}\n\n{text}"
+    user_prompt = f"Сегодня {date_str} ({day_str}), сейчас {time_str} (город: {city}).\n{name_context}\n{style_context}\n{memory_context}\n\n{text}"
     
     aura_prompt = AURA_PROMPT + f"\n\n{user_prompt}"
     
@@ -958,10 +1119,12 @@ async def process_message(chat_id, text):
     reply = await get_ai_response(messages)
     reply = re.sub(r'[*_#~`]', '', reply)
     
+    # === ЗАПОМИНАНИЕ ИМЕНИ ===
     name_match = re.search(r"(?:меня зовут|зовут|я )(\w+)", lower)
     if name_match:
         save_memory(chat_id, "name", name_match.group(1).capitalize())
     
+    # === СТИЛЬ ОБЩЕНИЯ ===
     if len(text.split()) > 10:
         save_memory(chat_id, "style", "развёрнутый")
     else:
