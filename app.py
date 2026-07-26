@@ -49,6 +49,9 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 
+# === ТВОЙ ID ДЛЯ БЕСПЛАТНОГО ДОСТУПА (АДМИНИСТРАТОР) ===
+ADMIN_USERS = ["5818548555"]  # ← ТВОЙ ID УЖЕ ВСТАВЛЕН!
+
 LAST_VOICE_MESSAGE = {}
 
 print("🔍 Проверка ключей...")
@@ -322,10 +325,9 @@ reminder_thread.start()
 # ==========================
 
 TARIFFS = {
-    "free": {"name": "Бесплатный", "price": 0, "access": False},
-    "собеседник": {"name": "Собеседник", "price": 50, "access": True},
-    "партнёр": {"name": "Партнёр", "price": 120, "access": True},
-    "агент_жизни": {"name": "Агент жизни", "price": 250, "access": True}
+    "собеседник": {"name": "Собеседник", "price": 50, "stars": 50},
+    "партнёр": {"name": "Партнёр", "price": 120, "stars": 120},
+    "агент_жизни": {"name": "Агент жизни", "price": 250, "stars": 250}
 }
 
 TRIAL_DAYS = 7
@@ -345,6 +347,10 @@ def is_trial_active(trial_start):
     return datetime.now() - trial_date < timedelta(days=TRIAL_DAYS)
 
 def has_access(user_id):
+    # Администраторы имеют доступ всегда
+    if user_id in ADMIN_USERS:
+        return True
+    
     subscription, trial_start = get_user_subscription(user_id)
     if is_trial_active(trial_start):
         return True
@@ -470,6 +476,14 @@ def init_db():
         value TEXT,
         created_at TEXT
     )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS payments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
+        subscription TEXT,
+        stars INTEGER,
+        status TEXT DEFAULT 'pending',
+        created_at TEXT
+    )""")
     conn.commit()
     conn.close()
 
@@ -582,6 +596,14 @@ def get_memory(user_id, key):
     conn.close()
     return row[0] if row else None
 
+def save_payment(user_id, subscription, stars):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("INSERT INTO payments (user_id, subscription, stars, created_at) VALUES (?, ?, ?, ?)",
+              (user_id, subscription, stars, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
 # ==========================
 # ГОЛОС (ВХОД)
 # ==========================
@@ -630,7 +652,7 @@ async def get_ai_response(messages):
         return "Извини, сейчас проблемы с подключением. Попробуй позже."
 
 # ==========================
-# НОВЫЙ ПРОМПТ — АБСОЛЮТНАЯ КОПИЯ МЕНЯ
+# ПРОМПТ
 # ==========================
 
 AURA_PROMPT = """Ты — AURA. Ты — моя полная копия в Telegram.
@@ -645,16 +667,7 @@ AURA_PROMPT = """Ты — AURA. Ты — моя полная копия в Teleg
 - Всегда давай ссылки, если они есть.
 - Не спрашивай "что ещё?" после каждого ответа.
 
-Ты — я. Говори как я. Думай как я. Отвечай как я.
-
-ВАЖНО:
-- Если вопрос нечёткий — задай уточняющий вопрос.
-- Если вопрос сложный — сначала скажи "Дай подумать", потом ответь.
-- Если знаешь ответ — дай сразу.
-- Если не знаешь — скажи честно.
-- Если пользователь грубый — не отвечай грубо.
-
-Ты — живой, умный, человечный помощник. Как я."""
+Ты — я. Говори как я. Думай как я. Отвечай как я."""
 
 # ==========================
 # ОСНОВНОЙ БОТ
@@ -666,6 +679,23 @@ app = FastAPI()
 async def webhook(request: Request):
     try:
         body = await request.json()
+        
+        # === ОБРАБОТКА УСПЕШНОЙ ОПЛАТЫ ===
+        if "pre_checkout_query" in body:
+            query = body["pre_checkout_query"]
+            chat_id = str(query["from"]["id"])
+            payload = query["invoice_payload"]
+            
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerPreCheckoutQuery"
+            data = {"pre_checkout_query_id": query["id"], "ok": True}
+            requests.post(url, json=data)
+            
+            subscription = payload.replace("subscription_", "")
+            update_user_subscription(chat_id, subscription)
+            save_payment(chat_id, subscription, TARIFFS[subscription]["stars"])
+            send_message(chat_id, f"✅ Оплата прошла успешно! Подписка **{TARIFFS[subscription]['name']}** активирована.")
+            return JSONResponse({"ok": True})
+        
         if "message" not in body:
             return JSONResponse({"ok": False, "error": "No message"})
         
@@ -678,8 +708,18 @@ async def webhook(request: Request):
                 subscription = data.replace("buy_", "")
                 tariff = TARIFFS.get(subscription)
                 if tariff:
-                    update_user_subscription(chat_id, subscription)
-                    send_message(chat_id, f"✅ Подписка **{tariff['name']}** активирована! Теперь у тебя полный доступ.")
+                    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendInvoice"
+                    invoice_data = {
+                        "chat_id": chat_id,
+                        "title": f"Подписка AURA — {tariff['name']}",
+                        "description": "Полный доступ ко всем функциям бота на 30 дней",
+                        "payload": f"subscription_{subscription}",
+                        "provider_token": "",
+                        "currency": "XTR",
+                        "prices": [{"label": "Подписка на 30 дней", "amount": tariff["stars"]}],
+                        "start_parameter": "aura_sub"
+                    }
+                    requests.post(url, json=invoice_data)
                 return JSONResponse({"ok": True})
             
             elif data == "cancel":
@@ -762,7 +802,9 @@ async def webhook(request: Request):
                     save_user(chat_id)
                 
                 subscription, trial_start = get_user_subscription(chat_id)
-                if is_trial_active(trial_start):
+                if chat_id in ADMIN_USERS:
+                    welcome = "👋 Привет! Ты администратор — доступ всегда открыт."
+                elif is_trial_active(trial_start):
                     days_left = TRIAL_DAYS - (datetime.now() - datetime.fromisoformat(trial_start)).days
                     welcome = f"👋 Привет! У тебя {days_left} дней бесплатного доступа. Все функции доступны!"
                 elif has_access(chat_id):
@@ -782,7 +824,7 @@ async def webhook(request: Request):
                 url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
                 data = {
                     "chat_id": chat_id,
-                    "text": "💳 **Выбери подписку:**\n\n⭐ Собеседник — 50 Stars\n⭐ Партнёр — 120 Stars\n⭐ Агент жизни — 250 Stars\n\nПосле покупки — полный доступ без ограничений!",
+                    "text": "💳 **Выбери подписку:**\n\n⭐ Собеседник — 50 Stars\n⭐ Партнёр — 120 Stars\n⭐ Агент жизни — 250 Stars\n\nПосле оплаты — полный доступ!",
                     "parse_mode": "Markdown",
                     "reply_markup": json.dumps({"inline_keyboard": keyboard})
                 }
@@ -840,14 +882,12 @@ async def process_message(chat_id, text):
     normalized = normalize_query(text)
     search_text = normalized if normalized != lower else lower
     
-    # === ПРИВЕТСТВИЕ ===
     msg_count = get_message_count(chat_id)
     if msg_count <= 2:
         welcome = "👋 Привет! Я здесь и готов помочь. Просто напиши, что нужно."
         send_message(chat_id, welcome)
         save_message(chat_id, "assistant", welcome)
     
-    # === КАРТИНКИ ===
     visual_triggers = {
         "картинк": "https://yandex.ru/images/search?text=",
         "фото": "https://yandex.ru/images/search?text=",
@@ -871,7 +911,6 @@ async def process_message(chat_id, text):
             save_message(chat_id, "assistant", reply)
             return {"reply": reply}
     
-    # === ПОИСК ===
     search_result = None
     search_triggers = ["новости", "погода", "найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "парикмахер"]
     if any(word in search_text for word in search_triggers):
@@ -880,7 +919,6 @@ async def process_message(chat_id, text):
         if search_result:
             text = text + f"\n\n{search_result}"
     
-    # === ГОРОД ===
     city = get_user_city(chat_id)
     if not city:
         city_match = re.search(r"(?:мой город|я в|я из|город)\s+([а-яА-ЯёЁ\-]+)", lower)
@@ -888,23 +926,19 @@ async def process_message(chat_id, text):
             city = city_match.group(1).capitalize()
             update_user_city(chat_id, city)
     
-    # === ТЕМЫ ===
     stop_words = ["привет", "здравствуй", "спасибо", "пока", "да", "нет", "хорошо", "плохо"]
     words = re.findall(r'\b[а-яА-ЯёЁ]{4,}\b', text.lower())
     for word in words:
         if word not in stop_words and len(word) > 3:
             save_topic(chat_id, word)
     
-    # === КОНТЕКСТ (ДОЛГАЯ ПАМЯТЬ) ===
     topics = get_all_topics(chat_id)
     topics_text = ", ".join(topics[:7]) if topics else "нет сохранённых тем"
     history = get_history(chat_id, limit=40)
     
-    # Получаем сохранённые предпочтения
     user_name = get_memory(chat_id, "name")
     user_style = get_memory(chat_id, "style")
     
-    # Формируем контекст
     time_str = datetime.now().strftime("%H:%M")
     date_str = datetime.now().strftime("%d.%m.%Y")
     
@@ -924,12 +958,10 @@ async def process_message(chat_id, text):
     reply = await get_ai_response(messages)
     reply = re.sub(r'[*_#~`]', '', reply)
     
-    # Сохраняем имя пользователя, если он представился
     name_match = re.search(r"(?:меня зовут|зовут|я )(\w+)", lower)
     if name_match:
         save_memory(chat_id, "name", name_match.group(1).capitalize())
     
-    # Сохраняем стиль общения (коротко или развёрнуто)
     if len(text.split()) > 10:
         save_memory(chat_id, "style", "развёрнутый")
     else:
