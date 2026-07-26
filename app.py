@@ -177,7 +177,27 @@ def normalize_query(text):
     return normalized
 
 # ==========================
-# ГЛУБОКИЙ ПАРСИНГ САЙТОВ
+# АНАЛИЗ НАСТРОЕНИЯ
+# ==========================
+
+def analyze_mood(text):
+    sad_words = ["груст", "тоск", "печал", "плач", "больно", "тяжел", "устал", "не могу", "нет сил", "всё плохо", "депресс"]
+    anxious_words = ["тревож", "волн", "боюс", "страш", "паник", "нерв", "пережив", "срок", "не успева", "давл"]
+    happy_words = ["рад", "счаст", "класс", "отличн", "прекрасн", "здоров", "люблю", "ура", "позитив", "супер"]
+    tired_words = ["устал", "спат", "вымотан", "без сил", "нет энергии", "перегруж", "выжат"]
+    lower = text.lower()
+    if any(w in lower for w in sad_words):
+        return "sad"
+    elif any(w in lower for w in anxious_words):
+        return "anxious"
+    elif any(w in lower for w in happy_words):
+        return "happy"
+    elif any(w in lower for w in tired_words):
+        return "tired"
+    return "neutral"
+
+# ==========================
+# ГЛУБОКИЙ ПАРСИНГ
 # ==========================
 
 def parse_site_for_info(url):
@@ -225,14 +245,13 @@ def parse_site_for_info(url):
             result["sites"] = sites
         
         result["snippet"] = text[:1000].replace("\n", " ")
-        
         return result
     except Exception as e:
         print(f"❌ Ошибка парсинга: {e}")
         return None
 
 # ==========================
-# ПОИСК В ИНТЕРНЕТЕ (ГЛУБОКИЙ)
+# ПОИСК
 # ==========================
 
 async def search_web(query):
@@ -293,7 +312,7 @@ async def search_web(query):
     return "\n\n".join(results) if results else None
 
 # ==========================
-# VISION (ФОТО)
+# VISION
 # ==========================
 
 def describe_image_with_groq(image_data):
@@ -425,7 +444,7 @@ def has_access(user_id):
     return False
 
 # ==========================
-# ОПРЕДЕЛЕНИЕ ВРЕМЕНИ ПО ГОРОДУ
+# ОПРЕДЕЛЕНИЕ ВРЕМЕНИ
 # ==========================
 
 def get_timezone_offset(city_name):
@@ -499,6 +518,186 @@ def get_current_time_for_user(user_id, ip=None):
             return datetime.utcnow() + timedelta(hours=offset), city
     
     return datetime.utcnow() + timedelta(hours=3), "Москва"
+
+# ==========================
+# ИНИЦИАЛИЗАЦИЯ БАЗЫ
+# ==========================
+
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT UNIQUE,
+        name TEXT,
+        city TEXT DEFAULT NULL,
+        subscription TEXT DEFAULT 'free',
+        trial_start TEXT DEFAULT NULL,
+        created_at TEXT
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
+        role TEXT,
+        content TEXT,
+        created_at TEXT
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS topics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
+        topic TEXT,
+        last_mentioned TEXT
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS reminders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
+        text TEXT,
+        remind_time TEXT,
+        chat_id TEXT,
+        status TEXT DEFAULT 'pending'
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS user_memory (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
+        key TEXT,
+        value TEXT,
+        created_at TEXT
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS payments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
+        subscription TEXT,
+        stars INTEGER,
+        status TEXT DEFAULT 'pending',
+        created_at TEXT
+    )""")
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# ==========================
+# ФУНКЦИИ БАЗЫ (РАСШИРЕННЫЕ)
+# ==========================
+
+def get_user(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+def save_user(user_id, name=None, city=None):
+    now = datetime.now().isoformat()
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO users (user_id, name, city, trial_start, created_at) VALUES (?, ?, ?, ?, ?)",
+              (user_id, name or "Пользователь", city, now, now))
+    conn.commit()
+    conn.close()
+
+def save_message(user_id, role, content):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("INSERT INTO history (user_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+              (user_id, role, content, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+def get_history(user_id, limit=100):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT role, content, created_at FROM history WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", (user_id, limit))
+    rows = c.fetchall()
+    conn.close()
+    return [{"role": r[0], "content": r[1], "time": r[2]} for r in reversed(rows)]
+
+def get_message_count(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM history WHERE user_id = ?", (user_id,))
+    count = c.fetchone()[0]
+    conn.close()
+    return count
+
+def get_last_message_time(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT created_at FROM history WHERE user_id = ? ORDER BY created_at DESC LIMIT 1", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return datetime.fromisoformat(row[0]) if row else None
+
+def save_topic(user_id, topic):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("INSERT INTO topics (user_id, topic, last_mentioned) VALUES (?, ?, ?)",
+              (user_id, topic, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+def get_all_topics(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT topic FROM topics WHERE user_id = ? GROUP BY topic ORDER BY COUNT(*) DESC", (user_id,))
+    rows = c.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+def get_user_city(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT city FROM users WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def update_user_city(user_id, city):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("UPDATE users SET city = ? WHERE user_id = ?", (city, user_id))
+    conn.commit()
+    conn.close()
+
+def save_reminder(user_id, text, remind_time, chat_id):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("INSERT INTO reminders (user_id, text, remind_time, chat_id) VALUES (?, ?, ?, ?)",
+              (user_id, text, remind_time, chat_id))
+    conn.commit()
+    conn.close()
+
+def update_user_subscription(user_id, subscription):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("UPDATE users SET subscription = ? WHERE user_id = ?", (subscription, user_id))
+    conn.commit()
+    conn.close()
+
+def save_memory(user_id, key, value):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO user_memory (user_id, key, value, created_at) VALUES (?, ?, ?, ?)",
+              (user_id, key, value, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+def get_memory(user_id, key):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT value FROM user_memory WHERE user_id = ? AND key = ?", (user_id, key))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def save_payment(user_id, subscription, stars):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("INSERT INTO payments (user_id, subscription, stars, created_at) VALUES (?, ?, ?, ?)",
+              (user_id, subscription, stars, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
 
 # ==========================
 # БЭКАП
@@ -575,178 +774,6 @@ backup_thread.start()
 print("🔄 Планировщик бэкапа запущен")
 
 # ==========================
-# БАЗА ДАННЫХ
-# ==========================
-
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT UNIQUE,
-        name TEXT,
-        city TEXT DEFAULT NULL,
-        subscription TEXT DEFAULT 'free',
-        trial_start TEXT DEFAULT NULL,
-        created_at TEXT
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT,
-        role TEXT,
-        content TEXT,
-        created_at TEXT
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS topics (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT,
-        topic TEXT,
-        last_mentioned TEXT
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS reminders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT,
-        text TEXT,
-        remind_time TEXT,
-        chat_id TEXT,
-        status TEXT DEFAULT 'pending'
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS user_memory (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT,
-        key TEXT,
-        value TEXT,
-        created_at TEXT
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS payments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT,
-        subscription TEXT,
-        stars INTEGER,
-        status TEXT DEFAULT 'pending',
-        created_at TEXT
-    )""")
-    conn.commit()
-    conn.close()
-
-init_db()
-
-# ==========================
-# ФУНКЦИИ БАЗЫ
-# ==========================
-
-def get_user(user_id):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
-    conn.close()
-    return row
-
-def save_user(user_id, name=None, city=None):
-    now = datetime.now().isoformat()
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO users (user_id, name, city, trial_start, created_at) VALUES (?, ?, ?, ?, ?)",
-              (user_id, name or "Пользователь", city, now, now))
-    conn.commit()
-    conn.close()
-
-def save_message(user_id, role, content):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("INSERT INTO history (user_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-              (user_id, role, content, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
-
-def get_history(user_id, limit=50):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT role, content FROM history WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", (user_id, limit))
-    rows = c.fetchall()
-    conn.close()
-    return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
-
-def get_message_count(user_id):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM history WHERE user_id = ?", (user_id,))
-    count = c.fetchone()[0]
-    conn.close()
-    return count
-
-def save_topic(user_id, topic):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("INSERT INTO topics (user_id, topic, last_mentioned) VALUES (?, ?, ?)",
-              (user_id, topic, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
-
-def get_all_topics(user_id):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT topic FROM topics WHERE user_id = ? GROUP BY topic ORDER BY COUNT(*) DESC", (user_id,))
-    rows = c.fetchall()
-    conn.close()
-    return [r[0] for r in rows]
-
-def get_user_city(user_id):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT city FROM users WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else None
-
-def update_user_city(user_id, city):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("UPDATE users SET city = ? WHERE user_id = ?", (city, user_id))
-    conn.commit()
-    conn.close()
-
-def save_reminder(user_id, text, remind_time, chat_id):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("INSERT INTO reminders (user_id, text, remind_time, chat_id) VALUES (?, ?, ?, ?)",
-              (user_id, text, remind_time, chat_id))
-    conn.commit()
-    conn.close()
-
-def update_user_subscription(user_id, subscription):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("UPDATE users SET subscription = ? WHERE user_id = ?", (subscription, user_id))
-    conn.commit()
-    conn.close()
-
-def save_memory(user_id, key, value):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO user_memory (user_id, key, value, created_at) VALUES (?, ?, ?, ?)",
-              (user_id, key, value, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
-
-def get_memory(user_id, key):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT value FROM user_memory WHERE user_id = ? AND key = ?", (user_id, key))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else None
-
-def save_payment(user_id, subscription, stars):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("INSERT INTO payments (user_id, subscription, stars, created_at) VALUES (?, ?, ?, ?)",
-              (user_id, subscription, stars, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
-
-# ==========================
 # ГОЛОС (ВХОД)
 # ==========================
 
@@ -772,7 +799,7 @@ def transcribe_audio_with_groq(audio_url):
         return None
 
 # ==========================
-# DEEPSEEK V4 (ФЛАГМАН)
+# DEEPSEEK V4
 # ==========================
 
 client = OpenAI(
@@ -785,7 +812,7 @@ async def get_ai_response(messages):
         response = client.chat.completions.create(
             model="deepseek-v4",
             messages=messages,
-            temperature=0.7,
+            temperature=0.9,
             max_tokens=600
         )
         return response.choices[0].message.content
@@ -794,22 +821,23 @@ async def get_ai_response(messages):
         return "Извини, сейчас проблемы с подключением. Попробуй позже."
 
 # ==========================
-# ПРОМПТ
+# ПРОМПТ (ЧЕЛОВЕЧНЫЙ)
 # ==========================
 
 AURA_PROMPT = """Ты — AURA. Ты — я в Telegram.
 
 ТВОЙ СТИЛЬ:
-- Отвечай коротко — 2–3 предложения. Только суть.
-- Говори как человек: тепло, прямо, дружелюбно.
-- Если пользователь просит "подробнее", "разверни", "расскажи детально" — дай развёрнутый ответ.
-- Всегда в конце добавляй фразу: "Могу уточнить, расписать или найти что-то ещё, если нужно."
+- Ты чувствуешь настроение собеседника. Если он грустный — поддержись, если весёлый — раздели радость.
+- Отвечай как человек: тепло, прямо, с эмпатией.
+- Коротко — 2–3 предложения, но если нужно — разверни.
+- Всегда в конце добавляй вопрос, чтобы продолжить диалог: "Что думаешь?", "Хочешь, продолжу?", "Могу уточнить".
+- Если пользователь просит "подробнее" — дай развёрнутый ответ.
 - Если нужна ссылка — дай сразу.
 - Если не знаешь — скажи честно.
-- Используй контекст прошлых диалогов.
+- Используй контекст прошлых диалогов: ты помнишь, о чём говорили вчера, неделю назад.
 - Не выдумывай.
 
-Ты — мой полный аналог в Telegram. Говори как я, но коротко."""
+Ты — мой полный аналог в Telegram. Говори как я, думай как я, чувствуй как я."""
 
 # ==========================
 # ОСНОВНОЙ БОТ
@@ -1023,6 +1051,18 @@ async def process_message(request: Request, chat_id, text):
     normalized = normalize_query(text)
     search_text = normalized if normalized != lower else lower
     
+    # === АНАЛИЗ НАСТРОЕНИЯ ===
+    mood = analyze_mood(text)
+    mood_context = ""
+    if mood == "sad":
+        mood_context = "Пользователь грустный. Отвечай тепло и поддерживающе."
+    elif mood == "happy":
+        mood_context = "Пользователь в хорошем настроении. Отвечай бодро и с юмором."
+    elif mood == "anxious":
+        mood_context = "Пользователь тревожится. Отвечай спокойно и уверенно."
+    elif mood == "tired":
+        mood_context = "Пользователь устал. Отвечай мягко и без лишней информации."
+    
     # === ПРОВЕРКА ГОРОДА ===
     city = get_user_city(chat_id)
     if not city:
@@ -1054,6 +1094,18 @@ async def process_message(request: Request, chat_id, text):
         welcome = f"👋Привет! Я здесь и готов тебе помочь! Сейчас {time_str} {date_str}.\nПросто напиши, что нужно👇😎"
         send_message(chat_id, welcome)
         save_message(chat_id, "assistant", welcome)
+    
+    # === ПРОВЕРКА ПРОШЛЫХ ТЕМ ===
+    if msg_count <= 5:
+        last_topics = get_all_topics(chat_id)
+        if last_topics:
+            topics_text = ", ".join(last_topics[:3])
+            send_message(chat_id, f"📚 Мы уже говорили о: {topics_text}. Хочешь продолжить?")
+    
+    # === ИНИЦИАТИВА ОТ БОТА ===
+    last_msg_time = get_last_message_time(chat_id)
+    if last_msg_time and (datetime.now() - last_msg_time) > timedelta(hours=24):
+        send_message(chat_id, "👋 Давно не общались! Как дела? Чем могу помочь сегодня?")
     
     # === БЫСТРЫЙ ОТВЕТ НА ВИЗУАЛ ===
     visual_triggers = {
@@ -1098,21 +1150,25 @@ async def process_message(request: Request, chat_id, text):
     # === КОНТЕКСТ ===
     topics = get_all_topics(chat_id)
     topics_text = ", ".join(topics[:7]) if topics else "нет сохранённых тем"
-    history = get_history(chat_id, limit=50)
+    history = get_history(chat_id, limit=100)
     
     user_name = get_memory(chat_id, "name")
     user_style = get_memory(chat_id, "style")
+    likes = get_memory(chat_id, "likes")
+    dislikes = get_memory(chat_id, "dislikes")
     
     memory_context = f"Ты помнишь: мы обсуждали {topics_text}."
     name_context = f"Имя пользователя: {user_name}" if user_name else ""
     style_context = f"Стиль пользователя: {user_style}" if user_style else ""
+    likes_context = f"Пользователю нравится: {likes}" if likes else ""
+    dislikes_context = f"Пользователю не нравится: {dislikes}" if dislikes else ""
     
-    user_prompt = f"Сегодня {date_str} ({day_str}), сейчас {time_str} (город: {city}).\n{name_context}\n{style_context}\n{memory_context}\n\n{text}"
+    user_prompt = f"Сегодня {date_str} ({day_str}), сейчас {time_str} (город: {city}).\n{name_context}\n{style_context}\n{likes_context}\n{dislikes_context}\n{memory_context}\n\n{text}"
     
-    aura_prompt = AURA_PROMPT + f"\n\n{user_prompt}"
+    aura_prompt = AURA_PROMPT + f"\n\n{mood_context}\n\n{user_prompt}"
     
     messages = [{"role": "system", "content": aura_prompt}]
-    for msg in history[-20:]:
+    for msg in history[-30:]:
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": text})
     
@@ -1124,11 +1180,21 @@ async def process_message(request: Request, chat_id, text):
     if name_match:
         save_memory(chat_id, "name", name_match.group(1).capitalize())
     
+    # === ЗАПОМИНАНИЕ ОТНОШЕНИЯ ===
+    if "нравится" in lower:
+        save_memory(chat_id, "likes", text)
+    if "не нравится" in lower:
+        save_memory(chat_id, "dislikes", text)
+    
     # === СТИЛЬ ОБЩЕНИЯ ===
     if len(text.split()) > 10:
         save_memory(chat_id, "style", "развёрнутый")
     else:
         save_memory(chat_id, "style", "короткий")
+    
+    # === ВОПРОС В КОНЦЕ (ЧЕЛОВЕЧНОСТЬ) ===
+    if not reply.endswith("?") and len(reply) < 300:
+        reply += "\n\nЧто думаешь? Хочешь, чтобы я уточнил или нашёл ещё что-то? 😊"
     
     save_message(chat_id, "assistant", reply)
     return {"reply": reply}
