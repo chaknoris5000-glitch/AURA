@@ -50,7 +50,7 @@ EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 
 # === ТВОЙ ID ДЛЯ БЕСПЛАТНОГО ДОСТУПА (АДМИНИСТРАТОР) ===
-ADMIN_USERS = ["5818548555"]  # ← ТВОЙ ID УЖЕ ВСТАВЛЕН!
+ADMIN_USERS = ["5818548555"]
 
 LAST_VOICE_MESSAGE = {}
 
@@ -73,13 +73,12 @@ if TavilyClient and TAVILY_API_KEY:
         print(f"⚠️ Tavily: {e}")
 
 # ==========================
-# ОПИСАНИЕ БОТА
+# ОПИСАНИЕ БОТА (ПРОФИЛЬ)
 # ==========================
 
 def set_bot_description():
-    description = """Привет! Я — AURA, твой умный помощник.
-7 дней бесплатного доступа.
-После — подписка через /buy"""
+    description = """👋Привет! Я — AURA, твой умный помощник! 
+🔥Даю тебе - 7 дней бесплатного доступа!"""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setMyDescription"
         data = {"description": description}
@@ -816,15 +815,15 @@ async def webhook(request: Request):
             
             if text.startswith("/buy"):
                 keyboard = [
-                    [{"text": "⭐ Собеседник — 50 Stars", "callback_data": "buy_собеседник"}],
-                    [{"text": "⭐ Партнёр — 120 Stars", "callback_data": "buy_партнёр"}],
-                    [{"text": "⭐ Агент жизни — 250 Stars", "callback_data": "buy_агент_жизни"}],
+                    [{"text": "⭐ Собеседник — 50 Stars (~50 ₽)", "callback_data": "buy_собеседник"}],
+                    [{"text": "⭐ Партнёр — 120 Stars (~120 ₽)", "callback_data": "buy_партнёр"}],
+                    [{"text": "⭐ Агент жизни — 250 Stars (~250 ₽)", "callback_data": "buy_агент_жизни"}],
                     [{"text": "❌ Отмена", "callback_data": "cancel"}]
                 ]
                 url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
                 data = {
                     "chat_id": chat_id,
-                    "text": "💳 **Выбери подписку:**\n\n⭐ Собеседник — 50 Stars\n⭐ Партнёр — 120 Stars\n⭐ Агент жизни — 250 Stars\n\nПосле оплаты — полный доступ!",
+                    "text": "💳 **Выбери подписку:**\n\n⭐ Собеседник — 50 Stars (~50 ₽)\n⭐ Партнёр — 120 Stars (~120 ₽)\n⭐ Агент жизни — 250 Stars (~250 ₽)\n\nПосле оплаты — полный доступ!",
                     "parse_mode": "Markdown",
                     "reply_markup": json.dumps({"inline_keyboard": keyboard})
                 }
@@ -882,9 +881,10 @@ async def process_message(chat_id, text):
     normalized = normalize_query(text)
     search_text = normalized if normalized != lower else lower
     
+    # === ПРИВЕТСТВИЕ В ЧАТЕ (НОВОЕ) ===
     msg_count = get_message_count(chat_id)
     if msg_count <= 2:
-        welcome = "👋 Привет! Я здесь и готов помочь. Просто напиши, что нужно."
+        welcome = "👋Привет! Я здесь и готов тебе помочь! Просто напиши, что нужно👇😎"
         send_message(chat_id, welcome)
         save_message(chat_id, "assistant", welcome)
     
