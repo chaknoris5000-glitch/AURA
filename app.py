@@ -49,7 +49,6 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 
-# === ТВОЙ ID АДМИНИСТРАТОРА ===
 ADMIN_USERS = ["5818548555"]
 
 LAST_VOICE_MESSAGE = {}
@@ -72,10 +71,6 @@ if TavilyClient and TAVILY_API_KEY:
     except Exception as e:
         print(f"⚠️ Tavily: {e}")
 
-# ==========================
-# ОПИСАНИЕ БОТА
-# ==========================
-
 def set_bot_description():
     description = """👋Привет! Я — AURA, твой умный помощник! 
 🔥Даю тебе - 7 дней бесплатного доступа!"""
@@ -87,10 +82,6 @@ def set_bot_description():
         pass
 
 set_bot_description()
-
-# ==========================
-# ГОЛОС
-# ==========================
 
 def google_tts(text):
     try:
@@ -130,10 +121,6 @@ def send_voice_reply(chat_id, text):
         print(f"❌ Отправка голоса: {e}")
         return False
 
-# ==========================
-# СТАТУС "ПЕЧАТАЕТ..."
-# ==========================
-
 def send_typing(chat_id):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction"
@@ -141,10 +128,6 @@ def send_typing(chat_id):
         requests.post(url, json=data, timeout=3)
     except:
         pass
-
-# ==========================
-# НОРМАЛИЗАЦИЯ
-# ==========================
 
 def normalize_query(text):
     corrections = {
@@ -177,10 +160,6 @@ def normalize_query(text):
         normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
     return normalized
 
-# ==========================
-# АНАЛИЗ НАСТРОЕНИЯ
-# ==========================
-
 def analyze_mood(text):
     sad_words = ["груст", "тоск", "печал", "плач", "больно", "тяжел", "устал", "не могу", "нет сил", "всё плохо", "депресс"]
     anxious_words = ["тревож", "волн", "боюс", "страш", "паник", "нерв", "пережив", "срок", "не успева", "давл"]
@@ -196,10 +175,6 @@ def analyze_mood(text):
     elif any(w in lower for w in tired_words):
         return "tired"
     return "neutral"
-
-# ==========================
-# ПАРСИНГ САЙТОВ
-# ==========================
 
 def parse_site_for_info(url):
     try:
@@ -258,10 +233,6 @@ def parse_site_for_info(url):
     except Exception as e:
         print(f"❌ Ошибка парсинга: {e}")
         return None
-
-# ==========================
-# ПОИСК
-# ==========================
 
 async def search_web(query):
     results = []
@@ -324,10 +295,6 @@ async def search_web(query):
     
     return "\n\n".join(results) if results else None
 
-# ==========================
-# VISION
-# ==========================
-
 def describe_image_with_groq(image_data):
     try:
         import groq
@@ -364,10 +331,6 @@ def describe_image_with_groq(image_data):
         print(f"❌ Vision: {e}")
         return None
 
-# ==========================
-# ЧТЕНИЕ ДОКУМЕНТОВ
-# ==========================
-
 def read_file(file_data, file_name):
     try:
         if file_name.endswith('.txt'):
@@ -396,10 +359,6 @@ def read_file(file_data, file_name):
     except Exception as e:
         return f"⚠️ Ошибка: {e}"
 
-# ==========================
-# НАПОМИНАНИЯ
-# ==========================
-
 def check_reminders():
     while True:
         try:
@@ -419,10 +378,6 @@ def check_reminders():
 
 reminder_thread = threading.Thread(target=check_reminders, daemon=True)
 reminder_thread.start()
-
-# ==========================
-# МОНЕТИЗАЦИЯ
-# ==========================
 
 TARIFFS = {
     "собеседник": {"name": "Собеседник", "price": 50, "stars": 50},
@@ -455,10 +410,6 @@ def has_access(user_id):
     if subscription != "free":
         return True
     return False
-
-# ==========================
-# ВРЕМЯ И ГОРОД
-# ==========================
 
 def get_timezone_offset(city_name):
     timezones = {
@@ -532,10 +483,6 @@ def get_current_time_for_user(user_id, ip=None):
     
     return datetime.utcnow() + timedelta(hours=3), "Москва"
 
-# ==========================
-# БЭКАП
-# ==========================
-
 def send_backup_email():
     try:
         if not os.path.exists(DB_NAME):
@@ -606,10 +553,6 @@ backup_thread = threading.Thread(target=backup_scheduler, daemon=True)
 backup_thread.start()
 print("🔄 Планировщик бэкапа запущен")
 
-# ==========================
-# БАЗА ДАННЫХ
-# ==========================
-
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -662,10 +605,6 @@ def init_db():
     conn.close()
 
 init_db()
-
-# ==========================
-# ФУНКЦИИ БАЗЫ
-# ==========================
 
 def get_user(user_id):
     conn = sqlite3.connect(DB_NAME)
@@ -786,10 +725,6 @@ def save_payment(user_id, subscription, stars):
     conn.commit()
     conn.close()
 
-# ==========================
-# ГОЛОС (ВХОД)
-# ==========================
-
 def transcribe_audio_with_groq(audio_url):
     try:
         from groq import Groq
@@ -811,10 +746,6 @@ def transcribe_audio_with_groq(audio_url):
         print(f"❌ Groq: {e}")
         return None
 
-# ==========================
-# DEEPSEEK V4
-# ==========================
-
 client = OpenAI(
     api_key=DEEPSEEK_API_KEY,
     base_url=DEEPSEEK_BASE_URL
@@ -833,10 +764,6 @@ async def get_ai_response(messages):
         print(f"❌ AI: {e}")
         return "Извини, сейчас проблемы с подключением. Попробуй позже."
 
-# ==========================
-# ПРОМПТ
-# ==========================
-
 AURA_PROMPT = """Ты — AURA. Ты — я в Telegram.
 
 ТВОЙ СТИЛЬ:
@@ -851,10 +778,6 @@ AURA_PROMPT = """Ты — AURA. Ты — я в Telegram.
 - Не выдумывай.
 
 Ты — мой полный аналог в Telegram. Говори как я, думай как я, чувствуй как я."""
-
-# ==========================
-# ОСНОВНОЙ БОТ
-# ==========================
 
 app = FastAPI()
 
@@ -1064,7 +987,6 @@ async def process_message(request: Request, chat_id, text):
     normalized = normalize_query(text)
     search_text = normalized if normalized != lower else lower
     
-    # === АНАЛИЗ НАСТРОЕНИЯ ===
     mood = analyze_mood(text)
     mood_context = ""
     if mood == "sad":
@@ -1076,20 +998,48 @@ async def process_message(request: Request, chat_id, text):
     elif mood == "tired":
         mood_context = "Пользователь устал. Отвечай мягко и без лишней информации."
     
-    # === ПРОВЕРКА ГОРОДА ===
+    # ============================================================
+    # === УМНОЕ ОПРЕДЕЛЕНИЕ ГОРОДА (ЛЮБАЯ ФОРМА) ===
+    # ============================================================
     city = get_user_city(chat_id)
     if not city:
-        city_match = re.search(r"(?:мой город|я в|я из|город)\s+([а-яА-ЯёЁ\-]+)", lower)
+        city_found = False
+        
+        # 1. Ищем: "город Белово", "мой город Белово", "я в Белово", "я из Белово"
+        city_match = re.search(r"(?:мой город|я в|я из|город|городе|из|в)\s+([а-яА-ЯёЁ\-]+)", lower)
         if city_match:
             city = city_match.group(1).capitalize()
+            city_found = True
+        
+        # 2. Ищем: "Белово город" (слово "город" ПОСЛЕ названия)
+        if not city_found:
+            city_match = re.search(r"\b([а-яА-ЯёЁ\-]+)\s+город", lower)
+            if city_match:
+                city = city_match.group(1).capitalize()
+                city_found = True
+        
+        # 3. Ищем просто "белово" (без слова "город")
+        if not city_found:
+            known_cities = ["белово", "кемерово", "новокузнецк", "прокопьевск", "киселёвск", "междуреченск", "москва", "санкт-петербург", "новосибирск", "екатеринбург", "красноярск", "иркутск", "владивосток", "омск"]
+            for known in known_cities:
+                if known in lower:
+                    city = known.capitalize()
+                    city_found = True
+                    break
+        
+        if city_found:
             update_user_city(chat_id, city)
             send_message(chat_id, "✅ Принято! Чем могу помочь? Задавай любой вопрос?")
+            # Сохраняем город в память
+            save_memory(chat_id, "city", city)
             return {"reply": "✅ Принято! Чем могу помочь? Задавай любой вопрос?"}
         else:
             send_message(chat_id, "🌍 Напиши свой город, чтобы я показывал точное время и искал информацию рядом с тобой. Например: Белово")
             return {"reply": "🌍 Напиши свой город."}
     
+    # ============================================================
     # === ВРЕМЯ ===
+    # ============================================================
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
         ip = forwarded.split(",")[0].strip()
@@ -1101,26 +1051,34 @@ async def process_message(request: Request, chat_id, text):
     date_str = current_time.strftime("%d.%m.%Y")
     day_str = current_time.strftime("%A")
     
+    # ============================================================
     # === ПРИВЕТСТВИЕ ===
+    # ============================================================
     msg_count = get_message_count(chat_id)
     if msg_count <= 2:
         welcome = f"👋Привет! Я здесь и готов тебе помочь! Сейчас {time_str} {date_str}.\nПросто напиши, что нужно👇😎"
         send_message(chat_id, welcome)
         save_message(chat_id, "assistant", welcome)
     
-    # === ПРОВЕРКА ПРОШЛЫХ ТЕМ ===
+    # ============================================================
+    # === ПРОШЛЫЕ ТЕМЫ ===
+    # ============================================================
     if msg_count <= 5:
         last_topics = get_all_topics(chat_id)
         if last_topics:
             topics_text = ", ".join(last_topics[:3])
             send_message(chat_id, f"📚 Мы уже говорили о: {topics_text}. Хочешь продолжить?")
     
-    # === ИНИЦИАТИВА ОТ БОТА ===
+    # ============================================================
+    # === ИНИЦИАТИВА ===
+    # ============================================================
     last_msg_time = get_last_message_time(chat_id)
     if last_msg_time and (datetime.now() - last_msg_time) > timedelta(hours=24):
         send_message(chat_id, "👋 Давно не общались! Как дела? Чем могу помочь сегодня?")
     
+    # ============================================================
     # === БЫСТРЫЙ ОТВЕТ НА ВИЗУАЛ ===
+    # ============================================================
     visual_triggers = {
         "картинк": "https://yandex.ru/images/search?text=",
         "фото": "https://yandex.ru/images/search?text=",
@@ -1144,7 +1102,9 @@ async def process_message(request: Request, chat_id, text):
             save_message(chat_id, "assistant", reply)
             return {"reply": reply}
     
+    # ============================================================
     # === ГЛУБОКИЙ ПОИСК ===
+    # ============================================================
     search_result = None
     search_triggers = ["новости", "погода", "найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "парикмахер", "wildberries", "валдберис", "озон", "авито"]
     if any(word in search_text for word in search_triggers):
@@ -1153,14 +1113,18 @@ async def process_message(request: Request, chat_id, text):
         if search_result:
             text = text + f"\n\n🔍 Актуальная информация:\n{search_result}"
     
+    # ============================================================
     # === СОХРАНЕНИЕ ТЕМ ===
+    # ============================================================
     stop_words = ["привет", "здравствуй", "спасибо", "пока", "да", "нет", "хорошо", "плохо"]
     words = re.findall(r'\b[а-яА-ЯёЁ]{4,}\b', text.lower())
     for word in words:
         if word not in stop_words and len(word) > 3:
             save_topic(chat_id, word)
     
+    # ============================================================
     # === КОНТЕКСТ ===
+    # ============================================================
     topics = get_all_topics(chat_id)
     topics_text = ", ".join(topics[:7]) if topics else "нет сохранённых тем"
     history = get_history(chat_id, limit=100)
@@ -1188,24 +1152,32 @@ async def process_message(request: Request, chat_id, text):
     reply = await get_ai_response(messages)
     reply = re.sub(r'[*_#~`]', '', reply)
     
+    # ============================================================
     # === ЗАПОМИНАНИЕ ИМЕНИ ===
+    # ============================================================
     name_match = re.search(r"(?:меня зовут|зовут|я )(\w+)", lower)
     if name_match:
         save_memory(chat_id, "name", name_match.group(1).capitalize())
     
+    # ============================================================
     # === ЗАПОМИНАНИЕ ОТНОШЕНИЯ ===
+    # ============================================================
     if "нравится" in lower:
         save_memory(chat_id, "likes", text)
     if "не нравится" in lower:
         save_memory(chat_id, "dislikes", text)
     
+    # ============================================================
     # === СТИЛЬ ОБЩЕНИЯ ===
+    # ============================================================
     if len(text.split()) > 10:
         save_memory(chat_id, "style", "развёрнутый")
     else:
         save_memory(chat_id, "style", "короткий")
     
+    # ============================================================
     # === ВОПРОС В КОНЦЕ ===
+    # ============================================================
     if not reply.endswith("?") and len(reply) < 300:
         reply += "\n\nЧто думаешь? Хочешь, чтобы я уточнил или нашёл ещё что-то? 😊"
     
