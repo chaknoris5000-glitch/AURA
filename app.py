@@ -197,7 +197,7 @@ def analyze_mood(text):
     return "neutral"
 
 # ==========================
-# ГЛУБОКИЙ ПАРСИНГ
+# ГЛУБОКИЙ ПАРСИНГ (САЙТЫ + КАРТОЧКИ ТОВАРОВ)
 # ==========================
 
 def parse_site_for_info(url):
@@ -244,19 +244,30 @@ def parse_site_for_info(url):
         if sites:
             result["sites"] = sites
         
+        # Парсинг карточки товара (Wildberries, Ozon, Avito)
+        title = soup.find('h1')
+        if title:
+            result["product_title"] = title.text.strip()
+        
+        desc = soup.find(class_=re.compile(r'description|about|product-desc|product__description'))
+        if desc:
+            result["product_description"] = desc.text.strip()[:500]
+        
         result["snippet"] = text[:1000].replace("\n", " ")
+        
         return result
     except Exception as e:
         print(f"❌ Ошибка парсинга: {e}")
         return None
 
 # ==========================
-# ПОИСК
+# ПОИСК (МАКСИМАЛЬНО ГЛУБОКИЙ)
 # ==========================
 
 async def search_web(query):
     results = []
     
+    # 1. Tavily
     if tavily_client:
         try:
             response = tavily_client.search(
@@ -278,6 +289,7 @@ async def search_web(query):
         except Exception as e:
             print(f"❌ Tavily: {e}")
     
+    # 2. DuckDuckGo
     if not results:
         try:
             url = f"https://html.duckduckgo.com/html/?q={query}"
@@ -294,6 +306,7 @@ async def search_web(query):
         except Exception as e:
             print(f"❌ DuckDuckGo: {e}")
     
+    # 3. Глубокий парсинг найденных ссылок
     urls = re.findall(r'https?://[^\s]+', "\n".join(results))
     for url in urls[:3]:
         parsed = parse_site_for_info(url)
@@ -308,6 +321,10 @@ async def search_web(query):
                 results.append(f"✉️ Email: {', '.join(parsed['emails'])}")
             if parsed.get("sites"):
                 results.append(f"🌐 Сайты: {', '.join(parsed['sites'])}")
+            if parsed.get("product_title"):
+                results.append(f"📦 Товар: {parsed['product_title']}")
+            if parsed.get("product_description"):
+                results.append(f"📝 Описание: {parsed['product_description'][:200]}...")
     
     return "\n\n".join(results) if results else None
 
@@ -520,7 +537,81 @@ def get_current_time_for_user(user_id, ip=None):
     return datetime.utcnow() + timedelta(hours=3), "Москва"
 
 # ==========================
-# ИНИЦИАЛИЗАЦИЯ БАЗЫ
+# БЭКАП
+# ==========================
+
+def send_backup_email():
+    try:
+        if not os.path.exists(DB_NAME):
+            return False
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_SENDER
+        msg['To'] = EMAIL_RECEIVER
+        msg['Subject'] = f"💾 Бэкап AURA {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+        body = f"🧠 Бэкап базы данных AURA\n📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+        with open(DB_NAME, "rb") as attachment:
+            part = MIMEBase('application', 'octet-stream')
+            part.set_payload(attachment.read())
+            encoders.encode_base64(part)
+            part.add_header('Content-Disposition', f'attachment; filename=aura_backup_{datetime.now().strftime("%Y%m%d_%H%M")}.db')
+            msg.attach(part)
+        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
+        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+        server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
+        server.quit()
+        print("✅ Бэкап отправлен на почту")
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка отправки бэкапа: {e}")
+        return False
+
+def backup_database():
+    try:
+        if os.path.exists(DB_NAME):
+            shutil.copy2(DB_NAME, BACKUP_NAME)
+            return True
+        return False
+    except Exception as e:
+        print(f"❌ Ошибка бэкапа: {e}")
+        return False
+
+def restore_database():
+    try:
+        if os.path.exists(BACKUP_NAME):
+            shutil.copy2(BACKUP_NAME, DB_NAME)
+            return True
+        return False
+    except Exception as e:
+        print(f"❌ Ошибка восстановления: {e}")
+        return False
+
+def backup_scheduler():
+    hour_counter = 0
+    while True:
+        time.sleep(3600)
+        if backup_database():
+            hour_counter += 1
+            if hour_counter >= 24:
+                send_backup_email()
+                hour_counter = 0
+
+print("🔄 Проверка базы данных...")
+if not os.path.exists(DB_NAME):
+    if restore_database():
+        print("✅ База восстановлена")
+    else:
+        print("📦 Создаю новую базу")
+else:
+    print("✅ База данных найдена")
+    backup_database()
+
+backup_thread = threading.Thread(target=backup_scheduler, daemon=True)
+backup_thread.start()
+print("🔄 Планировщик бэкапа запущен")
+
+# ==========================
+# БАЗА ДАННЫХ
 # ==========================
 
 def init_db():
@@ -577,7 +668,7 @@ def init_db():
 init_db()
 
 # ==========================
-# ФУНКЦИИ БАЗЫ (РАСШИРЕННЫЕ)
+# ФУНКЦИИ БАЗЫ
 # ==========================
 
 def get_user(user_id):
@@ -698,80 +789,6 @@ def save_payment(user_id, subscription, stars):
               (user_id, subscription, stars, datetime.now().isoformat()))
     conn.commit()
     conn.close()
-
-# ==========================
-# БЭКАП
-# ==========================
-
-def send_backup_email():
-    try:
-        if not os.path.exists(DB_NAME):
-            return False
-        msg = MIMEMultipart()
-        msg['From'] = EMAIL_SENDER
-        msg['To'] = EMAIL_RECEIVER
-        msg['Subject'] = f"💾 Бэкап AURA {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-        body = f"🧠 Бэкап базы данных AURA\n📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
-        msg.attach(MIMEText(body, 'plain', 'utf-8'))
-        with open(DB_NAME, "rb") as attachment:
-            part = MIMEBase('application', 'octet-stream')
-            part.set_payload(attachment.read())
-            encoders.encode_base64(part)
-            part.add_header('Content-Disposition', f'attachment; filename=aura_backup_{datetime.now().strftime("%Y%m%d_%H%M")}.db')
-            msg.attach(part)
-        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
-        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-        server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
-        server.quit()
-        print("✅ Бэкап отправлен на почту")
-        return True
-    except Exception as e:
-        print(f"❌ Ошибка отправки бэкапа: {e}")
-        return False
-
-def backup_database():
-    try:
-        if os.path.exists(DB_NAME):
-            shutil.copy2(DB_NAME, BACKUP_NAME)
-            return True
-        return False
-    except Exception as e:
-        print(f"❌ Ошибка бэкапа: {e}")
-        return False
-
-def restore_database():
-    try:
-        if os.path.exists(BACKUP_NAME):
-            shutil.copy2(BACKUP_NAME, DB_NAME)
-            return True
-        return False
-    except Exception as e:
-        print(f"❌ Ошибка восстановления: {e}")
-        return False
-
-def backup_scheduler():
-    hour_counter = 0
-    while True:
-        time.sleep(3600)
-        if backup_database():
-            hour_counter += 1
-            if hour_counter >= 24:
-                send_backup_email()
-                hour_counter = 0
-
-print("🔄 Проверка базы данных...")
-if not os.path.exists(DB_NAME):
-    if restore_database():
-        print("✅ База восстановлена")
-    else:
-        print("📦 Создаю новую базу")
-else:
-    print("✅ База данных найдена")
-    backup_database()
-
-backup_thread = threading.Thread(target=backup_scheduler, daemon=True)
-backup_thread.start()
-print("🔄 Планировщик бэкапа запущен")
 
 # ==========================
 # ГОЛОС (ВХОД)
@@ -1133,7 +1150,7 @@ async def process_message(request: Request, chat_id, text):
     
     # === ГЛУБОКИЙ ПОИСК ===
     search_result = None
-    search_triggers = ["новости", "погода", "найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "парикмахер", "wildberries", "валдберис", "озон"]
+    search_triggers = ["новости", "погода", "найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "парикмахер", "wildberries", "валдберис", "озон", "авито"]
     if any(word in search_text for word in search_triggers):
         print(f"🔍 Глубокий поиск: {text}")
         search_result = await search_web(text)
@@ -1192,7 +1209,7 @@ async def process_message(request: Request, chat_id, text):
     else:
         save_memory(chat_id, "style", "короткий")
     
-    # === ВОПРОС В КОНЦЕ (ЧЕЛОВЕЧНОСТЬ) ===
+    # === ВОПРОС В КОНЦЕ ===
     if not reply.endswith("?") and len(reply) < 300:
         reply += "\n\nЧто думаешь? Хочешь, чтобы я уточнил или нашёл ещё что-то? 😊"
     
