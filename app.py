@@ -27,6 +27,8 @@ import base64
 import io
 from PIL import Image
 import urllib.parse
+import asyncio
+import edge_tts
 
 load_dotenv()
 
@@ -60,8 +62,6 @@ if not TELEGRAM_TOKEN:
     print("❌ НЕТ КЛЮЧА TELEGRAM!")
 if not TAVILY_API_KEY:
     print("⚠️ НЕТ КЛЮЧА TAVILY")
-if not GROQ_API_KEY:
-    print("⚠️ НЕТ КЛЮЧА GROQ")
 
 tavily_client = None
 if TavilyClient and TAVILY_API_KEY:
@@ -83,29 +83,102 @@ def set_bot_description():
 
 set_bot_description()
 
-def google_tts(text):
+# ============================================================
+# === ГОЛОСОВЫЕ ОТВЕТЫ AURA — EDGE TTS (МУЖСКОЙ) ===
+# ============================================================
+
+def clean_text_for_voice(text):
+    """Очищает текст от эмодзи, ссылок, номеров телефонов"""
+    if not text:
+        return ""
+    
+    # Удаляем эмодзи
+    emoji_pattern = re.compile(
+        "[\U0001F600-\U0001F64F"
+        "\U0001F300-\U0001F5FF"
+        "\U0001F680-\U0001F6FF"
+        "\U0001F700-\U0001F77F"
+        "\U0001F780-\U0001F7FF"
+        "\U0001F800-\U0001F8FF"
+        "\U0001F900-\U0001F9FF"
+        "\U0001FA00-\U0001FA6F"
+        "\U0001FA70-\U0001FAFF"
+        "\U00002702-\U000027B0"
+        "\U000024C2-\U0001F251"
+        "]+",
+        flags=re.UNICODE
+    )
+    text = emoji_pattern.sub('', text)
+    
+    # Удаляем ссылки
+    text = re.sub(r'https?://\S+|www\.\S+', '', text)
+    
+    # Удаляем номера телефонов
+    text = re.sub(r'\+?\d[\d\s\-\(\)]{7,}\d', '', text)
+    
+    # Убираем лишние пробелы
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    return text
+
+async def edge_tts_generate(text):
+    """Генерирует аудио через Edge TTS (мужской голос)"""
     try:
-        from gtts import gTTS
-        tts = gTTS(text=text, lang='ru', slow=False)
+        # ✅ Самый реалистичный мужской голос
+        voice = "ru-RU-DmitryNeural"
+        
+        # Создаём временный файл
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
-            tts.save(tmp.name)
-            return tmp.name
+            output_file = tmp.name
+        
+        # Генерируем аудио
+        communicate = edge_tts.Communicate(text, voice)
+        await communicate.save(output_file)
+        
+        return output_file
+        
     except Exception as e:
-        print(f"❌ Google TTS: {e}")
+        print(f"❌ Edge TTS ошибка: {e}")
         return None
 
+def text_to_speech(text):
+    """Синхронная обёртка для Edge TTS"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(edge_tts_generate(text))
+    finally:
+        loop.close()
+
 def send_voice_reply(chat_id, text):
+    """Отправляет голосовое сообщение"""
+    
     if not text:
         return False
-    text_hash = hash(text)
+    
+    # Очищаем текст
+    clean_text = clean_text_for_voice(text)
+    
+    if not clean_text or len(clean_text) < 5:
+        return False
+    
+    # Берём первую фразу (максимум 300 символов)
+    voice_text = clean_text.split('\n')[0][:300]
+    
+    if len(voice_text) < 5:
+        return False
+    
+    # Защита от дублей
+    text_hash = hash(voice_text)
     if LAST_VOICE_MESSAGE.get(chat_id) == text_hash:
         return True
-    voice_text = text.split('\n')[0][:300]
-    if not voice_text:
-        return False
-    audio_path = google_tts(voice_text)
+    
+    # Генерируем аудио
+    audio_path = text_to_speech(voice_text)
     if not audio_path:
         return False
+    
+    # Отправляем в Telegram
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
         with open(audio_path, 'rb') as f:
@@ -113,6 +186,7 @@ def send_voice_reply(chat_id, text):
             data = {'chat_id': chat_id}
             response = requests.post(url, files=files, data=data, timeout=30)
         os.unlink(audio_path)
+        
         if response.status_code == 200:
             LAST_VOICE_MESSAGE[chat_id] = text_hash
             return True
@@ -757,7 +831,7 @@ async def get_ai_response(messages):
             base_url=DEEPSEEK_BASE_URL
         )
         response = client.chat.completions.create(
-            model="deepseek-v4-pro",  # ✅ ФЛАГМАНСКАЯ МОДЕЛЬ!
+            model="deepseek-v4-pro",
             messages=messages,
             temperature=0.9,
             max_tokens=600
@@ -765,7 +839,6 @@ async def get_ai_response(messages):
         return response.choices[0].message.content
     except Exception as e:
         print(f"❌ DeepSeek V4 Pro: {e}")
-        # Резерв на Groq если DeepSeek упал
         try:
             from groq import Groq
             groq_client = Groq(api_key=GROQ_API_KEY)
@@ -973,7 +1046,7 @@ async def webhook(request: Request):
             
             result = await process_message(request, chat_id, text)
             send_message(chat_id, result["reply"])
-            if result["reply"]:
+            if result["reply"] and not text.startswith("/"):
                 threading.Thread(target=send_voice_reply, args=(chat_id, result["reply"])).start()
                 
         return JSONResponse({"ok": True})
@@ -1013,7 +1086,6 @@ async def process_message(request: Request, chat_id, text):
     elif mood == "tired":
         mood_context = "Пользователь устал. Отвечай мягко и без лишней информации."
     
-    # === ОПРЕДЕЛЕНИЕ ГОРОДА ===
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
         ip = forwarded.split(",")[0].strip()
@@ -1052,7 +1124,6 @@ async def process_message(request: Request, chat_id, text):
             send_message(chat_id, "🌍 Напиши свой город, чтобы я показывал точное время и искал информацию рядом с тобой. Например: Белово")
             return {"reply": "🌍 Напиши свой город."}
     
-    # === ЕСЛИ ЗАПРОС ПРО ВРЕМЯ (БЕЗ GROQ) ===
     if "время" in lower or "час" in lower or "сколько" in lower or "который час" in lower:
         current_time, city = get_current_time_for_user(chat_id, ip)
         time_str = current_time.strftime("%H:%M")
@@ -1061,32 +1132,27 @@ async def process_message(request: Request, chat_id, text):
         save_message(chat_id, "assistant", reply)
         return {"reply": reply}
     
-    # === ВРЕМЯ ДЛЯ КОНТЕКСТА ===
     current_time, city = get_current_time_for_user(chat_id, ip)
     time_str = current_time.strftime("%H:%M")
     date_str = current_time.strftime("%d.%m.%Y")
     day_str = current_time.strftime("%A")
     
-    # === ПРИВЕТСТВИЕ ===
     msg_count = get_message_count(chat_id)
     if msg_count <= 2:
         welcome = f"👋Привет! Я здесь и готов тебе помочь! Сейчас {time_str} {date_str}.\nПросто напиши, что нужно👇😎"
         send_message(chat_id, welcome)
         save_message(chat_id, "assistant", welcome)
     
-    # === ПРОШЛЫЕ ТЕМЫ ===
     if msg_count <= 5:
         last_topics = get_all_topics(chat_id)
         if last_topics:
             topics_text = ", ".join(last_topics[:3])
             send_message(chat_id, f"📚 Мы уже говорили о: {topics_text}. Хочешь продолжить?")
     
-    # === ИНИЦИАТИВА ===
     last_msg_time = get_last_message_time(chat_id)
     if last_msg_time and (datetime.now() - last_msg_time) > timedelta(hours=24):
         send_message(chat_id, "👋 Давно не общались! Как дела? Чем могу помочь сегодня?")
     
-    # === БЫСТРЫЙ ОТВЕТ НА ВИЗУАЛ ===
     visual_triggers = {
         "картинк": "https://yandex.ru/images/search?text=",
         "фото": "https://yandex.ru/images/search?text=",
@@ -1110,7 +1176,6 @@ async def process_message(request: Request, chat_id, text):
             save_message(chat_id, "assistant", reply)
             return {"reply": reply}
     
-    # === ГЛУБОКИЙ ПОИСК ===
     search_result = None
     search_triggers = ["новости", "погода", "найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "парикмахер", "wildberries", "валдберис", "озон", "авито"]
     if any(word in search_text for word in search_triggers):
@@ -1119,14 +1184,12 @@ async def process_message(request: Request, chat_id, text):
         if search_result:
             text = text + f"\n\n🔍 Актуальная информация:\n{search_result}"
     
-    # === СОХРАНЕНИЕ ТЕМ ===
     stop_words = ["привет", "здравствуй", "спасибо", "пока", "да", "нет", "хорошо", "плохо"]
     words = re.findall(r'\b[а-яА-ЯёЁ]{4,}\b', text.lower())
     for word in words:
         if word not in stop_words and len(word) > 3:
             save_topic(chat_id, word)
     
-    # === КОНТЕКСТ ===
     topics = get_all_topics(chat_id)
     topics_text = ", ".join(topics[:7]) if topics else "нет сохранённых тем"
     history = get_history(chat_id, limit=100)
@@ -1154,24 +1217,20 @@ async def process_message(request: Request, chat_id, text):
     reply = await get_ai_response(messages)
     reply = re.sub(r'[*_#~`]', '', reply)
     
-    # === ЗАПОМИНАНИЕ ИМЕНИ ===
     name_match = re.search(r"(?:меня зовут|зовут|я )(\w+)", lower)
     if name_match:
         save_memory(chat_id, "name", name_match.group(1).capitalize())
     
-    # === ЗАПОМИНАНИЕ ОТНОШЕНИЯ ===
     if "нравится" in lower:
         save_memory(chat_id, "likes", text)
     if "не нравится" in lower:
         save_memory(chat_id, "dislikes", text)
     
-    # === СТИЛЬ ОБЩЕНИЯ ===
     if len(text.split()) > 10:
         save_memory(chat_id, "style", "развёрнутый")
     else:
         save_memory(chat_id, "style", "короткий")
     
-    # === ВОПРОС В КОНЦЕ ===
     if not reply.endswith("?") and len(reply) < 300:
         reply += "\n\nЧто думаешь? Хочешь, чтобы я уточнил или нашёл ещё что-то? 😊"
     
