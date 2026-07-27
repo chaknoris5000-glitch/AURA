@@ -6,3 +6,5 @@ python-dotenv
 beautifulsoup4
 lxml
 tavily-python
+chromadb
+sentence-transformers
