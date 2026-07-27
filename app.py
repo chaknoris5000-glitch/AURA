@@ -25,6 +25,8 @@ from bs4 import BeautifulSoup
 from PIL import Image
 from openai import OpenAI
 import httpx
+import asyncio
+import aiohttp
 
 load_dotenv()
 
@@ -36,7 +38,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
-    print("⚠️ НЕТ SUPABASE_URL или SUPABASE_KEY! Бот не сможет работать с памятью!")
+    print("⚠️ НЕТ SUPABASE_URL или SUPABASE_KEY!")
 
 from supabase import create_client, Client
 
@@ -62,6 +64,7 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
+APIFY_API_KEY = os.getenv("APIFY_API_KEY")
 
 ADMIN_USERS = ["5818548555"]
 
@@ -85,19 +88,91 @@ except ImportError:
     print("⚠️ Tavily не установлен")
 
 # ==========================
-# КЕШ ПАМЯТИ ПОЛЬЗОВАТЕЛЕЙ
+# APIFY — WILDBERRIES ПАРСЕР
+# ==========================
+
+APIFY_ACTOR_ID = "piotrv1001/wildberries-listings-scraper"
+
+async def search_wildberries(query, max_items=5):
+    """Ищет товары на Wildberries через Apify"""
+    if not APIFY_API_KEY:
+        return "⚠️ Apify API ключ не настроен"
+    
+    try:
+        run_url = f"https://api.apify.com/v2/acts/{APIFY_ACTOR_ID}/runs?token={APIFY_API_KEY}"
+        
+        payload = {
+            "searchQueries": [query],
+            "maxItems": max_items,
+            "scrapeProductDetails": True,
+            "scrapeReviews": False
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(run_url, json=payload) as resp:
+                run_data = await resp.json()
+                if run_data.get("status") != "SUCCEEDED":
+                    run_id = run_data.get("data", {}).get("id")
+                    if not run_id:
+                        return "❌ Не удалось запустить парсер"
+                
+                run_id = run_data.get("data", {}).get("id")
+                if not run_id:
+                    return "❌ Ошибка запуска"
+                
+                for _ in range(30):
+                    status_url = f"https://api.apify.com/v2/actor-runs/{run_id}?token={APIFY_API_KEY}"
+                    async with session.get(status_url) as status_resp:
+                        status_data = await status_resp.json()
+                        status = status_data.get("data", {}).get("status")
+                        if status == "SUCCEEDED":
+                            break
+                        elif status in ["FAILED", "ABORTED"]:
+                            return "❌ Парсер завершился с ошибкой"
+                        await asyncio.sleep(1)
+                
+                results_url = f"https://api.apify.com/v2/actor-runs/{run_id}/dataset/items?token={APIFY_API_KEY}"
+                async with session.get(results_url) as results_resp:
+                    results = await results_resp.json()
+                    
+                    if not results:
+                        return f"🔍 По запросу '{query}' ничего не найдено на Wildberries"
+                    
+                    response = f"🛒 **Результаты поиска '{query}' на Wildberries:**\n\n"
+                    
+                    for i, item in enumerate(results[:max_items], 1):
+                        name = item.get("name", "Без названия")
+                        price = item.get("price", {}).get("amount", "Цена не указана")
+                        currency = item.get("price", {}).get("currency", "₽")
+                        rating = item.get("rating", "Нет рейтинга")
+                        url = item.get("url", "")
+                        
+                        response += f"{i}. **{name}**\n"
+                        response += f"   💰 {price} {currency}\n"
+                        response += f"   ⭐ Рейтинг: {rating}\n"
+                        if url:
+                            response += f"   🔗 {url}\n"
+                        response += "\n"
+                    
+                    response += f"📊 Всего найдено: {len(results)} товаров"
+                    return response
+                    
+    except Exception as e:
+        print(f"❌ Ошибка Wildberries парсера: {e}")
+        return f"⚠️ Ошибка при поиске: {str(e)}"
+
+# ==========================
+# КЕШ ПАМЯТИ
 # ==========================
 
 USER_MEMORY_CACHE = {}
 
 def load_user_memory(chat_id):
-    """Загружает всю историю пользователя в кеш из Supabase"""
     if not supabase:
         return {"history": [], "topics": [], "user": None}
     
     if chat_id not in USER_MEMORY_CACHE:
         try:
-            # Загружаем историю
             history_response = supabase.table("history")\
                 .select("*")\
                 .eq("user_id", chat_id)\
@@ -106,14 +181,12 @@ def load_user_memory(chat_id):
                 .execute()
             history = history_response.data if history_response.data else []
             
-            # Загружаем темы
             topics_response = supabase.table("topics")\
                 .select("topic")\
                 .eq("user_id", chat_id)\
                 .execute()
             topics = [t["topic"] for t in topics_response.data] if topics_response.data else []
             
-            # Загружаем пользователя
             user_response = supabase.table("users")\
                 .select("*")\
                 .eq("user_id", chat_id)\
@@ -134,10 +207,8 @@ def load_user_memory(chat_id):
     return USER_MEMORY_CACHE[chat_id]
 
 def update_user_memory(chat_id, role, content):
-    """Обновляет кеш и Supabase"""
     try:
         if supabase:
-            # Сохраняем в Supabase
             supabase.table("history").insert({
                 "user_id": chat_id,
                 "role": role,
@@ -147,7 +218,6 @@ def update_user_memory(chat_id, role, content):
     except Exception as e:
         print(f"❌ Ошибка сохранения в Supabase: {e}")
     
-    # Обновляем кеш
     if chat_id in USER_MEMORY_CACHE:
         USER_MEMORY_CACHE[chat_id]["history"].append({
             "role": role,
@@ -159,7 +229,6 @@ def update_user_memory(chat_id, role, content):
         load_user_memory(chat_id)
 
 def get_full_context(chat_id, limit=500):
-    """Возвращает полный контекст для AI"""
     cache = USER_MEMORY_CACHE.get(chat_id)
     if not cache:
         cache = load_user_memory(chat_id)
@@ -174,10 +243,8 @@ def get_full_context(chat_id, limit=500):
     }
 
 def search_memory(chat_id, query):
-    """Поиск по истории пользователя в Supabase"""
     if not supabase:
         return []
-    
     try:
         response = supabase.table("history")\
             .select("*")\
@@ -508,7 +575,6 @@ def read_file(file_data, file_name):
 # ==========================
 
 def check_reminders():
-    """Напоминания временно отключены"""
     pass
 
 # ==========================
@@ -623,16 +689,6 @@ def get_current_time_for_user(user_id, ip=None):
             return datetime.utcnow() + timedelta(hours=offset), city
     
     return datetime.utcnow() + timedelta(hours=3), "Москва"
-
-# ==========================
-# БЭКАП (ПОКА ОТКЛЮЧЕН)
-# ==========================
-
-def backup_database():
-    return True
-
-def restore_database():
-    return True
 
 # ==========================
 # ФУНКЦИИ ДЛЯ РАБОТЫ С БАЗОЙ (SUPABASE)
@@ -794,13 +850,11 @@ def save_memory(user_id, key, value):
     if not supabase:
         return
     try:
-        # Удаляем старую запись, если есть
         supabase.table("user_memory")\
             .delete()\
             .eq("user_id", user_id)\
             .eq("key", key)\
             .execute()
-        # Вставляем новую
         supabase.table("user_memory").insert({
             "user_id": user_id,
             "key": key,
@@ -1172,10 +1226,7 @@ async def process_message(request: Request, chat_id, text):
     if not user:
         save_user(chat_id)
     
-    # Загружаем память пользователя при первом сообщении
     load_user_memory(chat_id)
-    
-    # Сохраняем сообщение пользователя
     update_user_memory(chat_id, "user", text)
     
     lower = text.lower()
@@ -1200,7 +1251,21 @@ async def process_message(request: Request, chat_id, text):
         ip = request.client.host if request.client else "127.0.0.1"
     
     # ==========================
-    # ВРЕМЯ: ПРЯМОЙ ОТВЕТ
+    # WILDBERRIES ПОИСК
+    # ==========================
+    
+    if "wildberries" in search_text or "валдберис" in search_text or "вб" in search_text:
+        query = re.sub(r'wildberries|валдберис|вб|найди|поищи|покажи', '', text, flags=re.IGNORECASE).strip()
+        if not query:
+            query = "товары"
+        
+        send_message(chat_id, f"🔍 Ищу '{query}' на Wildberries...")
+        result = await search_wildberries(query, max_items=5)
+        update_user_memory(chat_id, "assistant", result)
+        return {"reply": result}
+    
+    # ==========================
+    # ВРЕМЯ
     # ==========================
     
     time_queries = ["время", "который час", "сколько времени", "час", "сколько сейчас", "точное время"]
@@ -1303,7 +1368,7 @@ async def process_message(request: Request, chat_id, text):
     # ==========================
     
     search_result = None
-    search_triggers = ["новости", "погода", "найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "парикмахер", "wildberries", "валдберис", "озон", "авито"]
+    search_triggers = ["новости", "погода", "найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "парикмахер", "авито"]
     if any(word in search_text for word in search_triggers):
         print(f"🔍 Глубокий поиск: {text}")
         search_result = await search_web(text)
@@ -1320,7 +1385,6 @@ async def process_message(request: Request, chat_id, text):
         if word not in stop_words and len(word) > 3:
             save_topic(chat_id, word)
     
-    # Получаем контекст из кеша
     context = get_full_context(chat_id, limit=500)
     history = context["history"]
     topics = context["topics"]
