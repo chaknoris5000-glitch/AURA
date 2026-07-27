@@ -24,7 +24,6 @@ from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 from PIL import Image
 from openai import OpenAI
-import httpx
 import asyncio
 import aiohttp
 
@@ -1221,6 +1220,10 @@ def send_message(chat_id, text):
         print(f"❌ Отправка: {e}")
         return False
 
+# =======================================================
+# ОСНОВНАЯ ЛОГИКА ОБРАБОТКИ СООБЩЕНИЙ (С ИСПРАВЛЕНИЯМИ)
+# =======================================================
+
 async def process_message(request: Request, chat_id, text):
     user = get_user(chat_id)
     if not user:
@@ -1251,11 +1254,11 @@ async def process_message(request: Request, chat_id, text):
         ip = request.client.host if request.client else "127.0.0.1"
     
     # ==========================
-    # WILDBERRIES ПОИСК
+    # МАГАЗИНЫ (Wildberries, Ozon и т.д.)
     # ==========================
     
-    if "wildberries" in search_text or "валдберис" in search_text or "вб" in search_text:
-        query = re.sub(r'wildberries|валдберис|вб|найди|поищи|покажи', '', text, flags=re.IGNORECASE).strip()
+    if "wildberries" in search_text or "валдберис" in search_text or "валберис" in search_text or "вальдберис" in search_text or "вб" in search_text:
+        query = re.sub(r'wildberries|валдберис|валберис|вальдберис|вб|найди|поищи|покажи|картинк|фото|рисунк', '', text, flags=re.IGNORECASE).strip()
         if not query:
             query = "товары"
         
@@ -1265,7 +1268,7 @@ async def process_message(request: Request, chat_id, text):
         return {"reply": result}
     
     # ==========================
-    # ВРЕМЯ
+    # ВРЕМЯ (С ИСПРАВЛЕНИЕМ)
     # ==========================
     
     time_queries = ["время", "который час", "сколько времени", "час", "сколько сейчас", "точное время"]
@@ -1319,26 +1322,7 @@ async def process_message(request: Request, chat_id, text):
                 return {"reply": reply}
     
     # ==========================
-    # ОСТАЛЬНАЯ ЛОГИКА
-    # ==========================
-    
-    current_time, city = get_current_time_for_user(chat_id, ip)
-    time_str = current_time.strftime("%H:%M")
-    date_str = current_time.strftime("%d.%m.%Y")
-    day_str = current_time.strftime("%A")
-    
-    msg_count = get_message_count(chat_id)
-    if msg_count <= 1:
-        welcome = f"👋 Привет! Сейчас {time_str} {date_str}."
-        send_message(chat_id, welcome)
-        update_user_memory(chat_id, "assistant", welcome)
-    
-    last_msg_time = get_last_message_time(chat_id)
-    if last_msg_time and (datetime.now() - last_msg_time) > timedelta(hours=48):
-        send_message(chat_id, "👋 Давно не общались! Как дела?")
-    
-    # ==========================
-    # ВИЗУАЛЬНЫЕ ТРИГГЕРЫ
+    # ВИЗУАЛЬНЫЕ ТРИГГЕРЫ (КАРТИНКИ, ВИДЕО, МУЗЫКА)
     # ==========================
     
     visual_triggers = {
@@ -1362,6 +1346,25 @@ async def process_message(request: Request, chat_id, text):
             reply = f"Вот {trigger}: {base_url}{query.replace(' ', '%20')}"
             update_user_memory(chat_id, "assistant", reply)
             return {"reply": reply}
+    
+    # ==========================
+    # ОСТАЛЬНАЯ ЛОГИКА (ПРИВЕТСТВИЕ, СТАРТ)
+    # ==========================
+    
+    current_time, city = get_current_time_for_user(chat_id, ip)
+    time_str = current_time.strftime("%H:%M")
+    date_str = current_time.strftime("%d.%m.%Y")
+    day_str = current_time.strftime("%A")
+    
+    msg_count = get_message_count(chat_id)
+    if msg_count <= 1:
+        welcome = f"👋 Привет! Сейчас {time_str} {date_str}."
+        send_message(chat_id, welcome)
+        update_user_memory(chat_id, "assistant", welcome)
+    
+    last_msg_time = get_last_message_time(chat_id)
+    if last_msg_time and (datetime.now() - last_msg_time) > timedelta(hours=48):
+        send_message(chat_id, "👋 Давно не общались! Как дела?")
     
     # ==========================
     # ПОИСК
