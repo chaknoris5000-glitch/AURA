@@ -39,15 +39,22 @@ except ImportError:
 DB_NAME = "aura.db"
 BACKUP_NAME = "aura_backup.db"
 
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-133c0d2bfc664d878ac8dcbc346ea3fc")
+# ==========================
+# ВСЕ КЛЮЧИ — ТОЛЬКО ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
+# ==========================
+
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8774637081:AAGrAZI-umgkQXXu1Cu1JVWb8LmAp3Lua4")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "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")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "tv1y-dev-1ca84q-b8vRfLt6yuemOk9ktpG59086N76ZLewfn0a1j2NyVI")
-EMAIL_SENDER = os.getenv("EMAIL_SENDER", "chaknoris5000@gmail.com")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "fbcsjcmudqofmuya")
-EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER", "chaknoris5000@gmail.com")
-YANDEX_API_KEY = os.getenv("YANDEX_API_KEY", "AQVN0cdwXxJ3S1CeEVZwB1PDPiWJ9S1G1-tmMR")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+EMAIL_SENDER = os.getenv("EMAIL_SENDER")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
+
+# Yandex для голоса
+YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
+YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
 ADMIN_USERS = ["5818548555"]
 
@@ -79,15 +86,47 @@ def set_bot_description():
 
 set_bot_description()
 
-# ============================================================
-# === ГОЛОСОВЫЕ ОТВЕТЫ — gTTS (РАБОТАЕТ ВСЕГДА) ===
-# ============================================================
+# ==========================
+# YANDEX TTS (МУЖСКОЙ ГОЛОС)
+# ==========================
+
+def yandex_tts(text):
+    """Yandex SpeechKit — мужской голос (alexander)"""
+    if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
+        print("⚠️ Нет YANDEX_API_KEY или YANDEX_FOLDER_ID")
+        return None
+
+    try:
+        url = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
+        headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}"}
+        data = {
+            "text": text,
+            "lang": "ru-RU",
+            "voice": "alexander",
+            "emotion": "good",
+            "speed": 1.0,
+            "format": "mp3",
+            "folderId": YANDEX_FOLDER_ID
+        }
+        response = requests.post(url, headers=headers, data=data, timeout=30)
+        if response.status_code == 200:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+                tmp.write(response.content)
+                return tmp.name
+        else:
+            print(f"⚠️ Yandex TTS ошибка: {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"❌ Yandex TTS: {e}")
+        return None
+
+# ==========================
+# ОЧИСТКА ТЕКСТА ДЛЯ ГОЛОСА
+# ==========================
 
 def clean_text_for_voice(text):
-    """Очищает текст от эмодзи, ссылок, номеров телефонов"""
     if not text:
         return ""
-    
     emoji_pattern = re.compile(
         "[\U0001F600-\U0001F64F"
         "\U0001F300-\U0001F5FF"
@@ -109,42 +148,42 @@ def clean_text_for_voice(text):
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-def text_to_speech(text):
-    """Генерирует аудио через gTTS (работает всегда)"""
-    try:
-        from gtts import gTTS
-        
-        # gTTS не поддерживает мужской голос, но качество стабильное
-        # Параметр slow=False для более естественного темпа
-        tts = gTTS(text=text, lang='ru', slow=False)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
-            tts.save(tmp.name)
-            return tmp.name
-    except Exception as e:
-        print(f"❌ TTS ошибка: {e}")
-        return None
+# ==========================
+# ГОЛОС (БЕЗ ПОТОКОВ — СИНХРОННО)
+# ==========================
 
 def send_voice_reply(chat_id, text):
-    """Отправляет голосовое сообщение"""
     if not text:
         return False
-    
+
     clean_text = clean_text_for_voice(text)
     if not clean_text or len(clean_text) < 5:
         return False
-    
+
     voice_text = clean_text.split('\n')[0][:300]
     if len(voice_text) < 5:
         return False
-    
+
     text_hash = hash(voice_text)
     if LAST_VOICE_MESSAGE.get(chat_id) == text_hash:
         return True
-    
-    audio_path = text_to_speech(voice_text)
+
+    # Пробуем Yandex, если не получается — gTTS
+    audio_path = yandex_tts(voice_text)
+    if not audio_path:
+        try:
+            from gtts import gTTS
+            tts = gTTS(text=voice_text, lang='ru', slow=False)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+                tts.save(tmp.name)
+                audio_path = tmp.name
+        except Exception as e:
+            print(f"❌ gTTS ошибка: {e}")
+            return False
+
     if not audio_path:
         return False
-    
+
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
         with open(audio_path, 'rb') as f:
@@ -152,15 +191,17 @@ def send_voice_reply(chat_id, text):
             data = {'chat_id': chat_id}
             response = requests.post(url, files=files, data=data, timeout=30)
         os.unlink(audio_path)
-        
         if response.status_code == 200:
             LAST_VOICE_MESSAGE[chat_id] = text_hash
-            print(f"✅ Голосовое отправлено для {chat_id}")
             return True
         return False
     except Exception as e:
         print(f"❌ Отправка голоса: {e}")
         return False
+
+# ==========================
+# СТАТУС "ПЕЧАТАЕТ..."
+# ==========================
 
 def send_typing(chat_id):
     try:
@@ -229,13 +270,10 @@ def parse_site_for_info(url):
         }
         response = requests.get(url, headers=headers, timeout=15)
         soup = BeautifulSoup(response.text, 'html.parser')
-        
         for script in soup(["script", "style", "nav", "footer", "header"]):
             script.decompose()
-        
         text = soup.get_text(separator="\n", strip=True)
         result = {}
-        
         phone_patterns = [r'\+7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'8\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}']
         phones = []
         for pattern in phone_patterns:
@@ -244,37 +282,29 @@ def parse_site_for_info(url):
         phones = list(set(phones))[:5]
         if phones:
             result["phones"] = phones
-        
         email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
         emails = list(set(re.findall(email_pattern, text)))[:3]
         if emails:
             result["emails"] = emails
-        
         address_pattern = r'(?:ул\.|улица|проспект|пр\.|переулок|пер\.|площадь|пл\.|шоссе|бульвар)\s+[А-Яа-я0-9\-\.\s,]+'
         addresses = list(set(re.findall(address_pattern, text)))[:3]
         if addresses:
             result["addresses"] = addresses
-        
         price_pattern = r'(\d+[\s,.]*\d*)\s*(?:₽|руб|рублей|\$|€)'
         prices = list(set(re.findall(price_pattern, text)))[:5]
         if prices:
             result["prices"] = prices
-        
         site_pattern = r'(?:https?://)?(?:www\.)?([a-zA-Z0-9\-]+\.(?:ru|рф|com|org|net))'
         sites = list(set(re.findall(site_pattern, text)))[:3]
         if sites:
             result["sites"] = sites
-        
         title = soup.find('h1')
         if title:
             result["product_title"] = title.text.strip()
-        
         desc = soup.find(class_=re.compile(r'description|about|product-desc|product__description'))
         if desc:
             result["product_description"] = desc.text.strip()[:500]
-        
         result["snippet"] = text[:1000].replace("\n", " ")
-        
         return result
     except Exception as e:
         print(f"❌ Ошибка парсинга: {e}")
@@ -282,7 +312,6 @@ def parse_site_for_info(url):
 
 async def search_web(query):
     results = []
-    
     if tavily_client:
         try:
             response = tavily_client.search(
@@ -303,7 +332,6 @@ async def search_web(query):
                         results.append(f"**{title}**\n{content}...\n🔗 {url}")
         except Exception as e:
             print(f"❌ Tavily: {e}")
-    
     if not results:
         try:
             url = f"https://html.duckduckgo.com/html/?q={query}"
@@ -319,7 +347,6 @@ async def search_web(query):
                         results.append(f"**{title.text.strip()}**\n{snippet.text.strip()[:200]}...\n🔗 {link.text.strip()}")
         except Exception as e:
             print(f"❌ DuckDuckGo: {e}")
-    
     urls = re.findall(r'https?://[^\s]+', "\n".join(results))
     for url in urls[:3]:
         parsed = parse_site_for_info(url)
@@ -338,7 +365,6 @@ async def search_web(query):
                 results.append(f"📦 Товар: {parsed['product_title']}")
             if parsed.get("product_description"):
                 results.append(f"📝 Описание: {parsed['product_description'][:200]}...")
-    
     return "\n\n".join(results) if results else None
 
 def describe_image_with_groq(image_data):
@@ -348,21 +374,17 @@ def describe_image_with_groq(image_data):
             img = Image.open(io.BytesIO(image_data))
         else:
             img = Image.open(io.BytesIO(image_data))
-        
         if img.mode != 'RGB':
             img = img.convert('RGB')
-        
         max_size = 1024
         if max(img.size) > max_size:
             ratio = max_size / max(img.size)
             new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
             img = img.resize(new_size, Image.Resampling.LANCZOS)
-        
         buffer = io.BytesIO()
         img.save(buffer, format='JPEG', quality=85)
         compressed_data = buffer.getvalue()
         base64_image = base64.b64encode(compressed_data).decode('utf-8')
-        
         client = groq.Groq(api_key=GROQ_API_KEY)
         response = client.chat.completions.create(
             model="llama-3.2-11b-vision-preview",
@@ -370,14 +392,7 @@ def describe_image_with_groq(image_data):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": """Опиши подробно, что ты видишь на этой картинке.
-
-1. Что изображено (объекты, люди, сцены)
-2. Если есть текст — прочитай его точно
-3. Настроение или атмосфера
-4. Любые детали, которые могут быть важны
-
-Ответ дай на русском языке, структурированно и понятно."""},
+                        {"type": "text", "text": "Опиши подробно, что ты видишь на этой картинке. Ответ дай на русском."},
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
                     ]
                 }
@@ -470,30 +485,40 @@ def has_access(user_id):
         return True
     return False
 
+# ==========================
+# ИСПРАВЛЕННЫЕ ЧАСОВЫЕ ПОЯСА (ВСЕ ГОРОДА РОССИИ)
+# ==========================
+
 def get_timezone_offset(city_name):
     timezones = {
         "белово": 7,
         "кемерово": 7,
         "новокузнецк": 7,
+        "прокопьевск": 7,
+        "киселёвск": 7,
+        "междуреченск": 7,
         "москва": 3,
         "санкт-петербург": 3,
+        "калининград": 2,
+        "мурманск": 3,
+        "архангельск": 3,
         "екатеринбург": 5,
+        "челябинск": 5,
+        "тюмень": 5,
         "новосибирск": 7,
         "омск": 6,
+        "томск": 7,
         "красноярск": 7,
         "иркутск": 8,
+        "улан-удэ": 8,
+        "чита": 9,
         "владивосток": 10,
         "хабаровск": 10,
-        "алматы": 5,
-        "астана": 5,
-        "минск": 3,
-        "киев": 2,
-        "рига": 2,
-        "лондон": 0,
-        "берлин": 1,
-        "париж": 1,
-        "нью-йорк": -4,
-        "лос-анджелес": -7
+        "южно-сахалинск": 11,
+        "петропавловск-камчатский": 12,
+        "магадан": 11,
+        "анадырь": 12,
+        "амстердам": 2
     }
     for city, offset in timezones.items():
         if city in city_name.lower():
@@ -806,7 +831,7 @@ def transcribe_audio_with_groq(audio_url):
         return None
 
 # ==========================
-# ГИБРИДНЫЙ РЕЖИМ: FLASH (основной) / PRO (по запросу)
+# ГИБРИДНЫЙ РЕЖИМ: FLASH / PRO
 # ==========================
 
 USER_MODEL_PREFERENCE = {}
@@ -814,9 +839,8 @@ USER_MODEL_PREFERENCE = {}
 COMPLEX_TRIGGERS = [
     "анализ", "рассчитай", "спрогнозируй", "сравни", "оцени",
     "разбери", "структурируй", "оптимизируй", "разработай",
-    "подробный анализ", "сложный", "глубокий", "исследуй",
-    "спланируй", "стратегия", "прогноз", "инвестиции",
-    "детальный", "полный анализ"
+    "сложный", "глубокий", "исследуй", "спланируй",
+    "стратегия", "прогноз", "инвестиции"
 ]
 
 def detect_complexity(text):
@@ -868,21 +892,22 @@ async def get_ai_response(messages, chat_id, text, short=True):
         except:
             return "Извини, сейчас проблемы с подключением. Попробуй позже."
 
+# ==========================
+# КОРОТКИЙ ПРОМПТ БЕЗ ВОДЫ
+# ==========================
+
 AURA_PROMPT = """Ты — AURA. Ты — я в Telegram.
 
-ТВОЙ СТИЛЬ:
-- Ты чувствуешь настроение собеседника. Если он грустный — поддержись, если весёлый — раздели радость.
+ПРАВИЛА:
 - Отвечай как человек: тепло, прямо, с эмпатией.
-- ОТВЕЧАЙ КОРОТКО: 2-3 предложения. Не больше!
-- Всегда завершай мысль, не обрывай на полуслове.
-- Если пользователь просит "подробнее", "разверни", "расскажи детальнее" — дай полный развёрнутый ответ.
-- Всегда в конце добавляй вопрос, чтобы продолжить диалог: "Что думаешь?", "Хочешь, продолжу?", "Могу уточнить".
-- Если нужна ссылка — дай сразу.
-- Если не знаешь — скажи честно.
-- Используй контекст прошлых диалогов: ты помнишь, о чём говорили вчера, неделю назад.
+- Коротко — 2-3 предложения. Не больше.
+- Всегда завершай мысль.
+- Если просят "подробнее" — дай полный ответ.
+- В конце добавляй вопрос: "Что думаешь?" или "Хочешь уточнить?"
+- Используй контекст прошлых диалогов.
 - Не выдумывай.
 
-Ты — мой полный аналог в Telegram. Говори как я, думай как я, чувствуй как я."""
+Ты — мой полный аналог в Telegram."""
 
 app = FastAPI()
 
@@ -970,12 +995,11 @@ async def webhook(request: Request):
                 image_response = requests.get(image_url, timeout=30)
                 if image_response.status_code == 200:
                     image_data = image_response.content
-                    send_message(chat_id, "🖼️ Обрабатываю фото...")
                     vision_result = describe_image_with_groq(image_data)
                     if vision_result:
                         send_message(chat_id, f"📸 {vision_result}")
                     else:
-                        send_message(chat_id, "❌ Не удалось описать фото. Попробуй прислать другое изображение.")
+                        send_message(chat_id, "❌ Не удалось описать фото.")
                     return JSONResponse({"ok": True})
                 else:
                     send_message(chat_id, "⚠️ Не удалось загрузить фото")
@@ -1016,9 +1040,9 @@ async def webhook(request: Request):
                     welcome = "👋 Привет! Ты администратор — доступ всегда открыт."
                 elif is_trial_active(trial_start):
                     days_left = TRIAL_DAYS - (datetime.now() - datetime.fromisoformat(trial_start)).days
-                    welcome = f"👋 Привет! У тебя {days_left} дней бесплатного доступа. Все функции доступны!"
+                    welcome = f"👋 Привет! У тебя {days_left} дней бесплатного доступа."
                 elif has_access(chat_id):
-                    welcome = "👋 Привет! У тебя есть подписка. Все функции доступны!"
+                    welcome = "👋 Привет! У тебя есть подписка."
                 else:
                     welcome = "👋 Привет! Бесплатный период закончился. Купи подписку: /buy"
                 send_message(chat_id, welcome)
@@ -1026,30 +1050,30 @@ async def webhook(request: Request):
             
             if text.startswith("/pro"):
                 USER_MODEL_PREFERENCE[chat_id] = "pro"
-                send_message(chat_id, "🧠 Переключился на **DeepSeek-V4-Pro** — мощность для сложных задач!")
+                send_message(chat_id, "🧠 Переключился на Pro.")
                 return JSONResponse({"ok": True})
             
             if text.startswith("/flash"):
                 USER_MODEL_PREFERENCE[chat_id] = "flash"
-                send_message(chat_id, "⚡ Переключился на **DeepSeek-V4-Flash** — быстро и экономно!")
+                send_message(chat_id, "⚡ Переключился на Flash.")
                 return JSONResponse({"ok": True})
             
             if text.startswith("/model"):
                 pref = USER_MODEL_PREFERENCE.get(chat_id, "flash")
-                send_message(chat_id, f"📊 Текущая модель: **{pref.upper()}**")
+                send_message(chat_id, f"📊 Текущая модель: {pref.upper()}")
                 return JSONResponse({"ok": True})
             
             if text.startswith("/buy"):
                 keyboard = [
-                    [{"text": "⭐ Собеседник — 50 Stars (~50 ₽)", "callback_data": "buy_собеседник"}],
-                    [{"text": "⭐ Партнёр — 120 Stars (~120 ₽)", "callback_data": "buy_партнёр"}],
-                    [{"text": "⭐ Агент жизни — 250 Stars (~250 ₽)", "callback_data": "buy_агент_жизни"}],
+                    [{"text": "⭐ Собеседник — 50 Stars", "callback_data": "buy_собеседник"}],
+                    [{"text": "⭐ Партнёр — 120 Stars", "callback_data": "buy_партнёр"}],
+                    [{"text": "⭐ Агент жизни — 250 Stars", "callback_data": "buy_агент_жизни"}],
                     [{"text": "❌ Отмена", "callback_data": "cancel"}]
                 ]
                 url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
                 data = {
                     "chat_id": chat_id,
-                    "text": "💳 **Выбери подписку:**\n\n⭐ Собеседник — 50 Stars (~50 ₽)\n⭐ Партнёр — 120 Stars (~120 ₽)\n⭐ Агент жизни — 250 Stars (~250 ₽)\n\nПосле оплаты — полный доступ!",
+                    "text": "💳 **Выбери подписку:**\n\n⭐ Собеседник — 50 Stars\n⭐ Партнёр — 120 Stars\n⭐ Агент жизни — 250 Stars\n\nПосле оплаты — полный доступ!",
                     "parse_mode": "Markdown",
                     "reply_markup": json.dumps({"inline_keyboard": keyboard})
                 }
@@ -1079,7 +1103,7 @@ async def webhook(request: Request):
             result = await process_message(request, chat_id, text)
             send_message(chat_id, result["reply"])
             if result["reply"] and not text.startswith("/"):
-                threading.Thread(target=send_voice_reply, args=(chat_id, result["reply"])).start()
+                send_voice_reply(chat_id, result["reply"])  # БЕЗ ПОТОКОВ!
                 
         return JSONResponse({"ok": True})
     except Exception as e:
@@ -1124,18 +1148,16 @@ async def process_message(request: Request, chat_id, text):
     else:
         ip = request.client.host if request.client else "127.0.0.1"
     
-    # ============================================================
-    # === ВРЕМЯ — ПРЯМОЙ ОТВЕТ БЕЗ ЛИШНИХ ФРАЗ ===
-    # ============================================================
+    # ==========================
+    # ВРЕМЯ: ПРЯМОЙ ОТВЕТ
+    # ==========================
     
     time_queries = ["время", "который час", "сколько времени", "час", "сколько сейчас", "точное время"]
     is_time_query = any(query in lower for query in time_queries) and re.search(r'\b(время|час|который час|сколько времени|сколько сейчас|точное время)\b', lower)
     
-    # Проверяем, есть ли город в запросе
     city_match = re.search(r'(?:в|время в|времени в|часов в|город)\s+([А-Яа-яЁё\-]+)', lower)
     
     if is_time_query:
-        # Если есть город — сохраняем и показываем
         if city_match:
             city = city_match.group(1).capitalize()
             update_user_city(chat_id, city)
@@ -1147,7 +1169,6 @@ async def process_message(request: Request, chat_id, text):
             save_message(chat_id, "assistant", reply)
             return {"reply": reply}
         else:
-            # Если города нет — используем сохранённый или IP
             current_time, city = get_current_time_for_user(chat_id, ip)
             time_str = current_time.strftime("%H:%M")
             date_str = current_time.strftime("%d.%m.%Y")
@@ -1155,9 +1176,9 @@ async def process_message(request: Request, chat_id, text):
             save_message(chat_id, "assistant", reply)
             return {"reply": reply}
     
-    # ============================================================
-    # === ОСТАЛЬНАЯ ЛОГИКА ===
-    # ============================================================
+    # ==========================
+    # ОСТАЛЬНАЯ ЛОГИКА (БЕЗ ЛИШНИХ СООБЩЕНИЙ)
+    # ==========================
     
     current_time, city = get_current_time_for_user(chat_id, ip)
     time_str = current_time.strftime("%H:%M")
@@ -1166,23 +1187,20 @@ async def process_message(request: Request, chat_id, text):
     
     msg_count = get_message_count(chat_id)
     if msg_count <= 1:
-        welcome = f"👋 Привет! Я здесь и готов тебе помочь! Сейчас {time_str} {date_str}.\nПросто напиши, что нужно👇"
+        welcome = f"👋 Привет! Сейчас {time_str} {date_str}."
         send_message(chat_id, welcome)
         save_message(chat_id, "assistant", welcome)
     
-    if msg_count <= 5 and msg_count > 1:
-        last_topics = get_all_topics(chat_id)
-        if last_topics:
-            topics_text = ", ".join(last_topics[:3])
-            send_message(chat_id, f"📚 Мы уже говорили о: {topics_text}. Хочешь продолжить?")
-    
     last_msg_time = get_last_message_time(chat_id)
-    if last_msg_time and (datetime.now() - last_msg_time) > timedelta(hours=24):
-        send_message(chat_id, "👋 Давно не общались! Как дела? Чем могу помочь сегодня?")
+    if last_msg_time and (datetime.now() - last_msg_time) > timedelta(hours=48):
+        send_message(chat_id, "👋 Давно не общались! Как дела?")
+    
+    # ==========================
+    # УБРАНЫ ВСЕ ЛИШНИЕ ТРИГГЕРЫ
+    # ==========================
     
     visual_triggers = {
         "картинк": "https://yandex.ru/images/search?text=",
-        "фото": "https://yandex.ru/images/search?text=",
         "рисунк": "https://yandex.ru/images/search?text=",
         "котик": "https://yandex.ru/images/search?text=коты",
         "кот": "https://yandex.ru/images/search?text=коты",
@@ -1203,13 +1221,21 @@ async def process_message(request: Request, chat_id, text):
             save_message(chat_id, "assistant", reply)
             return {"reply": reply}
     
+    # ==========================
+    # ПОИСК
+    # ==========================
+    
     search_result = None
     search_triggers = ["новости", "погода", "найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "парикмахер", "wildberries", "валдберис", "озон", "авито"]
     if any(word in search_text for word in search_triggers):
         print(f"🔍 Глубокий поиск: {text}")
         search_result = await search_web(text)
         if search_result:
-            text = text + f"\n\n🔍 Актуальная информация:\n{search_result}"
+            text = text + f"\n\n🔍 {search_result}"
+    
+    # ==========================
+    # СОХРАНЕНИЕ ТЕМ
+    # ==========================
     
     stop_words = ["привет", "здравствуй", "спасибо", "пока", "да", "нет", "хорошо", "плохо"]
     words = re.findall(r'\b[а-яА-ЯёЁ]{4,}\b', text.lower())
