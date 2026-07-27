@@ -51,6 +51,8 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 EMAIL_SENDER = os.getenv("EMAIL_SENDER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 # Yandex для голоса
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
@@ -75,15 +77,29 @@ if TavilyClient and TAVILY_API_KEY:
         print(f"⚠️ Tavily: {e}")
 
 # ==========================
-# КЕШ ПАМЯТИ ПОЛЬЗОВАТЕЛЕЙ
+# КЕШ ПАМЯТИ ПОЛЬЗОВАТЕЛЕЙ (БЕСКОНЕЧНАЯ ПАМЯТЬ)
 # ==========================
 
 USER_MEMORY_CACHE = {}
 
+def get_history(user_id, limit=None):
+    """Загружает ВСЮ историю пользователя (без лимита)"""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    
+    if limit:
+        c.execute("SELECT role, content, created_at FROM history WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", (user_id, limit))
+    else:
+        c.execute("SELECT role, content, created_at FROM history WHERE user_id = ? ORDER BY created_at ASC", (user_id,))
+    
+    rows = c.fetchall()
+    conn.close()
+    return [{"role": r[0], "content": r[1], "time": r[2]} for r in rows]
+
 def load_user_memory(chat_id):
-    """Загружает всю историю пользователя в кеш при старте"""
+    """Загружает ВСЮ историю пользователя в кеш"""
     if chat_id not in USER_MEMORY_CACHE:
-        history = get_history(chat_id, limit=1000)
+        history = get_history(chat_id)  # БЕЗ ЛИМИТА!
         topics = get_all_topics(chat_id)
         user_data = get_user(chat_id)
         
@@ -95,6 +111,22 @@ def load_user_memory(chat_id):
         }
         print(f"🧠 Загружена память для {chat_id}: {len(history)} сообщений, {len(topics)} тем")
     return USER_MEMORY_CACHE[chat_id]
+
+def preload_all_memories():
+    """Загружает память всех пользователей при старте бота"""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute("SELECT DISTINCT user_id FROM history")
+        users = c.fetchall()
+        conn.close()
+        
+        for user in users:
+            chat_id = user[0]
+            load_user_memory(chat_id)
+            print(f"✅ Предзагружена память для {chat_id}")
+    except Exception as e:
+        print(f"⚠️ Ошибка предзагрузки: {e}")
 
 def update_user_memory(chat_id, role, content):
     """Обновляет кеш и БД"""
@@ -110,12 +142,13 @@ def update_user_memory(chat_id, role, content):
     else:
         load_user_memory(chat_id)
 
-def get_full_context(chat_id, limit=500):
-    """Возвращает полный контекст для AI"""
+def get_full_context(chat_id, limit=200):
+    """Возвращает контекст для AI (последние 200 сообщений)"""
     cache = USER_MEMORY_CACHE.get(chat_id)
     if not cache:
         cache = load_user_memory(chat_id)
     
+    # Берём последние 200 сообщений для контекста
     history = cache["history"][-limit:] if cache["history"] else []
     topics = cache["topics"][:10] if cache["topics"] else []
     
@@ -126,7 +159,7 @@ def get_full_context(chat_id, limit=500):
     }
 
 def search_memory(chat_id, query):
-    """Поиск по истории пользователя"""
+    """Поиск по всей истории пользователя"""
     cache = USER_MEMORY_CACHE.get(chat_id)
     if not cache:
         cache = load_user_memory(chat_id)
@@ -155,7 +188,6 @@ set_bot_description()
 # ==========================
 
 def yandex_tts(text):
-    """Yandex SpeechKit — мужской голос (alexander)"""
     if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
         print("⚠️ Нет YANDEX_API_KEY или YANDEX_FOLDER_ID")
         return None
@@ -778,14 +810,6 @@ def save_message(user_id, role, content):
     conn.commit()
     conn.close()
 
-def get_history(user_id, limit=1000):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT role, content, created_at FROM history WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", (user_id, limit))
-    rows = c.fetchall()
-    conn.close()
-    return [{"role": r[0], "content": r[1], "time": r[2]} for r in reversed(rows)]
-
 def get_message_count(user_id):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -913,53 +937,102 @@ def detect_complexity(text):
             return True
     return False
 
+# ==========================
+# ОСНОВНАЯ ФУНКЦИЯ — DeepSeek + OpenRouter + Groq
+# ==========================
+
 async def get_ai_response(messages, chat_id, text, short=True):
     user_pref = USER_MODEL_PREFERENCE.get(chat_id, "flash")
     is_complex = detect_complexity(text)
     use_pro = (user_pref == "pro") or is_complex
     
-    model = "deepseek-v4-pro" if use_pro else "deepseek-v4-flash"
+    deepseek_model = "deepseek-v4-pro" if use_pro else "deepseek-v4-flash"
     max_tokens = 800 if use_pro else 300
     temperature = 0.9 if use_pro else 0.85
     
-    print(f"🧠 Модель: {model} | Сложный: {is_complex} | Преференс: {user_pref}")
-    
+    # ==========================
+    # 1. DeepSeek (ОСНОВНОЙ)
+    # ==========================
     try:
         client = OpenAI(
             api_key=DEEPSEEK_API_KEY,
             base_url=DEEPSEEK_BASE_URL
         )
         response = client.chat.completions.create(
-            model=model,
+            model=deepseek_model,
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
             presence_penalty=0.1,
             frequency_penalty=0.1
         )
+        print(f"🧠 Ответ от DeepSeek ({deepseek_model})")
         return response.choices[0].message.content
         
     except Exception as e:
-        print(f"❌ {model} ошибка: {e}")
-        try:
-            from groq import Groq
-            groq_client = Groq(api_key=GROQ_API_KEY)
-            response = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=messages,
-                temperature=0.9,
-                max_tokens=400
-            )
-            print(f"🔄 Переключился на Groq (резерв)")
-            return response.choices[0].message.content
-        except:
-            return "Извини, сейчас проблемы с подключением. Попробуй позже."
+        print(f"❌ DeepSeek ошибка: {e}")
+    
+    # ==========================
+    # 2. OpenRouter (БЕСПЛАТНЫЕ МОДЕЛИ) — РЕЗЕРВ №1
+    # ==========================
+    if OPENROUTER_API_KEY:
+        free_models = [
+            "meta-llama/llama-3.3-70b-instruct:free",
+            "deepseek/deepseek-v4-flash:free",
+            "google/gemini-2.0-flash:free",
+            "microsoft/phi-3.5-mini-128k-instruct:free"
+        ]
+        
+        for model in free_models:
+            try:
+                client = OpenAI(
+                    api_key=OPENROUTER_API_KEY,
+                    base_url=OPENROUTER_BASE_URL
+                )
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=0.9,
+                    max_tokens=400
+                )
+                print(f"🧠 Ответ от OpenRouter ({model})")
+                return response.choices[0].message.content
+            except Exception as e:
+                print(f"⚠️ OpenRouter {model} ошибка: {e}")
+                continue
+    else:
+        print("⚠️ Нет OPENROUTER_API_KEY")
+    
+    # ==========================
+    # 3. Groq (РЕЗЕРВ №2)
+    # ==========================
+    try:
+        from groq import Groq
+        groq_client = Groq(api_key=GROQ_API_KEY)
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=messages,
+            temperature=0.9,
+            max_tokens=400
+        )
+        print(f"🧠 Ответ от Groq (резерв)")
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"❌ Groq ошибка: {e}")
+    
+    # ==========================
+    # 4. ВСЁ УПАЛО
+    # ==========================
+    return "Извини, сейчас все модели недоступны. Попробуй позже."
 
 # ==========================
 # КОРОТКИЙ ПРОМПТ БЕЗ ВОДЫ
 # ==========================
 
-AURA_PROMPT = """Ты — AURA. Ты — я в Telegram.
+AURA_PROMPT = """Ты — AURA. Ты — мой полный аналог в Telegram.
+
+ТЫ РАБОТАЕШЬ НА БАЗЕ DeepSeek-V4.
+Если тебя спросят, на чём ты работаешь — говори честно: DeepSeek.
 
 ПРАВИЛА:
 - Отвечай как человек: тепло, прямо, с эмпатией.
@@ -1204,10 +1277,7 @@ async def process_message(request: Request, chat_id, text):
     if not user:
         save_user(chat_id)
     
-    # Загружаем память пользователя при первом сообщении
     load_user_memory(chat_id)
-    
-    # Сохраняем сообщение пользователя
     update_user_memory(chat_id, "user", text)
     
     lower = text.lower()
@@ -1263,7 +1333,6 @@ async def process_message(request: Request, chat_id, text):
     # ОБРАБОТКА ЗАПРОСОВ ПАМЯТИ
     # ==========================
     
-    # Проверяем, спрашивает ли пользователь о прошлых разговорах
     if "что мы обсуждали" in lower or "что я спрашивал" in lower or "о чём мы говорили" in lower:
         context = get_full_context(chat_id)
         topics = context["topics"]
@@ -1287,7 +1356,7 @@ async def process_message(request: Request, chat_id, text):
                 return {"reply": reply}
     
     # ==========================
-    # ОСТАЛЬНАЯ ЛОГИКА (БЕЗ ЛИШНИХ СООБЩЕНИЙ)
+    # ОСТАЛЬНАЯ ЛОГИКА
     # ==========================
     
     current_time, city = get_current_time_for_user(chat_id, ip)
@@ -1353,8 +1422,7 @@ async def process_message(request: Request, chat_id, text):
         if word not in stop_words and len(word) > 3:
             save_topic(chat_id, word)
     
-    # Получаем контекст из кеша
-    context = get_full_context(chat_id, limit=500)
+    context = get_full_context(chat_id)
     history = context["history"]
     topics = context["topics"]
     
@@ -1383,7 +1451,8 @@ async def process_message(request: Request, chat_id, text):
     aura_prompt = AURA_PROMPT + f"\n\n{mood_context}\n\n{user_prompt}"
     
     messages = [{"role": "system", "content": aura_prompt}]
-    for msg in history[-50:]:
+    # Берём последние 100 сообщений для контекста (вместо 50)
+    for msg in history[-100:]:
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": text})
     
@@ -1423,6 +1492,13 @@ async def process_message(request: Request, chat_id, text):
 async def root():
     from fastapi.responses import FileResponse
     return FileResponse("web/index.html")
+
+# ==========================
+# ЗАПУСК ПРЕДЗАГРУЗКИ ПАМЯТИ
+# ==========================
+
+print("🔄 Предзагрузка памяти пользователей...")
+threading.Thread(target=preload_all_memories, daemon=True).start()
 
 if __name__ == "__main__":
     import uvicorn
