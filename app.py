@@ -5,11 +5,6 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from datetime import datetime, timedelta
-import sqlite3
-import httpx
-from openai import OpenAI
-import json
-import re
 import os
 import requests
 import tempfile
@@ -17,30 +12,44 @@ import shutil
 import threading
 import time
 import smtplib
+import json
+import re
+import base64
+import io as io_lib
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
 from email.mime.text import MIMEText
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
-import base64
-import io
 from PIL import Image
-import urllib.parse
+from openai import OpenAI
+import httpx
 
 load_dotenv()
 
-try:
-    from tavily import TavilyClient
-except ImportError:
-    print("⚠️ Tavily не установлен")
-    TavilyClient = None
+# ==========================
+# SUPABASE (ВЕЧНАЯ ПАМЯТЬ)
+# ==========================
 
-DB_NAME = "aura.db"
-BACKUP_NAME = "aura_backup.db"
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    print("⚠️ НЕТ SUPABASE_URL или SUPABASE_KEY! Бот не сможет работать с памятью!")
+
+from supabase import create_client, Client
+
+supabase: Client = None
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        print("✅ Supabase подключён!")
+    except Exception as e:
+        print(f"❌ Ошибка подключения Supabase: {e}")
 
 # ==========================
-# ВСЕ КЛЮЧИ — ТОЛЬКО ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
+# ВСЕ КЛЮЧИ
 # ==========================
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
@@ -51,14 +60,10 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 EMAIL_SENDER = os.getenv("EMAIL_SENDER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
-
-# Yandex для голоса
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
 ADMIN_USERS = ["5818548555"]
-
-LAST_VOICE_MESSAGE = {}
 
 print("🔍 Проверка ключей...")
 if not DEEPSEEK_API_KEY:
@@ -66,13 +71,18 @@ if not DEEPSEEK_API_KEY:
 if not TELEGRAM_TOKEN:
     print("❌ НЕТ КЛЮЧА TELEGRAM!")
 
+# ==========================
+# TAVILY
+# ==========================
+
 tavily_client = None
-if TavilyClient and TAVILY_API_KEY:
-    try:
+try:
+    from tavily import TavilyClient
+    if TAVILY_API_KEY:
         tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
         print("✅ Tavily инициализирован")
-    except Exception as e:
-        print(f"⚠️ Tavily: {e}")
+except ImportError:
+    print("⚠️ Tavily не установлен")
 
 # ==========================
 # КЕШ ПАМЯТИ ПОЛЬЗОВАТЕЛЕЙ
@@ -81,30 +91,68 @@ if TavilyClient and TAVILY_API_KEY:
 USER_MEMORY_CACHE = {}
 
 def load_user_memory(chat_id):
-    """Загружает всю историю пользователя в кеш при старте"""
+    """Загружает всю историю пользователя в кеш из Supabase"""
+    if not supabase:
+        return {"history": [], "topics": [], "user": None}
+    
     if chat_id not in USER_MEMORY_CACHE:
-        history = get_history(chat_id, limit=1000)
-        topics = get_all_topics(chat_id)
-        user_data = get_user(chat_id)
-        
-        USER_MEMORY_CACHE[chat_id] = {
-            "history": history,
-            "topics": topics,
-            "user": user_data,
-            "last_updated": datetime.now()
-        }
-        print(f"🧠 Загружена память для {chat_id}: {len(history)} сообщений, {len(topics)} тем")
+        try:
+            # Загружаем историю
+            history_response = supabase.table("history")\
+                .select("*")\
+                .eq("user_id", chat_id)\
+                .order("created_at", desc=False)\
+                .limit(1000)\
+                .execute()
+            history = history_response.data if history_response.data else []
+            
+            # Загружаем темы
+            topics_response = supabase.table("topics")\
+                .select("topic")\
+                .eq("user_id", chat_id)\
+                .execute()
+            topics = [t["topic"] for t in topics_response.data] if topics_response.data else []
+            
+            # Загружаем пользователя
+            user_response = supabase.table("users")\
+                .select("*")\
+                .eq("user_id", chat_id)\
+                .execute()
+            user = user_response.data[0] if user_response.data else None
+            
+            USER_MEMORY_CACHE[chat_id] = {
+                "history": history,
+                "topics": topics,
+                "user": user,
+                "last_updated": datetime.now()
+            }
+            print(f"🧠 Загружена память для {chat_id}: {len(history)} сообщений, {len(topics)} тем")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки памяти: {e}")
+            USER_MEMORY_CACHE[chat_id] = {"history": [], "topics": [], "user": None}
+    
     return USER_MEMORY_CACHE[chat_id]
 
 def update_user_memory(chat_id, role, content):
-    """Обновляет кеш и БД"""
-    save_message(chat_id, role, content)
+    """Обновляет кеш и Supabase"""
+    try:
+        if supabase:
+            # Сохраняем в Supabase
+            supabase.table("history").insert({
+                "user_id": chat_id,
+                "role": role,
+                "content": content,
+                "created_at": datetime.now().isoformat()
+            }).execute()
+    except Exception as e:
+        print(f"❌ Ошибка сохранения в Supabase: {e}")
     
+    # Обновляем кеш
     if chat_id in USER_MEMORY_CACHE:
         USER_MEMORY_CACHE[chat_id]["history"].append({
-            "role": role, 
+            "role": role,
             "content": content,
-            "time": datetime.now().isoformat()
+            "created_at": datetime.now().isoformat()
         })
         USER_MEMORY_CACHE[chat_id]["last_updated"] = datetime.now()
     else:
@@ -126,17 +174,22 @@ def get_full_context(chat_id, limit=500):
     }
 
 def search_memory(chat_id, query):
-    """Поиск по истории пользователя"""
-    cache = USER_MEMORY_CACHE.get(chat_id)
-    if not cache:
-        cache = load_user_memory(chat_id)
+    """Поиск по истории пользователя в Supabase"""
+    if not supabase:
+        return []
     
-    results = []
-    for msg in cache["history"]:
-        if query.lower() in msg.get("content", "").lower():
-            results.append(msg)
-    
-    return results[-10:]
+    try:
+        response = supabase.table("history")\
+            .select("*")\
+            .eq("user_id", chat_id)\
+            .ilike("content", f"%{query}%")\
+            .order("created_at", desc=True)\
+            .limit(10)\
+            .execute()
+        return response.data if response.data else []
+    except Exception as e:
+        print(f"❌ Ошибка поиска: {e}")
+        return []
 
 def set_bot_description():
     description = """👋Привет! Я — AURA, твой умный помощник! 
@@ -151,15 +204,12 @@ def set_bot_description():
 set_bot_description()
 
 # ==========================
-# YANDEX TTS (МУЖСКОЙ ГОЛОС) - ОСТАВЛЕН ДЛЯ СОВМЕСТИМОСТИ, НО НЕ ИСПОЛЬЗУЕТСЯ
+# YANDEX TTS
 # ==========================
 
 def yandex_tts(text):
-    """Yandex SpeechKit — мужской голос (alexander)"""
     if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
-        print("⚠️ Нет YANDEX_API_KEY или YANDEX_FOLDER_ID")
         return None
-
     try:
         url = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
         headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}"}
@@ -177,16 +227,9 @@ def yandex_tts(text):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
                 tmp.write(response.content)
                 return tmp.name
-        else:
-            print(f"⚠️ Yandex TTS ошибка: {response.status_code}")
-            return None
-    except Exception as e:
-        print(f"❌ Yandex TTS: {e}")
         return None
-
-# ==========================
-# ОЧИСТКА ТЕКСТА ДЛЯ ГОЛОСА
-# ==========================
+    except:
+        return None
 
 def clean_text_for_voice(text):
     if not text:
@@ -212,17 +255,8 @@ def clean_text_for_voice(text):
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-# ==========================
-# ГОЛОС - ОТКЛЮЧЕН
-# ==========================
-
 def send_voice_reply(chat_id, text):
-    """Голосовые ответы полностью отключены"""
     return False
-
-# ==========================
-# СТАТУС "ПЕЧАТАЕТ..."
-# ==========================
 
 def send_typing(chat_id):
     try:
@@ -283,6 +317,10 @@ def analyze_mood(text):
         return "tired"
     return "neutral"
 
+# ==========================
+# ПАРСИНГ И ПОИСК
+# ==========================
+
 def parse_site_for_info(url):
     try:
         headers = {
@@ -295,6 +333,7 @@ def parse_site_for_info(url):
             script.decompose()
         text = soup.get_text(separator="\n", strip=True)
         result = {}
+        
         phone_patterns = [r'\+7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'8\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}']
         phones = []
         for pattern in phone_patterns:
@@ -303,28 +342,35 @@ def parse_site_for_info(url):
         phones = list(set(phones))[:5]
         if phones:
             result["phones"] = phones
+        
         email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
         emails = list(set(re.findall(email_pattern, text)))[:3]
         if emails:
             result["emails"] = emails
+        
         address_pattern = r'(?:ул\.|улица|проспект|пр\.|переулок|пер\.|площадь|пл\.|шоссе|бульвар)\s+[А-Яа-я0-9\-\.\s,]+'
         addresses = list(set(re.findall(address_pattern, text)))[:3]
         if addresses:
             result["addresses"] = addresses
+        
         price_pattern = r'(\d+[\s,.]*\d*)\s*(?:₽|руб|рублей|\$|€)'
         prices = list(set(re.findall(price_pattern, text)))[:5]
         if prices:
             result["prices"] = prices
+        
         site_pattern = r'(?:https?://)?(?:www\.)?([a-zA-Z0-9\-]+\.(?:ru|рф|com|org|net))'
         sites = list(set(re.findall(site_pattern, text)))[:3]
         if sites:
             result["sites"] = sites
+        
         title = soup.find('h1')
         if title:
             result["product_title"] = title.text.strip()
+        
         desc = soup.find(class_=re.compile(r'description|about|product-desc|product__description'))
         if desc:
             result["product_description"] = desc.text.strip()[:500]
+        
         result["snippet"] = text[:1000].replace("\n", " ")
         return result
     except Exception as e:
@@ -353,6 +399,7 @@ async def search_web(query):
                         results.append(f"**{title}**\n{content}...\n🔗 {url}")
         except Exception as e:
             print(f"❌ Tavily: {e}")
+    
     if not results:
         try:
             url = f"https://html.duckduckgo.com/html/?q={query}"
@@ -368,6 +415,7 @@ async def search_web(query):
                         results.append(f"**{title.text.strip()}**\n{snippet.text.strip()[:200]}...\n🔗 {link.text.strip()}")
         except Exception as e:
             print(f"❌ DuckDuckGo: {e}")
+    
     urls = re.findall(r'https?://[^\s]+', "\n".join(results))
     for url in urls[:3]:
         parsed = parse_site_for_info(url)
@@ -386,15 +434,16 @@ async def search_web(query):
                 results.append(f"📦 Товар: {parsed['product_title']}")
             if parsed.get("product_description"):
                 results.append(f"📝 Описание: {parsed['product_description'][:200]}...")
+    
     return "\n\n".join(results) if results else None
 
 def describe_image_with_groq(image_data):
     try:
         import groq
         if isinstance(image_data, bytes):
-            img = Image.open(io.BytesIO(image_data))
+            img = Image.open(io_lib.BytesIO(image_data))
         else:
-            img = Image.open(io.BytesIO(image_data))
+            img = Image.open(io_lib.BytesIO(image_data))
         if img.mode != 'RGB':
             img = img.convert('RGB')
         max_size = 1024
@@ -402,7 +451,7 @@ def describe_image_with_groq(image_data):
             ratio = max_size / max(img.size)
             new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
             img = img.resize(new_size, Image.Resampling.LANCZOS)
-        buffer = io.BytesIO()
+        buffer = io_lib.BytesIO()
         img.save(buffer, format='JPEG', quality=85)
         compressed_data = buffer.getvalue()
         base64_image = base64.b64encode(compressed_data).decode('utf-8')
@@ -454,25 +503,17 @@ def read_file(file_data, file_name):
     except Exception as e:
         return f"⚠️ Ошибка: {e}"
 
-def check_reminders():
-    while True:
-        try:
-            time.sleep(60)
-            now = datetime.now().strftime("%Y-%m-%d %H:%M")
-            conn = sqlite3.connect(DB_NAME)
-            c = conn.cursor()
-            c.execute("SELECT user_id, text, chat_id FROM reminders WHERE remind_time <= ? AND status = 'pending'", (now,))
-            rows = c.fetchall()
-            for user_id, text, chat_id in rows:
-                send_message(chat_id, f"⏰ Напоминание: {text}")
-                c.execute("UPDATE reminders SET status = 'done' WHERE user_id = ? AND text = ?", (user_id, text))
-            conn.commit()
-            conn.close()
-        except:
-            pass
+# ==========================
+# НАПОМИНАНИЯ (ПОКА ОТКЛЮЧЕНЫ)
+# ==========================
 
-reminder_thread = threading.Thread(target=check_reminders, daemon=True)
-reminder_thread.start()
+def check_reminders():
+    """Напоминания временно отключены"""
+    pass
+
+# ==========================
+# МОНЕТИЗАЦИЯ
+# ==========================
 
 TARIFFS = {
     "собеседник": {"name": "Собеседник", "price": 50, "stars": 50},
@@ -483,17 +524,24 @@ TARIFFS = {
 TRIAL_DAYS = 7
 
 def get_user_subscription(user_id):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT subscription, trial_start FROM users WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
-    conn.close()
-    return row if row else ("free", None)
+    if not supabase:
+        return ("free", None)
+    try:
+        response = supabase.table("users")\
+            .select("subscription, trial_start")\
+            .eq("user_id", user_id)\
+            .execute()
+        if response.data:
+            data = response.data[0]
+            return (data.get("subscription", "free"), data.get("trial_start"))
+        return ("free", None)
+    except:
+        return ("free", None)
 
 def is_trial_active(trial_start):
     if not trial_start:
         return False
-    trial_date = datetime.fromisoformat(trial_start)
+    trial_date = datetime.fromisoformat(trial_start.replace("Z", "+00:00"))
     return datetime.now() - trial_date < timedelta(days=TRIAL_DAYS)
 
 def has_access(user_id):
@@ -507,38 +555,20 @@ def has_access(user_id):
     return False
 
 # ==========================
-# ИСПРАВЛЕННЫЕ ЧАСОВЫЕ ПОЯСА (ВСЕ ГОРОДА РОССИИ)
+# ВРЕМЯ
 # ==========================
 
 def get_timezone_offset(city_name):
     timezones = {
-        "белово": 7,
-        "кемерово": 7,
-        "новокузнецк": 7,
-        "прокопьевск": 7,
-        "киселёвск": 7,
-        "междуреченск": 7,
-        "москва": 3,
-        "санкт-петербург": 3,
-        "калининград": 2,
-        "мурманск": 3,
-        "архангельск": 3,
-        "екатеринбург": 5,
-        "челябинск": 5,
-        "тюмень": 5,
-        "новосибирск": 7,
-        "омск": 6,
-        "томск": 7,
-        "красноярск": 7,
-        "иркутск": 8,
-        "улан-удэ": 8,
-        "чита": 9,
-        "владивосток": 10,
-        "хабаровск": 10,
-        "южно-сахалинск": 11,
-        "петропавловск-камчатский": 12,
-        "магадан": 11,
-        "анадырь": 12,
+        "белово": 7, "кемерово": 7, "новокузнецк": 7,
+        "прокопьевск": 7, "киселёвск": 7, "междуреченск": 7,
+        "москва": 3, "санкт-петербург": 3, "калининград": 2,
+        "мурманск": 3, "архангельск": 3, "екатеринбург": 5,
+        "челябинск": 5, "тюмень": 5, "новосибирск": 7,
+        "омск": 6, "томск": 7, "красноярск": 7,
+        "иркутск": 8, "улан-удэ": 8, "чита": 9,
+        "владивосток": 10, "хабаровск": 10, "южно-сахалинск": 11,
+        "петропавловск-камчатский": 12, "магадан": 11, "анадырь": 12,
         "амстердам": 2
     }
     for city, offset in timezones.items():
@@ -564,271 +594,250 @@ def get_current_time_for_user(user_id, ip=None):
     city = None
     offset = 3
     
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT city FROM users WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
-    conn.close()
-    if row and row[0]:
-        city = row[0]
-        offset = get_timezone_offset(city)
-        return datetime.utcnow() + timedelta(hours=offset), city
+    if supabase:
+        try:
+            response = supabase.table("users")\
+                .select("city")\
+                .eq("user_id", user_id)\
+                .execute()
+            if response.data and response.data[0].get("city"):
+                city = response.data[0]["city"]
+                offset = get_timezone_offset(city)
+                return datetime.utcnow() + timedelta(hours=offset), city
+        except:
+            pass
     
     if ip and ip not in ["127.0.0.1", "localhost", "::1"]:
         city_data = get_city_by_ip(ip)
         if city_data and city_data.get("city"):
             city = city_data["city"]
             offset = city_data.get("offset", 3)
-            conn = sqlite3.connect(DB_NAME)
-            c = conn.cursor()
-            c.execute("UPDATE users SET city = ? WHERE user_id = ?", (city, user_id))
-            conn.commit()
-            conn.close()
+            if supabase:
+                try:
+                    supabase.table("users")\
+                        .update({"city": city})\
+                        .eq("user_id", user_id)\
+                        .execute()
+                except:
+                    pass
             return datetime.utcnow() + timedelta(hours=offset), city
     
     return datetime.utcnow() + timedelta(hours=3), "Москва"
 
-def send_backup_email():
-    try:
-        if not os.path.exists(DB_NAME):
-            return False
-        msg = MIMEMultipart()
-        msg['From'] = EMAIL_SENDER
-        msg['To'] = EMAIL_RECEIVER
-        msg['Subject'] = f"💾 Бэкап AURA {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-        body = f"🧠 Бэкап базы данных AURA\n📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
-        msg.attach(MIMEText(body, 'plain', 'utf-8'))
-        with open(DB_NAME, "rb") as attachment:
-            part = MIMEBase('application', 'octet-stream')
-            part.set_payload(attachment.read())
-            encoders.encode_base64(part)
-            part.add_header('Content-Disposition', f'attachment; filename=aura_backup_{datetime.now().strftime("%Y%m%d_%H%M")}.db')
-            msg.attach(part)
-        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
-        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-        server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
-        server.quit()
-        print("✅ Бэкап отправлен на почту")
-        return True
-    except Exception as e:
-        print(f"❌ Ошибка отправки бэкапа: {e}")
-        return False
+# ==========================
+# БЭКАП (ПОКА ОТКЛЮЧЕН)
+# ==========================
 
 def backup_database():
-    try:
-        if os.path.exists(DB_NAME):
-            shutil.copy2(DB_NAME, BACKUP_NAME)
-            return True
-        return False
-    except Exception as e:
-        print(f"❌ Ошибка бэкапа: {e}")
-        return False
+    return True
 
 def restore_database():
-    try:
-        if os.path.exists(BACKUP_NAME):
-            shutil.copy2(BACKUP_NAME, DB_NAME)
-            return True
-        return False
-    except Exception as e:
-        print(f"❌ Ошибка восстановления: {e}")
-        return False
+    return True
 
-def backup_scheduler():
-    hour_counter = 0
-    while True:
-        time.sleep(3600)
-        if backup_database():
-            hour_counter += 1
-            if hour_counter >= 24:
-                send_backup_email()
-                hour_counter = 0
-
-print("🔄 Проверка базы данных...")
-if not os.path.exists(DB_NAME):
-    if restore_database():
-        print("✅ База восстановлена")
-    else:
-        print("📦 Создаю новую базу")
-else:
-    print("✅ База данных найдена")
-    backup_database()
-
-backup_thread = threading.Thread(target=backup_scheduler, daemon=True)
-backup_thread.start()
-print("🔄 Планировщик бэкапа запущен")
-
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT UNIQUE,
-        name TEXT,
-        city TEXT DEFAULT NULL,
-        subscription TEXT DEFAULT 'free',
-        trial_start TEXT DEFAULT NULL,
-        created_at TEXT
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT,
-        role TEXT,
-        content TEXT,
-        created_at TEXT
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS topics (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT,
-        topic TEXT,
-        last_mentioned TEXT
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS reminders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT,
-        text TEXT,
-        remind_time TEXT,
-        chat_id TEXT,
-        status TEXT DEFAULT 'pending'
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS user_memory (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT,
-        key TEXT,
-        value TEXT,
-        created_at TEXT
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS payments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT,
-        subscription TEXT,
-        stars INTEGER,
-        status TEXT DEFAULT 'pending',
-        created_at TEXT
-    )""")
-    conn.commit()
-    conn.close()
-
-init_db()
+# ==========================
+# ФУНКЦИИ ДЛЯ РАБОТЫ С БАЗОЙ (SUPABASE)
+# ==========================
 
 def get_user(user_id):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
-    conn.close()
-    return row
+    if not supabase:
+        return None
+    try:
+        response = supabase.table("users")\
+            .select("*")\
+            .eq("user_id", user_id)\
+            .execute()
+        return response.data[0] if response.data else None
+    except:
+        return None
 
 def save_user(user_id, name=None, city=None):
-    now = datetime.now().isoformat()
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO users (user_id, name, city, trial_start, created_at) VALUES (?, ?, ?, ?, ?)",
-              (user_id, name or "Пользователь", city, now, now))
-    conn.commit()
-    conn.close()
+    if not supabase:
+        return
+    try:
+        now = datetime.now().isoformat()
+        existing = get_user(user_id)
+        if existing:
+            supabase.table("users")\
+                .update({
+                    "name": name or existing.get("name", "Пользователь"),
+                    "city": city or existing.get("city")
+                })\
+                .eq("user_id", user_id)\
+                .execute()
+        else:
+            supabase.table("users").insert({
+                "user_id": user_id,
+                "name": name or "Пользователь",
+                "city": city,
+                "trial_start": now,
+                "created_at": now
+            }).execute()
+    except Exception as e:
+        print(f"❌ Ошибка сохранения пользователя: {e}")
 
 def save_message(user_id, role, content):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("INSERT INTO history (user_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-              (user_id, role, content, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
+    if not supabase:
+        return
+    try:
+        supabase.table("history").insert({
+            "user_id": user_id,
+            "role": role,
+            "content": content,
+            "created_at": datetime.now().isoformat()
+        }).execute()
+    except Exception as e:
+        print(f"❌ Ошибка сохранения сообщения: {e}")
 
 def get_history(user_id, limit=1000):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT role, content, created_at FROM history WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", (user_id, limit))
-    rows = c.fetchall()
-    conn.close()
-    return [{"role": r[0], "content": r[1], "time": r[2]} for r in reversed(rows)]
+    if not supabase:
+        return []
+    try:
+        response = supabase.table("history")\
+            .select("*")\
+            .eq("user_id", user_id)\
+            .order("created_at", desc=False)\
+            .limit(limit)\
+            .execute()
+        return response.data if response.data else []
+    except:
+        return []
 
 def get_message_count(user_id):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM history WHERE user_id = ?", (user_id,))
-    count = c.fetchone()[0]
-    conn.close()
-    return count
+    if not supabase:
+        return 0
+    try:
+        response = supabase.table("history")\
+            .select("id", count="exact")\
+            .eq("user_id", user_id)\
+            .execute()
+        return response.count if hasattr(response, 'count') else 0
+    except:
+        return 0
 
 def get_last_message_time(user_id):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT created_at FROM history WHERE user_id = ? ORDER BY created_at DESC LIMIT 1", (user_id,))
-    row = c.fetchone()
-    conn.close()
-    return datetime.fromisoformat(row[0]) if row else None
+    if not supabase:
+        return None
+    try:
+        response = supabase.table("history")\
+            .select("created_at")\
+            .eq("user_id", user_id)\
+            .order("created_at", desc=True)\
+            .limit(1)\
+            .execute()
+        if response.data:
+            return datetime.fromisoformat(response.data[0]["created_at"].replace("Z", "+00:00"))
+        return None
+    except:
+        return None
 
 def save_topic(user_id, topic):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("INSERT INTO topics (user_id, topic, last_mentioned) VALUES (?, ?, ?)",
-              (user_id, topic, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
+    if not supabase:
+        return
+    try:
+        supabase.table("topics").insert({
+            "user_id": user_id,
+            "topic": topic,
+            "last_mentioned": datetime.now().isoformat()
+        }).execute()
+    except:
+        pass
 
 def get_all_topics(user_id):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT topic FROM topics WHERE user_id = ? GROUP BY topic ORDER BY COUNT(*) DESC", (user_id,))
-    rows = c.fetchall()
-    conn.close()
-    return [r[0] for r in rows]
-
-def get_user_city(user_id):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT city FROM users WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else None
+    if not supabase:
+        return []
+    try:
+        response = supabase.table("topics")\
+            .select("topic")\
+            .eq("user_id", user_id)\
+            .execute()
+        return [t["topic"] for t in response.data] if response.data else []
+    except:
+        return []
 
 def update_user_city(user_id, city):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("UPDATE users SET city = ? WHERE user_id = ?", (city, user_id))
-    conn.commit()
-    conn.close()
+    if not supabase:
+        return
+    try:
+        supabase.table("users")\
+            .update({"city": city})\
+            .eq("user_id", user_id)\
+            .execute()
+    except:
+        pass
 
 def save_reminder(user_id, text, remind_time, chat_id):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("INSERT INTO reminders (user_id, text, remind_time, chat_id) VALUES (?, ?, ?, ?)",
-              (user_id, text, remind_time, chat_id))
-    conn.commit()
-    conn.close()
+    if not supabase:
+        return
+    try:
+        supabase.table("reminders").insert({
+            "user_id": user_id,
+            "text": text,
+            "remind_time": remind_time,
+            "chat_id": chat_id,
+            "status": "pending"
+        }).execute()
+    except:
+        pass
 
 def update_user_subscription(user_id, subscription):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("UPDATE users SET subscription = ? WHERE user_id = ?", (subscription, user_id))
-    conn.commit()
-    conn.close()
+    if not supabase:
+        return
+    try:
+        supabase.table("users")\
+            .update({"subscription": subscription})\
+            .eq("user_id", user_id)\
+            .execute()
+    except:
+        pass
 
 def save_memory(user_id, key, value):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO user_memory (user_id, key, value, created_at) VALUES (?, ?, ?, ?)",
-              (user_id, key, value, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
+    if not supabase:
+        return
+    try:
+        # Удаляем старую запись, если есть
+        supabase.table("user_memory")\
+            .delete()\
+            .eq("user_id", user_id)\
+            .eq("key", key)\
+            .execute()
+        # Вставляем новую
+        supabase.table("user_memory").insert({
+            "user_id": user_id,
+            "key": key,
+            "value": value,
+            "created_at": datetime.now().isoformat()
+        }).execute()
+    except:
+        pass
 
 def get_memory(user_id, key):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT value FROM user_memory WHERE user_id = ? AND key = ?", (user_id, key))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else None
+    if not supabase:
+        return None
+    try:
+        response = supabase.table("user_memory")\
+            .select("value")\
+            .eq("user_id", user_id)\
+            .eq("key", key)\
+            .execute()
+        if response.data:
+            return response.data[0]["value"]
+        return None
+    except:
+        return None
 
 def save_payment(user_id, subscription, stars):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("INSERT INTO payments (user_id, subscription, stars, created_at) VALUES (?, ?, ?, ?)",
-              (user_id, subscription, stars, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
+    if not supabase:
+        return
+    try:
+        supabase.table("payments").insert({
+            "user_id": user_id,
+            "subscription": subscription,
+            "stars": stars,
+            "status": "pending",
+            "created_at": datetime.now().isoformat()
+        }).execute()
+    except:
+        pass
 
 def transcribe_audio_with_groq(audio_url):
     try:
@@ -914,7 +923,7 @@ async def get_ai_response(messages, chat_id, text, short=True):
             return "Извини, сейчас проблемы с подключением. Попробуй позже."
 
 # ==========================
-# КОРОТКИЙ ПРОМПТ БЕЗ ВОДЫ
+# ПРОМПТ
 # ==========================
 
 AURA_PROMPT = """Ты — AURA. Ты — я в Telegram.
@@ -928,6 +937,10 @@ AURA_PROMPT = """Ты — AURA. Ты — я в Telegram.
 - Не выдумывай.
 
 Ты — мой полный аналог в Telegram."""
+
+# ==========================
+# ОСНОВНОЙ БОТ
+# ==========================
 
 app = FastAPI()
 
@@ -1059,7 +1072,7 @@ async def webhook(request: Request):
                 if chat_id in ADMIN_USERS:
                     welcome = "👋 Привет! Ты администратор — доступ всегда открыт."
                 elif is_trial_active(trial_start):
-                    days_left = TRIAL_DAYS - (datetime.now() - datetime.fromisoformat(trial_start)).days
+                    days_left = TRIAL_DAYS - (datetime.now() - datetime.fromisoformat(trial_start.replace("Z", "+00:00"))).days
                     welcome = f"👋 Привет! У тебя {days_left} дней бесплатного доступа."
                 elif has_access(chat_id):
                     welcome = "👋 Привет! У тебя есть подписка."
@@ -1138,9 +1151,6 @@ async def webhook(request: Request):
             
             result = await process_message(request, chat_id, text)
             send_message(chat_id, result["reply"])
-            # Голосовые ответы полностью отключены
-            # if result["reply"] and not text.startswith("/"):
-            #     send_voice_reply(chat_id, result["reply"])
                 
         return JSONResponse({"ok": True})
     except Exception as e:
@@ -1221,7 +1231,6 @@ async def process_message(request: Request, chat_id, text):
     # ОБРАБОТКА ЗАПРОСОВ ПАМЯТИ
     # ==========================
     
-    # Проверяем, спрашивает ли пользователь о прошлых разговорах
     if "что мы обсуждали" in lower or "что я спрашивал" in lower or "о чём мы говорили" in lower:
         context = get_full_context(chat_id)
         topics = context["topics"]
@@ -1245,7 +1254,7 @@ async def process_message(request: Request, chat_id, text):
                 return {"reply": reply}
     
     # ==========================
-    # ОСТАЛЬНАЯ ЛОГИКА (БЕЗ ЛИШНИХ СООБЩЕНИЙ)
+    # ОСТАЛЬНАЯ ЛОГИКА
     # ==========================
     
     current_time, city = get_current_time_for_user(chat_id, ip)
@@ -1264,7 +1273,7 @@ async def process_message(request: Request, chat_id, text):
         send_message(chat_id, "👋 Давно не общались! Как дела?")
     
     # ==========================
-    # УБРАНЫ ВСЕ ЛИШНИЕ ТРИГГЕРЫ
+    # ВИЗУАЛЬНЫЕ ТРИГГЕРЫ
     # ==========================
     
     visual_triggers = {
@@ -1370,8 +1379,6 @@ async def process_message(request: Request, chat_id, text):
         save_memory(chat_id, "style", "развёрнутый")
     else:
         save_memory(chat_id, "style", "короткий")
-    
-    # Фраза "Что думаешь?" полностью убрана
     
     update_user_memory(chat_id, "assistant", reply)
     return {"reply": reply}
