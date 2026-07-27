@@ -6,3 +6,10 @@ python-dotenv
 beautifulsoup4
 lxml
 tavily-python
+fastapi
+uvicorn
+openai
+requests
+python-dotenv
+chromadb
+sentence-transformers
