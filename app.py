@@ -28,6 +28,7 @@ import io
 from PIL import Image
 import urllib.parse
 import asyncio
+from collections import deque
 
 load_dotenv()
 
@@ -53,6 +54,7 @@ YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 ADMIN_USERS = ["5818548555"]
 
 LAST_VOICE_MESSAGE = {}
+VOICE_QUEUE = {}  # Очередь голосовых сообщений (FIFO)
 
 print("🔍 Проверка ключей...")
 if not GROQ_API_KEY:
@@ -135,14 +137,11 @@ async def generate_audio_edge(text):
         return None
     
     try:
-        # Самый реалистичный мужской голос
         voice = "ru-RU-DmitryNeural"
         
-        # Создаём временный файл
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
             output_file = tmp.name
         
-        # Генерируем аудио
         communicate = edge_tts.Communicate(text, voice)
         await communicate.save(output_file)
         
@@ -167,10 +166,8 @@ def generate_audio_fallback(text):
 def text_to_speech(text):
     """Генерирует аудио (Edge TTS или gTTS запасной)"""
     
-    # Пробуем Edge TTS (асинхронно)
     if EDGE_AVAILABLE:
         try:
-            # Запускаем асинхронную функцию синхронно
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
@@ -182,38 +179,42 @@ def text_to_speech(text):
         except Exception as e:
             print(f"❌ Edge TTS ошибка: {e}")
     
-    # Запасной: gTTS
     return generate_audio_fallback(text)
 
-def send_voice_reply(chat_id, text):
-    """Отправляет голосовое сообщение"""
-    
+def process_voice_queue(chat_id):
+    """Обрабатывает очередь голосовых сообщений в правильном порядке (FIFO)"""
+    while chat_id in VOICE_QUEUE and VOICE_QUEUE[chat_id]:
+        try:
+            text = VOICE_QUEUE[chat_id].popleft()  # Берём первое сообщение из очереди
+            send_voice_now(chat_id, text)
+            time.sleep(0.5)  # Небольшая задержка между сообщениями
+        except Exception as e:
+            print(f"❌ Ошибка обработки голосовой очереди: {e}")
+            break
+
+def send_voice_now(chat_id, text):
+    """Непосредственная отправка голосового сообщения"""
     if not text:
         return False
     
-    # Очищаем текст
     clean_text = clean_text_for_voice(text)
     
     if not clean_text or len(clean_text) < 5:
         return False
     
-    # Берём первую фразу (максимум 300 символов)
     voice_text = clean_text.split('\n')[0][:300]
     
     if len(voice_text) < 5:
         return False
     
-    # Защита от дублей
     text_hash = hash(voice_text)
     if LAST_VOICE_MESSAGE.get(chat_id) == text_hash:
         return True
     
-    # Генерируем аудио
     audio_path = text_to_speech(voice_text)
     if not audio_path:
         return False
     
-    # Отправляем в Telegram
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
         with open(audio_path, 'rb') as f:
@@ -232,6 +233,22 @@ def send_voice_reply(chat_id, text):
     except Exception as e:
         print(f"❌ Отправка голоса: {e}")
         return False
+
+def send_voice_reply(chat_id, text):
+    """Отправляет голосовое сообщение через очередь (FIFO)"""
+    if not text:
+        return False
+    
+    # Инициализируем очередь для пользователя
+    if chat_id not in VOICE_QUEUE:
+        VOICE_QUEUE[chat_id] = deque()
+    
+    # Добавляем текст в очередь
+    VOICE_QUEUE[chat_id].append(text)
+    
+    # Запускаем обработку очереди в отдельном потоке
+    threading.Thread(target=process_voice_queue, args=(chat_id,), daemon=True).start()
+    return True
 
 def send_typing(chat_id):
     try:
@@ -408,21 +425,26 @@ async def search_web(query):
     return "\n\n".join(results) if results else None
 
 def describe_image_with_groq(image_data):
+    """Распознаёт изображение через Groq Vision"""
     try:
         import groq
         if isinstance(image_data, bytes):
             img = Image.open(io.BytesIO(image_data))
         else:
             img = Image.open(io.BytesIO(image_data))
-        max_size = 512
+        
+        # Улучшаем качество для распознавания
+        max_size = 1024
         if max(img.size) > max_size:
             ratio = max_size / max(img.size)
             new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
             img = img.resize(new_size, Image.Resampling.LANCZOS)
+        
         buffer = io.BytesIO()
-        img.convert('RGB').save(buffer, format='JPEG', quality=80)
+        img.convert('RGB').save(buffer, format='JPEG', quality=95)
         compressed_data = buffer.getvalue()
         base64_image = base64.b64encode(compressed_data).decode('utf-8')
+        
         client = groq.Groq(api_key=GROQ_API_KEY)
         response = client.chat.completions.create(
             model="llama-3.2-11b-vision-preview",
@@ -430,17 +452,24 @@ def describe_image_with_groq(image_data):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Опиши, что ты видишь на этой картинке. Если есть текст — напиши его. Ответ дай на русском."},
+                        {"type": "text", "text": """Ты — профессиональный ассистент по анализу изображений. 
+Опиши подробно, что ты видишь на картинке:
+1. Что изображено (объекты, люди,場景)
+2. Если есть текст — прочитай его точно
+3. Настроение или атмосфера
+4. Любые детали, которые могут быть важны
+
+Ответ дай на русском языке, структурированно и понятно."""},
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
                     ]
                 }
             ],
-            temperature=0.7,
-            max_tokens=300
+            temperature=0.3,
+            max_tokens=500
         )
         return response.choices[0].message.content
     except Exception as e:
-        print(f"❌ Vision: {e}")
+        print(f"❌ Vision ошибка: {e}")
         return None
 
 def read_file(file_data, file_name):
@@ -743,7 +772,8 @@ def save_message(user_id, role, content):
     conn.commit()
     conn.close()
 
-def get_history(user_id, limit=100):
+def get_history(user_id, limit=500):
+    """Получает историю сообщений пользователя"""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("SELECT role, content, created_at FROM history WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", (user_id, limit))
@@ -862,17 +892,29 @@ def transcribe_audio_with_groq(audio_url):
 # === ОСНОВНОЙ ДВИЖОК — DEEPSEEK V4 PRO ===
 # ============================================================
 
-async def get_ai_response(messages):
+async def get_ai_response(messages, short=True):
+    """
+    Получает ответ от AI
+    short=True — короткий ответ (2-3 предложения)
+    short=False — полный развёрнутый ответ
+    """
     try:
         client = OpenAI(
             api_key=DEEPSEEK_API_KEY,
             base_url=DEEPSEEK_BASE_URL
         )
+        
+        # Управление длиной ответа
+        max_tokens = 200 if short else 800
+        temperature = 0.9
+        
         response = client.chat.completions.create(
             model="deepseek-v4-pro",
             messages=messages,
-            temperature=0.9,
-            max_tokens=600
+            temperature=temperature,
+            max_tokens=max_tokens,
+            presence_penalty=0.1,
+            frequency_penalty=0.1
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -880,11 +922,12 @@ async def get_ai_response(messages):
         try:
             from groq import Groq
             groq_client = Groq(api_key=GROQ_API_KEY)
+            max_tokens = 200 if short else 800
             response = groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=messages,
                 temperature=0.9,
-                max_tokens=600
+                max_tokens=max_tokens
             )
             return response.choices[0].message.content
         except:
@@ -895,9 +938,10 @@ AURA_PROMPT = """Ты — AURA. Ты — я в Telegram.
 ТВОЙ СТИЛЬ:
 - Ты чувствуешь настроение собеседника. Если он грустный — поддержись, если весёлый — раздели радость.
 - Отвечай как человек: тепло, прямо, с эмпатией.
-- Коротко — 2–3 предложения, но если нужно — разверни.
+- ОТВЕЧАЙ КОРОТКО: 2-3 предложения. Не больше!
+- Всегда завершай мысль, не обрывай на полуслове.
+- Если пользователь просит "подробнее", "разверни", "расскажи детальнее" — дай полный развёрнутый ответ.
 - Всегда в конце добавляй вопрос, чтобы продолжить диалог: "Что думаешь?", "Хочешь, продолжу?", "Могу уточнить".
-- Если пользователь просит "подробнее" — дай развёрнутый ответ.
 - Если нужна ссылка — дай сразу.
 - Если не знаешь — скажи честно.
 - Используй контекст прошлых диалогов: ты помнишь, о чём говорили вчера, неделю назад.
@@ -996,7 +1040,7 @@ async def webhook(request: Request):
                     if vision_result:
                         send_message(chat_id, f"📸 {vision_result}")
                     else:
-                        send_message(chat_id, "❌ Не удалось описать фото.")
+                        send_message(chat_id, "❌ Не удалось описать фото. Попробуй прислать другое изображение.")
                     return JSONResponse({"ok": True})
                 else:
                     send_message(chat_id, "⚠️ Не удалось загрузить фото")
@@ -1085,8 +1129,8 @@ async def webhook(request: Request):
             result = await process_message(request, chat_id, text)
             send_message(chat_id, result["reply"])
             if result["reply"] and not text.startswith("/"):
-                # Запускаем голос в отдельном потоке
-                threading.Thread(target=send_voice_reply, args=(chat_id, result["reply"])).start()
+                # Отправляем голос через очередь (FIFO)
+                threading.Thread(target=send_voice_reply, args=(chat_id, result["reply"]), daemon=True).start()
                 
         return JSONResponse({"ok": True})
     except Exception as e:
@@ -1125,43 +1169,15 @@ async def process_message(request: Request, chat_id, text):
     elif mood == "tired":
         mood_context = "Пользователь устал. Отвечай мягко и без лишней информации."
     
+    # Пропускаем автоматический запрос города — пользователь сам уточнит при необходимости
+    city = get_user_city(chat_id)
+    
+    # Определяем ip только если нужен город
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
         ip = forwarded.split(",")[0].strip()
     else:
         ip = request.client.host if request.client else "127.0.0.1"
-    
-    city = get_user_city(chat_id)
-    if not city:
-        city_found = False
-        
-        city_match = re.search(r"(?:мой город|я в|я из|город|городе|из|в)\s+([а-яА-ЯёЁ\-]+)", lower)
-        if city_match:
-            city = city_match.group(1).capitalize()
-            city_found = True
-        
-        if not city_found:
-            city_match = re.search(r"\b([а-яА-ЯёЁ\-]+)\s+город", lower)
-            if city_match:
-                city = city_match.group(1).capitalize()
-                city_found = True
-        
-        if not city_found:
-            known_cities = ["белово", "кемерово", "новокузнецк", "прокопьевск", "киселёвск", "междуреченск", "москва", "санкт-петербург", "новосибирск", "екатеринбург", "красноярск", "иркутск", "владивосток", "омск"]
-            for known in known_cities:
-                if known in lower:
-                    city = known.capitalize()
-                    city_found = True
-                    break
-        
-        if city_found:
-            update_user_city(chat_id, city)
-            save_memory(chat_id, "city", city)
-            send_message(chat_id, "✅ Принято! Чем могу помочь? Задавай любой вопрос?")
-            return {"reply": "✅ Принято! Чем могу помочь? Задавай любой вопрос?"}
-        else:
-            send_message(chat_id, "🌍 Напиши свой город, чтобы я показывал точное время и искал информацию рядом с тобой. Например: Белово")
-            return {"reply": "🌍 Напиши свой город."}
     
     if "время" in lower or "час" in lower or "сколько" in lower or "который час" in lower:
         current_time, city = get_current_time_for_user(chat_id, ip)
@@ -1177,12 +1193,12 @@ async def process_message(request: Request, chat_id, text):
     day_str = current_time.strftime("%A")
     
     msg_count = get_message_count(chat_id)
-    if msg_count <= 2:
-        welcome = f"👋Привет! Я здесь и готов тебе помочь! Сейчас {time_str} {date_str}.\nПросто напиши, что нужно👇😎"
+    if msg_count <= 1:
+        welcome = f"👋 Привет! Я здесь и готов тебе помочь! Сейчас {time_str} {date_str}.\nПросто напиши, что нужно👇"
         send_message(chat_id, welcome)
         save_message(chat_id, "assistant", welcome)
     
-    if msg_count <= 5:
+    if msg_count <= 5 and msg_count > 1:
         last_topics = get_all_topics(chat_id)
         if last_topics:
             topics_text = ", ".join(last_topics[:3])
@@ -1231,7 +1247,7 @@ async def process_message(request: Request, chat_id, text):
     
     topics = get_all_topics(chat_id)
     topics_text = ", ".join(topics[:7]) if topics else "нет сохранённых тем"
-    history = get_history(chat_id, limit=100)
+    history = get_history(chat_id, limit=500)  # Увеличил историю для лучшей памяти
     
     user_name = get_memory(chat_id, "name")
     user_style = get_memory(chat_id, "style")
@@ -1246,15 +1262,35 @@ async def process_message(request: Request, chat_id, text):
     
     user_prompt = f"Сегодня {date_str} ({day_str}), сейчас {time_str} (город: {city}).\n{name_context}\n{style_context}\n{likes_context}\n{dislikes_context}\n{memory_context}\n\n{text}"
     
+    # Определяем режим ответа (короткий или развёрнутый)
+    expand_triggers = ["подробнее", "разверни", "расскажи детальнее", "подробно", "детально", "полный ответ"]
+    short = not any(word in lower for word in expand_triggers)
+    
+    if not short:
+        mood_context += " Пользователь просит развёрнутый ответ. Дай полную информацию."
+    else:
+        mood_context += " Отвечай коротко, 2-3 предложения."
+    
     aura_prompt = AURA_PROMPT + f"\n\n{mood_context}\n\n{user_prompt}"
     
     messages = [{"role": "system", "content": aura_prompt}]
-    for msg in history[-30:]:
+    for msg in history[-30:]:  # Берем последние 30 сообщений для контекста
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": text})
     
-    reply = await get_ai_response(messages)
+    reply = await get_ai_response(messages, short=short)
     reply = re.sub(r'[*_#~`]', '', reply)
+    
+    # Убираем незавершённые предложения
+    if not reply.endswith(('.', '!', '?')):
+        # Если оборвалось, находим последнее предложение
+        sentences = re.split(r'(?<=[.!?])\s+', reply)
+        if sentences and len(sentences) > 1:
+            reply = ' '.join(sentences[:-1]) + '.'
+        elif sentences:
+            reply = sentences[0]
+            if not reply.endswith(('.', '!', '?')):
+                reply += '.'
     
     name_match = re.search(r"(?:меня зовут|зовут|я )(\w+)", lower)
     if name_match:
@@ -1271,7 +1307,7 @@ async def process_message(request: Request, chat_id, text):
         save_memory(chat_id, "style", "короткий")
     
     if not reply.endswith("?") and len(reply) < 300:
-        reply += "\n\nЧто думаешь? Хочешь, чтобы я уточнил или нашёл ещё что-то? 😊"
+        reply += "\n\nЧто думаешь? Хочешь, чтобы я уточнил или нашёл ещё что-то?"
     
     save_message(chat_id, "assistant", reply)
     return {"reply": reply}
