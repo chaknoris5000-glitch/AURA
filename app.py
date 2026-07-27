@@ -54,7 +54,8 @@ YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 ADMIN_USERS = ["5818548555"]
 
 LAST_VOICE_MESSAGE = {}
-VOICE_QUEUE = {}  # Очередь голосовых сообщений (FIFO)
+VOICE_QUEUE = {}
+VOICE_LOCK = {}
 
 print("🔍 Проверка ключей...")
 if not GROQ_API_KEY:
@@ -85,10 +86,9 @@ def set_bot_description():
 set_bot_description()
 
 # ============================================================
-# === ГОЛОСОВЫЕ ОТВЕТЫ AURA — EDGE TTS (МУЖСКОЙ) ===
+# === ГОЛОСОВЫЕ ОТВЕТЫ AURA — EDGE TTS (МУЖСКОЙ) С ОЧЕРЕДЬЮ ===
 # ============================================================
 
-# Пытаемся импортировать edge_tts
 try:
     import edge_tts
     EDGE_AVAILABLE = True
@@ -102,7 +102,6 @@ def clean_text_for_voice(text):
     if not text:
         return ""
     
-    # Удаляем эмодзи
     emoji_pattern = re.compile(
         "[\U0001F600-\U0001F64F"
         "\U0001F300-\U0001F5FF"
@@ -119,40 +118,26 @@ def clean_text_for_voice(text):
         flags=re.UNICODE
     )
     text = emoji_pattern.sub('', text)
-    
-    # Удаляем ссылки
     text = re.sub(r'https?://\S+|www\.\S+', '', text)
-    
-    # Удаляем номера телефонов
     text = re.sub(r'\+?\d[\d\s\-\(\)]{7,}\d', '', text)
-    
-    # Убираем лишние пробелы
     text = re.sub(r'\s+', ' ', text).strip()
-    
     return text
 
 async def generate_audio_edge(text):
-    """Генерирует аудио через Edge TTS (мужской голос)"""
     if not EDGE_AVAILABLE:
         return None
-    
     try:
         voice = "ru-RU-DmitryNeural"
-        
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
             output_file = tmp.name
-        
         communicate = edge_tts.Communicate(text, voice)
         await communicate.save(output_file)
-        
         return output_file
-        
     except Exception as e:
         print(f"❌ Edge TTS ошибка: {e}")
         return None
 
 def generate_audio_fallback(text):
-    """Запасной вариант через gTTS"""
     try:
         from gtts import gTTS
         tts = gTTS(text=text, lang='ru', slow=False)
@@ -164,8 +149,6 @@ def generate_audio_fallback(text):
         return None
 
 def text_to_speech(text):
-    """Генерирует аудио (Edge TTS или gTTS запасной)"""
-    
     if EDGE_AVAILABLE:
         try:
             loop = asyncio.new_event_loop()
@@ -178,19 +161,7 @@ def text_to_speech(text):
                 loop.close()
         except Exception as e:
             print(f"❌ Edge TTS ошибка: {e}")
-    
     return generate_audio_fallback(text)
-
-def process_voice_queue(chat_id):
-    """Обрабатывает очередь голосовых сообщений в правильном порядке (FIFO)"""
-    while chat_id in VOICE_QUEUE and VOICE_QUEUE[chat_id]:
-        try:
-            text = VOICE_QUEUE[chat_id].popleft()  # Берём первое сообщение из очереди
-            send_voice_now(chat_id, text)
-            time.sleep(0.5)  # Небольшая задержка между сообщениями
-        except Exception as e:
-            print(f"❌ Ошибка обработки голосовой очереди: {e}")
-            break
 
 def send_voice_now(chat_id, text):
     """Непосредственная отправка голосового сообщения"""
@@ -198,12 +169,10 @@ def send_voice_now(chat_id, text):
         return False
     
     clean_text = clean_text_for_voice(text)
-    
     if not clean_text or len(clean_text) < 5:
         return False
     
     voice_text = clean_text.split('\n')[0][:300]
-    
     if len(voice_text) < 5:
         return False
     
@@ -227,26 +196,39 @@ def send_voice_now(chat_id, text):
             LAST_VOICE_MESSAGE[chat_id] = text_hash
             print(f"✅ Голосовое отправлено для {chat_id}")
             return True
-        else:
-            print(f"❌ Ошибка отправки: {response.status_code}")
-            return False
+        return False
     except Exception as e:
         print(f"❌ Отправка голоса: {e}")
         return False
 
+def process_voice_queue(chat_id):
+    """Обрабатывает очередь голосовых сообщений (FIFO)"""
+    VOICE_LOCK[chat_id] = True
+    try:
+        while chat_id in VOICE_QUEUE and VOICE_QUEUE[chat_id]:
+            text = VOICE_QUEUE[chat_id].popleft()
+            send_voice_now(chat_id, text)
+            time.sleep(1.2)
+    except Exception as e:
+        print(f"❌ Ошибка голосовой очереди: {e}")
+    finally:
+        VOICE_LOCK[chat_id] = False
+
 def send_voice_reply(chat_id, text):
-    """Отправляет голосовое сообщение через очередь (FIFO)"""
+    """Отправляет голосовое через очередь (FIFO)"""
     if not text:
         return False
     
-    # Инициализируем очередь для пользователя
     if chat_id not in VOICE_QUEUE:
         VOICE_QUEUE[chat_id] = deque()
+    if chat_id not in VOICE_LOCK:
+        VOICE_LOCK[chat_id] = False
     
-    # Добавляем текст в очередь
     VOICE_QUEUE[chat_id].append(text)
     
-    # Запускаем обработку очереди в отдельном потоке
+    if VOICE_LOCK[chat_id]:
+        return True
+    
     threading.Thread(target=process_voice_queue, args=(chat_id,), daemon=True).start()
     return True
 
@@ -433,7 +415,6 @@ def describe_image_with_groq(image_data):
         else:
             img = Image.open(io.BytesIO(image_data))
         
-        # Улучшаем качество для распознавания
         max_size = 1024
         if max(img.size) > max_size:
             ratio = max_size / max(img.size)
@@ -454,7 +435,7 @@ def describe_image_with_groq(image_data):
                     "content": [
                         {"type": "text", "text": """Ты — профессиональный ассистент по анализу изображений. 
 Опиши подробно, что ты видишь на картинке:
-1. Что изображено (объекты, люди,場景)
+1. Что изображено (объекты, люди, сцены)
 2. Если есть текст — прочитай его точно
 3. Настроение или атмосфера
 4. Любые детали, которые могут быть важны
@@ -773,7 +754,6 @@ def save_message(user_id, role, content):
     conn.close()
 
 def get_history(user_id, limit=500):
-    """Получает историю сообщений пользователя"""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("SELECT role, content, created_at FROM history WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", (user_id, limit))
@@ -889,27 +869,52 @@ def transcribe_audio_with_groq(audio_url):
         return None
 
 # ============================================================
-# === ОСНОВНОЙ ДВИЖОК — DEEPSEEK V4 PRO ===
+# === ГИБРИДНЫЙ РЕЖИМ: FLASH (основной) / PRO (по запросу) ===
 # ============================================================
 
-async def get_ai_response(messages, short=True):
+USER_MODEL_PREFERENCE = {}
+
+COMPLEX_TRIGGERS = [
+    "анализ", "рассчитай", "спрогнозируй", "сравни", "оцени",
+    "разбери", "структурируй", "оптимизируй", "разработай",
+    "подробный анализ", "сложный", "глубокий", "исследуй",
+    "спланируй", "стратегия", "прогноз", "инвестиции",
+    "детальный", "полный анализ"
+]
+
+def detect_complexity(text):
+    """Определяет, сложный ли вопрос"""
+    lower = text.lower()
+    for trigger in COMPLEX_TRIGGERS:
+        if trigger in lower:
+            return True
+    return False
+
+async def get_ai_response(messages, chat_id, text, short=True):
     """
-    Получает ответ от AI
-    short=True — короткий ответ (2-3 предложения)
-    short=False — полный развёрнутый ответ
+    Гибридный режим:
+    - Flash (основной) — быстро и дёшево
+    - Pro (по запросу) — мощно, когда нужно
+    - Groq (резерв) — бесплатно
     """
+    
+    user_pref = USER_MODEL_PREFERENCE.get(chat_id, "flash")
+    is_complex = detect_complexity(text)
+    use_pro = (user_pref == "pro") or is_complex
+    
+    model = "deepseek-v4-pro" if use_pro else "deepseek-v4-flash"
+    max_tokens = 800 if use_pro else 300
+    temperature = 0.9 if use_pro else 0.85
+    
+    print(f"🧠 Модель: {model} | Сложный: {is_complex} | Преференс: {user_pref}")
+    
     try:
         client = OpenAI(
             api_key=DEEPSEEK_API_KEY,
             base_url=DEEPSEEK_BASE_URL
         )
-        
-        # Управление длиной ответа
-        max_tokens = 200 if short else 800
-        temperature = 0.9
-        
         response = client.chat.completions.create(
-            model="deepseek-v4-pro",
+            model=model,
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -917,18 +922,20 @@ async def get_ai_response(messages, short=True):
             frequency_penalty=0.1
         )
         return response.choices[0].message.content
+        
     except Exception as e:
-        print(f"❌ DeepSeek V4 Pro: {e}")
+        print(f"❌ {model} ошибка: {e}")
+        # Резерв: Groq
         try:
             from groq import Groq
             groq_client = Groq(api_key=GROQ_API_KEY)
-            max_tokens = 200 if short else 800
             response = groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=messages,
                 temperature=0.9,
-                max_tokens=max_tokens
+                max_tokens=400
             )
+            print(f"🔄 Переключился на Groq (резерв)")
             return response.choices[0].message.content
         except:
             return "Извини, сейчас проблемы с подключением. Попробуй позже."
@@ -1089,6 +1096,21 @@ async def webhook(request: Request):
                 send_message(chat_id, welcome)
                 return JSONResponse({"ok": True})
             
+            if text.startswith("/pro"):
+                USER_MODEL_PREFERENCE[chat_id] = "pro"
+                send_message(chat_id, "🧠 Переключился на **DeepSeek-V4-Pro** — мощность для сложных задач!\n\n📊 Команды:\n/pro — мощный Pro\n/flash — быстрый Flash\n/model — текущая модель")
+                return JSONResponse({"ok": True})
+            
+            if text.startswith("/flash"):
+                USER_MODEL_PREFERENCE[chat_id] = "flash"
+                send_message(chat_id, "⚡ Переключился на **DeepSeek-V4-Flash** — быстро и экономно!\n\n📊 Команды:\n/pro — мощный Pro\n/flash — быстрый Flash\n/model — текущая модель")
+                return JSONResponse({"ok": True})
+            
+            if text.startswith("/model"):
+                pref = USER_MODEL_PREFERENCE.get(chat_id, "flash")
+                send_message(chat_id, f"📊 Текущая модель: **{pref.upper()}**\n\nКоманды:\n/pro — мощный Pro\n/flash — быстрый Flash")
+                return JSONResponse({"ok": True})
+            
             if text.startswith("/buy"):
                 keyboard = [
                     [{"text": "⭐ Собеседник — 50 Stars (~50 ₽)", "callback_data": "buy_собеседник"}],
@@ -1129,7 +1151,6 @@ async def webhook(request: Request):
             result = await process_message(request, chat_id, text)
             send_message(chat_id, result["reply"])
             if result["reply"] and not text.startswith("/"):
-                # Отправляем голос через очередь (FIFO)
                 threading.Thread(target=send_voice_reply, args=(chat_id, result["reply"]), daemon=True).start()
                 
         return JSONResponse({"ok": True})
@@ -1169,23 +1190,44 @@ async def process_message(request: Request, chat_id, text):
     elif mood == "tired":
         mood_context = "Пользователь устал. Отвечай мягко и без лишней информации."
     
-    # Пропускаем автоматический запрос города — пользователь сам уточнит при необходимости
-    city = get_user_city(chat_id)
-    
-    # Определяем ip только если нужен город
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
         ip = forwarded.split(",")[0].strip()
     else:
         ip = request.client.host if request.client else "127.0.0.1"
     
-    if "время" in lower or "час" in lower or "сколько" in lower or "который час" in lower:
-        current_time, city = get_current_time_for_user(chat_id, ip)
-        time_str = current_time.strftime("%H:%M")
-        date_str = current_time.strftime("%d.%m.%Y")
-        reply = f"🕐 Сейчас {time_str} {date_str} (город: {city})"
-        save_message(chat_id, "assistant", reply)
-        return {"reply": reply}
+    # ============================================================
+    # === СОХРАНЕНИЕ ГОРОДА ЕСЛИ ПОЛЬЗОВАТЕЛЬ УПОМЯНУЛ ===
+    # ============================================================
+    
+    city_mention = re.search(r'(?:в|время в|времени в|часов в|город)\s+([А-Яа-яЁё\-]+)', lower)
+    if city_mention:
+        city = city_mention.group(1).capitalize()
+        update_user_city(chat_id, city)
+        save_memory(chat_id, "city", city)
+        send_message(chat_id, f"✅ Запомнил: город {city}. Теперь показываю время для {city}!")
+    
+    # ============================================================
+    # === ВРЕМЯ ПО ЗАПРОСУ ===
+    # ============================================================
+    
+    time_queries = [
+        "время", "который час", "сколько времени", 
+        "час", "сколько сейчас", "точное время"
+    ]
+    
+    if any(query in lower for query in time_queries):
+        if re.search(r'\b(время|час|который час|сколько времени|сколько сейчас|точное время)\b', lower):
+            current_time, city = get_current_time_for_user(chat_id, ip)
+            time_str = current_time.strftime("%H:%M")
+            date_str = current_time.strftime("%d.%m.%Y")
+            reply = f"🕐 Сейчас {time_str} {date_str} (город: {city})"
+            save_message(chat_id, "assistant", reply)
+            return {"reply": reply}
+    
+    # ============================================================
+    # === ОСТАЛЬНАЯ ЛОГИКА ===
+    # ============================================================
     
     current_time, city = get_current_time_for_user(chat_id, ip)
     time_str = current_time.strftime("%H:%M")
@@ -1247,7 +1289,7 @@ async def process_message(request: Request, chat_id, text):
     
     topics = get_all_topics(chat_id)
     topics_text = ", ".join(topics[:7]) if topics else "нет сохранённых тем"
-    history = get_history(chat_id, limit=500)  # Увеличил историю для лучшей памяти
+    history = get_history(chat_id, limit=500)
     
     user_name = get_memory(chat_id, "name")
     user_style = get_memory(chat_id, "style")
@@ -1262,7 +1304,6 @@ async def process_message(request: Request, chat_id, text):
     
     user_prompt = f"Сегодня {date_str} ({day_str}), сейчас {time_str} (город: {city}).\n{name_context}\n{style_context}\n{likes_context}\n{dislikes_context}\n{memory_context}\n\n{text}"
     
-    # Определяем режим ответа (короткий или развёрнутый)
     expand_triggers = ["подробнее", "разверни", "расскажи детальнее", "подробно", "детально", "полный ответ"]
     short = not any(word in lower for word in expand_triggers)
     
@@ -1274,16 +1315,15 @@ async def process_message(request: Request, chat_id, text):
     aura_prompt = AURA_PROMPT + f"\n\n{mood_context}\n\n{user_prompt}"
     
     messages = [{"role": "system", "content": aura_prompt}]
-    for msg in history[-30:]:  # Берем последние 30 сообщений для контекста
+    for msg in history[-30:]:
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": text})
     
-    reply = await get_ai_response(messages, short=short)
+    reply = await get_ai_response(messages, chat_id, text, short=short)
     reply = re.sub(r'[*_#~`]', '', reply)
     
     # Убираем незавершённые предложения
     if not reply.endswith(('.', '!', '?')):
-        # Если оборвалось, находим последнее предложение
         sentences = re.split(r'(?<=[.!?])\s+', reply)
         if sentences and len(sentences) > 1:
             reply = ' '.join(sentences[:-1]) + '.'
