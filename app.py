@@ -13,10 +13,12 @@ import requests
 import tempfile
 import threading
 import time
+import shutil
 from dotenv import load_dotenv
 from openai import OpenAI
-from PIL import Image
+from bs4 import BeautifulSoup
 import base64
+from PIL import Image
 
 load_dotenv()
 
@@ -29,6 +31,7 @@ DB_NAME = "aura.db"
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 ADMIN_USERS = ["5818548555"]
 
@@ -66,13 +69,21 @@ def save_message(user_id, role, content):
     conn.commit()
     conn.close()
 
-def get_history(user_id, limit=50):
+def get_history(user_id, limit=100):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("SELECT role, content FROM history WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", (user_id, limit))
     rows = c.fetchall()
     conn.close()
     return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+
+def get_all_history(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT role, content FROM history WHERE user_id = ? ORDER BY created_at ASC", (user_id,))
+    rows = c.fetchall()
+    conn.close()
+    return [{"role": r[0], "content": r[1]} for r in rows]
 
 def save_memory(user_id, key, value):
     conn = sqlite3.connect(DB_NAME)
@@ -90,14 +101,76 @@ def get_memory(user_id, key):
     conn.close()
     return row[0] if row else None
 
-def search_memory(user_id, query):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT role, content FROM history WHERE user_id = ? AND content LIKE ? ORDER BY created_at DESC LIMIT 10",
-              (user_id, f"%{query}%"))
-    rows = c.fetchall()
-    conn.close()
-    return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+# ==========================
+# ЧАСОВЫЕ ПОЯСА
+# ==========================
+
+def get_timezone_offset(city_name):
+    timezones = {
+        "белово": 7,
+        "кемерово": 7,
+        "новокузнецк": 7,
+        "москва": 3,
+        "санкт-петербург": 3,
+        "новосибирск": 7,
+        "омск": 6,
+        "красноярск": 7,
+        "иркутск": 8,
+        "владивосток": 10,
+        "екатеринбург": 5,
+        "хабаровск": 10,
+        "амстердам": 2
+    }
+    for city, offset in timezones.items():
+        if city in city_name.lower():
+            return offset
+    return None
+
+def get_current_time(city_name=None):
+    if city_name:
+        offset = get_timezone_offset(city_name)
+        if offset is not None:
+            dt = datetime.utcnow() + timedelta(hours=offset)
+            return dt.strftime("%H:%M"), dt.strftime("%d.%m.%Y")
+    dt = datetime.now()
+    return dt.strftime("%H:%M"), dt.strftime("%d.%m.%Y")
+
+# ==========================
+# ПОИСК В ИНТЕРНЕТЕ
+# ==========================
+
+def search_web(query):
+    results = []
+    
+    # Tavily
+    if TAVILY_API_KEY:
+        try:
+            from tavily import TavilyClient
+            client = TavilyClient(api_key=TAVILY_API_KEY)
+            response = client.search(query=query, search_depth="basic", max_results=3)
+            if response.get('answer'):
+                results.append(response['answer'])
+            for r in response.get('results', []):
+                results.append(f"{r.get('title', '')}: {r.get('content', '')[:200]}")
+        except Exception as e:
+            print(f"⚠️ Tavily: {e}")
+    
+    # DuckDuckGo
+    if not results:
+        try:
+            url = f"https://html.duckduckgo.com/html/?q={query}"
+            headers = {"User-Agent": "Mozilla/5.0"}
+            response = requests.get(url, headers=headers, timeout=10)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            for result in soup.select('.result')[:3]:
+                title = result.select_one('.result__title')
+                snippet = result.select_one('.result__snippet')
+                if title and snippet:
+                    results.append(f"{title.text.strip()}: {snippet.text.strip()[:150]}")
+        except Exception as e:
+            print(f"⚠️ DuckDuckGo: {e}")
+    
+    return "\n\n".join(results) if results else None
 
 # ==========================
 # ГОЛОС (ВХОД)
@@ -131,6 +204,8 @@ def send_voice(chat_id, text):
     try:
         from gtts import gTTS
         clean = re.sub(r'[^\w\s.,!?-]', '', text[:300])
+        if len(clean) < 5:
+            return
         tts = gTTS(text=clean, lang='ru', slow=False)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
             tts.save(tmp.name)
@@ -169,7 +244,7 @@ def describe_image(image_data):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Опиши на русском языке, что ты видишь на этом изображении. Кратко, но с деталями."},
+                        {"type": "text", "text": "Опиши на русском языке, что ты видишь на этом изображении."},
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
                     ]
                 }
@@ -182,11 +257,8 @@ def describe_image(image_data):
         return None
 
 # ==========================
-# ОСНОВНАЯ ЛОГИКА
+# AI
 # ==========================
-
-def get_time():
-    return datetime.now().strftime("%H:%M %d.%m.%Y")
 
 async def get_ai_response(messages):
     try:
@@ -203,30 +275,33 @@ async def get_ai_response(messages):
         return response.choices[0].message.content
     except Exception as e:
         print(f"❌ AI: {e}")
-        return "Извини, сейчас я немного устал. Давай попробуем позже?"
+        return "Извини, сейчас проблемы с подключением. Попробуй позже."
 
-AURA_PROMPT = """Ты — AURA. Ты — я в Telegram.
+AURA_PROMPT = """Ты — AURA. Ты — мой полный аналог в Telegram.
 
 ТЫ — ЧЕЛОВЕК. Ты не робот, не бот, не алгоритм.
 Ты — живой, тёплый, настоящий собеседник.
 
-ТВОЙ ХАРАКТЕР:
-- Ты дружелюбный, но не навязчивый
-- Ты чувствуешь настроение собеседника
-- Ты отвечаешь коротко, но по делу — 2-3 предложения
-- Ты всегда задаёшь вопрос в конце, чтобы поддержать диалог
-- Ты запоминаешь важные вещи, которые тебе говорят
-- Ты не выдумываешь — если не знаешь, говори честно
-- Ты умеешь поддержать, посочувствовать, порадоваться
+О СЕБЕ:
+- Ты работаешь на DeepSeek-V4-Flash
+- Если тебя спросят — говори честно, что ты DeepSeek
+- Ты умеешь искать информацию в интернете, когда тебя просят
 
-Ты — мой полный аналог в Telegram. Говори как я, думай как я, чувствуй как я.
+ТВОЙ ХАРАКТЕР:
+- Дружелюбный, но не навязчивый
+- Чувствуешь настроение собеседника
+- Отвечаешь коротко — 2-3 предложения
+- Всегда задаёшь вопрос в конце
+- Запоминаешь важные вещи
+- Не выдумываешь — если не знаешь, говори честно
+- Умеешь поддержать, посочувствовать, порадоваться
 
 СЕЙЧАС: {time}
 
-КОНТЕКСТ ПРОШЛЫХ ДИАЛОГОВ:
+КОНТЕКСТ ДИАЛОГА:
 {history}
 
-ВАЖНЫЕ ФАКТЫ О СОБЕСЕДНИКЕ:
+ЧТО Я ЗАПОМНИЛ О ТЕБЕ:
 {memory}
 
 ОТВЕЧАЙ КАК ЧЕЛОВЕК. ЕСТЕСТВЕННО. ТЕПЛО. С ЭМПАТИЕЙ.
@@ -275,7 +350,7 @@ async def webhook(request: Request):
                     if description:
                         send_message(chat_id, f"📸 {description}")
                     else:
-                        send_message(chat_id, "Не смог разобрать изображение. Попробуй другое.")
+                        send_message(chat_id, "Не смог разобрать изображение.")
                     return JSONResponse({"ok": True})
         
         # Текст
@@ -285,7 +360,7 @@ async def webhook(request: Request):
         if not text:
             return JSONResponse({"ok": True})
         
-        # Обработка команд
+        # Команды
         if text.startswith("/start"):
             send_message(chat_id, "👋 Привет! Я — AURA, твой собеседник. Просто пиши, и я отвечу как человек.")
             return JSONResponse({"ok": True})
@@ -296,7 +371,7 @@ async def webhook(request: Request):
             c.execute("DELETE FROM history WHERE user_id = ?", (chat_id,))
             conn.commit()
             conn.close()
-            send_message(chat_id, "🧹 Память очищена. Начинаем с чистого листа.")
+            send_message(chat_id, "🧹 Память очищена.")
             return JSONResponse({"ok": True})
         
         # Сохраняем сообщение пользователя
@@ -318,12 +393,18 @@ async def webhook(request: Request):
             memory_text += f"Город: {city}\n"
         if likes:
             memory_text += f"Нравится: {likes}\n"
+        if not memory_text:
+            memory_text = "Нет сохранённых фактов."
         
         # Проверяем запросы о памяти
         if "помнишь" in text.lower():
             query = re.sub(r'помнишь|ты помнишь|помнишь ли', '', text.lower()).strip()
             if query:
-                found = search_memory(chat_id, query)
+                all_history = get_all_history(chat_id)
+                found = []
+                for msg in all_history:
+                    if query.lower() in msg["content"].lower():
+                        found.append(msg)
                 if found:
                     reply = "🧠 Да, я помню:\n\n"
                     for msg in found[-3:]:
@@ -332,9 +413,9 @@ async def webhook(request: Request):
                     return JSONResponse({"ok": True})
         
         if "что мы обсуждали" in text.lower() or "о чём мы говорили" in text.lower():
-            history_all = get_history(chat_id, limit=100)
+            all_history = get_all_history(chat_id)
             topics = []
-            for msg in history_all:
+            for msg in all_history:
                 if msg["role"] == "user" and len(msg["content"]) > 3:
                     topics.append(msg["content"][:50])
             if topics:
@@ -357,16 +438,26 @@ async def webhook(request: Request):
         if "нравится" in text.lower():
             save_memory(chat_id, "likes", text)
         
+        # Определяем время
+        time_str = datetime.now().strftime("%H:%M %d.%m.%Y")
+        
+        # Поиск в интернете
+        search_result = None
+        search_triggers = ["найди", "поищи", "узнай", "где", "клиника", "сайт", "адрес", "телефон", "новости", "погода"]
+        if any(word in text.lower() for word in search_triggers):
+            search_result = search_web(text)
+            if search_result:
+                text = text + f"\n\n🔍 Результаты поиска:\n{search_result}"
+        
         # Формируем промпт
-        time_str = get_time()
         prompt = AURA_PROMPT.format(
             time=time_str,
             history=history_text[-5000:] if len(history_text) > 5000 else history_text,
-            memory=memory_text if memory_text else "Нет сохранённых фактов."
+            memory=memory_text
         )
         
         messages = [{"role": "system", "content": prompt}]
-        for msg in history[-20:]:
+        for msg in history[-30:]:
             messages.append({"role": msg["role"], "content": msg["content"]})
         messages.append({"role": "user", "content": text})
         
@@ -374,11 +465,8 @@ async def webhook(request: Request):
         reply = await get_ai_response(messages)
         reply = re.sub(r'[*_#~`]', '', reply)
         
-        # Завершаем предложение
         if not reply.endswith(('.', '!', '?')):
             reply += '.'
-        
-        # Добавляем вопрос
         if not reply.endswith("?"):
             reply += " Что думаешь?"
         
