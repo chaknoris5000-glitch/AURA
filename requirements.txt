@@ -3,9 +3,6 @@ uvicorn
 openai
 requests
 python-dotenv
-gTTS
-Pillow
-groq
 beautifulsoup4
 lxml
 tavily-python
