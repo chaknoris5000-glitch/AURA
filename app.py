@@ -27,8 +27,6 @@ import base64
 import io
 from PIL import Image
 import urllib.parse
-import asyncio
-from collections import deque
 
 load_dotenv()
 
@@ -82,7 +80,7 @@ def set_bot_description():
 set_bot_description()
 
 # ============================================================
-# === ГОЛОСОВЫЕ ОТВЕТЫ — МУЖСКОЙ РЕАЛИСТИЧНЫЙ ГОЛОС ===
+# === ГОЛОСОВЫЕ ОТВЕТЫ — gTTS (РАБОТАЕТ ВСЕГДА) ===
 # ============================================================
 
 def clean_text_for_voice(text):
@@ -112,32 +110,12 @@ def clean_text_for_voice(text):
     return text
 
 def text_to_speech(text):
-    """Генерирует аудио через Edge TTS (мужской голос)"""
-    try:
-        import edge_tts
-        
-        async def generate():
-            voice = "ru-RU-DmitryNeural"  # ✅ МУЖСКОЙ РЕАЛИСТИЧНЫЙ
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
-                output_file = tmp.name
-            communicate = edge_tts.Communicate(text, voice)
-            await communicate.save(output_file)
-            return output_file
-        
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            result = loop.run_until_complete(generate())
-            if result:
-                return result
-        finally:
-            loop.close()
-    except Exception as e:
-        print(f"⚠️ Edge TTS: {e}")
-    
-    # Запасной: gTTS
+    """Генерирует аудио через gTTS (работает всегда)"""
     try:
         from gtts import gTTS
+        
+        # gTTS не поддерживает мужской голос, но качество стабильное
+        # Параметр slow=False для более естественного темпа
         tts = gTTS(text=text, lang='ru', slow=False)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
             tts.save(tmp.name)
@@ -147,7 +125,7 @@ def text_to_speech(text):
         return None
 
 def send_voice_reply(chat_id, text):
-    """Отправляет голосовое сообщение (без очереди)"""
+    """Отправляет голосовое сообщение"""
     if not text:
         return False
     
@@ -1147,13 +1125,19 @@ async def process_message(request: Request, chat_id, text):
         ip = request.client.host if request.client else "127.0.0.1"
     
     # ============================================================
-    # === СОХРАНЕНИЕ ГОРОДА ПРИ УПОМИНАНИИ ===
+    # === ВРЕМЯ — ПРЯМОЙ ОТВЕТ БЕЗ ЛИШНИХ ФРАЗ ===
     # ============================================================
     
-    city_mention = re.search(r'(?:в|время в|времени в|часов в|город)\s+([А-Яа-яЁё\-]+)', lower)
-    if city_mention:
-        city = city_mention.group(1).capitalize()
-        if city in ["белово", "кемерово", "новокузнецк", "москва", "санкт-петербург", "новосибирск", "екатеринбург", "красноярск", "иркутск", "владивосток", "омск"]:
+    time_queries = ["время", "который час", "сколько времени", "час", "сколько сейчас", "точное время"]
+    is_time_query = any(query in lower for query in time_queries) and re.search(r'\b(время|час|который час|сколько времени|сколько сейчас|точное время)\b', lower)
+    
+    # Проверяем, есть ли город в запросе
+    city_match = re.search(r'(?:в|время в|времени в|часов в|город)\s+([А-Яа-яЁё\-]+)', lower)
+    
+    if is_time_query:
+        # Если есть город — сохраняем и показываем
+        if city_match:
+            city = city_match.group(1).capitalize()
             update_user_city(chat_id, city)
             save_memory(chat_id, "city", city)
             current_time, city = get_current_time_for_user(chat_id, ip)
@@ -1162,21 +1146,14 @@ async def process_message(request: Request, chat_id, text):
             reply = f"🕐 Сейчас {time_str} {date_str} (город: {city})"
             save_message(chat_id, "assistant", reply)
             return {"reply": reply}
-    
-    # ============================================================
-    # === ВРЕМЯ ПО ЗАПРОСУ ===
-    # ============================================================
-    
-    time_queries = ["время", "который час", "сколько времени", "час", "сколько сейчас", "точное время"]
-    is_time_query = any(query in lower for query in time_queries) and re.search(r'\b(время|час|который час|сколько времени|сколько сейчас|точное время)\b', lower)
-    
-    if is_time_query:
-        current_time, city = get_current_time_for_user(chat_id, ip)
-        time_str = current_time.strftime("%H:%M")
-        date_str = current_time.strftime("%d.%m.%Y")
-        reply = f"🕐 Сейчас {time_str} {date_str} (город: {city})"
-        save_message(chat_id, "assistant", reply)
-        return {"reply": reply}
+        else:
+            # Если города нет — используем сохранённый или IP
+            current_time, city = get_current_time_for_user(chat_id, ip)
+            time_str = current_time.strftime("%H:%M")
+            date_str = current_time.strftime("%d.%m.%Y")
+            reply = f"🕐 Сейчас {time_str} {date_str} (город: {city})"
+            save_message(chat_id, "assistant", reply)
+            return {"reply": reply}
     
     # ============================================================
     # === ОСТАЛЬНАЯ ЛОГИКА ===
@@ -1299,7 +1276,7 @@ async def process_message(request: Request, chat_id, text):
         save_memory(chat_id, "style", "короткий")
     
     if not reply.endswith("?") and len(reply) < 300:
-        reply += "\n\nЧто думаешь? Хочешь, чтобы я уточнил или нашёл ещё что-то?"
+        reply += "\n\nЧто думаешь?"
     
     save_message(chat_id, "assistant", reply)
     return {"reply": reply}
