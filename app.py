@@ -77,7 +77,7 @@ if TavilyClient and TAVILY_API_KEY:
         print(f"⚠️ Tavily: {e}")
 
 # ==========================
-# КЕШ ПАМЯТИ ПОЛЬЗОВАТЕЛЕЙ (БЕСКОНЕЧНАЯ ПАМЯТЬ)
+# КЕШ ПАМЯТИ ПОЛЬЗОВАТЕЛЕЙ (ПРИНУДИТЕЛЬНАЯ ЗАГРУЗКА)
 # ==========================
 
 USER_MEMORY_CACHE = {}
@@ -97,7 +97,7 @@ def get_history(user_id, limit=None):
     return [{"role": r[0], "content": r[1], "time": r[2]} for r in rows]
 
 def load_user_memory(chat_id):
-    """Загружает ВСЮ историю пользователя в кеш"""
+    """ПРИНУДИТЕЛЬНО загружает ВСЮ историю пользователя в кеш"""
     if chat_id not in USER_MEMORY_CACHE:
         history = get_history(chat_id)  # БЕЗ ЛИМИТА!
         topics = get_all_topics(chat_id)
@@ -111,22 +111,6 @@ def load_user_memory(chat_id):
         }
         print(f"🧠 Загружена память для {chat_id}: {len(history)} сообщений, {len(topics)} тем")
     return USER_MEMORY_CACHE[chat_id]
-
-def preload_all_memories():
-    """Загружает память всех пользователей при старте бота"""
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute("SELECT DISTINCT user_id FROM history")
-        users = c.fetchall()
-        conn.close()
-        
-        for user in users:
-            chat_id = user[0]
-            load_user_memory(chat_id)
-            print(f"✅ Предзагружена память для {chat_id}")
-    except Exception as e:
-        print(f"⚠️ Ошибка предзагрузки: {e}")
 
 def update_user_memory(chat_id, role, content):
     """Обновляет кеш и БД"""
@@ -148,7 +132,6 @@ def get_full_context(chat_id, limit=200):
     if not cache:
         cache = load_user_memory(chat_id)
     
-    # Берём последние 200 сообщений для контекста
     history = cache["history"][-limit:] if cache["history"] else []
     topics = cache["topics"][:10] if cache["topics"] else []
     
@@ -1277,7 +1260,11 @@ async def process_message(request: Request, chat_id, text):
     if not user:
         save_user(chat_id)
     
-    load_user_memory(chat_id)
+    # ============================================================
+    # ПРИНУДИТЕЛЬНАЯ ЗАГРУЗКА ПАМЯТИ ПРИ КАЖДОМ СООБЩЕНИИ
+    # ============================================================
+    
+    load_user_memory(chat_id)  # ✅ ЭТО ГЛАВНОЕ ИСПРАВЛЕНИЕ!
     update_user_memory(chat_id, "user", text)
     
     lower = text.lower()
@@ -1451,7 +1438,6 @@ async def process_message(request: Request, chat_id, text):
     aura_prompt = AURA_PROMPT + f"\n\n{mood_context}\n\n{user_prompt}"
     
     messages = [{"role": "system", "content": aura_prompt}]
-    # Берём последние 100 сообщений для контекста (вместо 50)
     for msg in history[-100:]:
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": text})
@@ -1492,13 +1478,6 @@ async def process_message(request: Request, chat_id, text):
 async def root():
     from fastapi.responses import FileResponse
     return FileResponse("web/index.html")
-
-# ==========================
-# ЗАПУСК ПРЕДЗАГРУЗКИ ПАМЯТИ
-# ==========================
-
-print("🔄 Предзагрузка памяти пользователей...")
-threading.Thread(target=preload_all_memories, daemon=True).start()
 
 if __name__ == "__main__":
     import uvicorn
