@@ -24,8 +24,6 @@ from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 from PIL import Image
 from openai import OpenAI
-import asyncio
-import aiohttp
 
 load_dotenv()
 
@@ -63,7 +61,6 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
-APIFY_API_KEY = os.getenv("APIFY_API_KEY")
 
 ADMIN_USERS = ["5818548555"]
 
@@ -87,81 +84,7 @@ except ImportError:
     print("⚠️ Tavily не установлен")
 
 # ==========================
-# APIFY — WILDBERRIES ПАРСЕР
-# ==========================
-
-APIFY_ACTOR_ID = "piotrv1001/wildberries-listings-scraper"
-
-async def search_wildberries(query, max_items=5):
-    """Ищет товары на Wildberries через Apify"""
-    if not APIFY_API_KEY:
-        return "⚠️ Apify API ключ не настроен"
-    
-    try:
-        run_url = f"https://api.apify.com/v2/acts/{APIFY_ACTOR_ID}/runs?token={APIFY_API_KEY}"
-        
-        payload = {
-            "searchQueries": [query],
-            "maxItems": max_items,
-            "scrapeProductDetails": True,
-            "scrapeReviews": False
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(run_url, json=payload) as resp:
-                run_data = await resp.json()
-                if run_data.get("status") != "SUCCEEDED":
-                    run_id = run_data.get("data", {}).get("id")
-                    if not run_id:
-                        return "❌ Не удалось запустить парсер"
-                
-                run_id = run_data.get("data", {}).get("id")
-                if not run_id:
-                    return "❌ Ошибка запуска"
-                
-                for _ in range(30):
-                    status_url = f"https://api.apify.com/v2/actor-runs/{run_id}?token={APIFY_API_KEY}"
-                    async with session.get(status_url) as status_resp:
-                        status_data = await status_resp.json()
-                        status = status_data.get("data", {}).get("status")
-                        if status == "SUCCEEDED":
-                            break
-                        elif status in ["FAILED", "ABORTED"]:
-                            return "❌ Парсер завершился с ошибкой"
-                        await asyncio.sleep(1)
-                
-                results_url = f"https://api.apify.com/v2/actor-runs/{run_id}/dataset/items?token={APIFY_API_KEY}"
-                async with session.get(results_url) as results_resp:
-                    results = await results_resp.json()
-                    
-                    if not results:
-                        return f"🔍 По запросу '{query}' ничего не найдено на Wildberries"
-                    
-                    response = f"🛒 **Результаты поиска '{query}' на Wildberries:**\n\n"
-                    
-                    for i, item in enumerate(results[:max_items], 1):
-                        name = item.get("name", "Без названия")
-                        price = item.get("price", {}).get("amount", "Цена не указана")
-                        currency = item.get("price", {}).get("currency", "₽")
-                        rating = item.get("rating", "Нет рейтинга")
-                        url = item.get("url", "")
-                        
-                        response += f"{i}. **{name}**\n"
-                        response += f"   💰 {price} {currency}\n"
-                        response += f"   ⭐ Рейтинг: {rating}\n"
-                        if url:
-                            response += f"   🔗 {url}\n"
-                        response += "\n"
-                    
-                    response += f"📊 Всего найдено: {len(results)} товаров"
-                    return response
-                    
-    except Exception as e:
-        print(f"❌ Ошибка Wildberries парсера: {e}")
-        return f"⚠️ Ошибка при поиске: {str(e)}"
-
-# ==========================
-# КЕШ ПАМЯТИ
+# КЕШ ПАМЯТИ ПОЛЬЗОВАТЕЛЕЙ
 # ==========================
 
 USER_MEMORY_CACHE = {}
@@ -1221,7 +1144,7 @@ def send_message(chat_id, text):
         return False
 
 # =======================================================
-# ОСНОВНАЯ ЛОГИКА ОБРАБОТКИ СООБЩЕНИЙ (С ИСПРАВЛЕНИЯМИ)
+# ОСНОВНАЯ ЛОГИКА ОБРАБОТКИ СООБЩЕНИЙ (ЧИСТАЯ ВЕРСИЯ)
 # =======================================================
 
 async def process_message(request: Request, chat_id, text):
@@ -1254,75 +1177,7 @@ async def process_message(request: Request, chat_id, text):
         ip = request.client.host if request.client else "127.0.0.1"
     
     # ==========================
-    # МАГАЗИНЫ (Wildberries, Ozon и т.д.)
-    # ==========================
-    
-    if "wildberries" in search_text or "валдберис" in search_text or "валберис" in search_text or "вальдберис" in search_text or "вб" in search_text:
-        query = re.sub(r'wildberries|валдберис|валберис|вальдберис|вб|найди|поищи|покажи|картинк|фото|рисунк', '', text, flags=re.IGNORECASE).strip()
-        if not query:
-            query = "товары"
-        
-        send_message(chat_id, f"🔍 Ищу '{query}' на Wildberries...")
-        result = await search_wildberries(query, max_items=5)
-        update_user_memory(chat_id, "assistant", result)
-        return {"reply": result}
-    
-    # ==========================
-    # ВРЕМЯ (С ИСПРАВЛЕНИЕМ)
-    # ==========================
-    
-    time_queries = ["время", "который час", "сколько времени", "час", "сколько сейчас", "точное время"]
-    is_time_query = any(query in lower for query in time_queries) and re.search(r'\b(время|час|который час|сколько времени|сколько сейчас|точное время)\b', lower)
-    
-    city_match = re.search(r'(?:в|время в|времени в|часов в|город)\s+([А-Яа-яЁё\-]+)', lower)
-    
-    if is_time_query:
-        if city_match:
-            city = city_match.group(1).capitalize()
-            update_user_city(chat_id, city)
-            save_memory(chat_id, "city", city)
-            current_time, city = get_current_time_for_user(chat_id, ip)
-            time_str = current_time.strftime("%H:%M")
-            date_str = current_time.strftime("%d.%m.%Y")
-            reply = f"🕐 Сейчас {time_str} {date_str} (город: {city})"
-            update_user_memory(chat_id, "assistant", reply)
-            return {"reply": reply}
-        else:
-            current_time, city = get_current_time_for_user(chat_id, ip)
-            time_str = current_time.strftime("%H:%M")
-            date_str = current_time.strftime("%d.%m.%Y")
-            reply = f"🕐 Сейчас {time_str} {date_str} (город: {city})"
-            update_user_memory(chat_id, "assistant", reply)
-            return {"reply": reply}
-    
-    # ==========================
-    # ОБРАБОТКА ЗАПРОСОВ ПАМЯТИ
-    # ==========================
-    
-    if "что мы обсуждали" in lower or "что я спрашивал" in lower or "о чём мы говорили" in lower:
-        context = get_full_context(chat_id)
-        topics = context["topics"]
-        if topics:
-            topics_list = "\n".join([f"- {t}" for t in topics[:20]])
-            reply = f"📚 Мы обсуждали:\n{topics_list}\n\nХочешь вернуться к какой-то теме?"
-        else:
-            reply = "📚 Мы пока ничего не обсуждали. Напиши что-нибудь, и я запомню!"
-        update_user_memory(chat_id, "assistant", reply)
-        return {"reply": reply}
-    
-    if "помнишь" in lower:
-        search_query = re.sub(r'помнишь|ты помнишь|помнишь ли', '', lower).strip()
-        if search_query:
-            found = search_memory(chat_id, search_query)
-            if found:
-                reply = "🧠 Да, я помню:\n\n"
-                for msg in found[-3:]:
-                    reply += f"- {msg['content'][:200]}...\n"
-                update_user_memory(chat_id, "assistant", reply)
-                return {"reply": reply}
-    
-    # ==========================
-    # ВИЗУАЛЬНЫЕ ТРИГГЕРЫ (КАРТИНКИ, ВИДЕО, МУЗЫКА)
+    # 1. ВИЗУАЛЬНЫЕ ТРИГГЕРЫ (Картинки, видео, музыка)
     # ==========================
     
     visual_triggers = {
@@ -1348,7 +1203,74 @@ async def process_message(request: Request, chat_id, text):
             return {"reply": reply}
     
     # ==========================
-    # ОСТАЛЬНАЯ ЛОГИКА (ПРИВЕТСТВИЕ, СТАРТ)
+    # 2. ПОИСК (Tavily + DuckDuckGo)
+    # ==========================
+    
+    search_triggers = ["новости", "погода", "найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "парикмахер", "авито", "квартир"]
+    if any(word in search_text for word in search_triggers):
+        print(f"🔍 Глубокий поиск: {text}")
+        search_result = await search_web(text)
+        if search_result:
+            reply = search_result
+        else:
+            reply = "🔍 Ничего не нашёл по твоему запросу. Попробуй переформулировать."
+        update_user_memory(chat_id, "assistant", reply)
+        return {"reply": reply}
+    
+    # ==========================
+    # 3. ВРЕМЯ
+    # ==========================
+    
+    time_queries = ["время", "который час", "сколько времени", "час", "сколько сейчас", "точное время"]
+    is_time_query = any(query in lower for query in time_queries) and re.search(r'\b(время|час|который час|сколько времени|сколько сейчас|точное время)\b', lower)
+    
+    city_match = re.search(r'(?:в|время в|времени в|часов в|город)\s+([А-Яа-яЁё\-]+)', lower)
+    
+    if is_time_query:
+        if city_match:
+            city = city_match.group(1).capitalize()
+            update_user_city(chat_id, city)
+            save_memory(chat_id, "city", city)
+            current_time, city = get_current_time_for_user(chat_id, ip)
+            time_str = current_time.strftime("%H:%M")
+            date_str = current_time.strftime("%d.%m.%Y")
+            reply = f"🕐 Сейчас {time_str} {date_str} (город: {city})"
+        else:
+            current_time, city = get_current_time_for_user(chat_id, ip)
+            time_str = current_time.strftime("%H:%M")
+            date_str = current_time.strftime("%d.%m.%Y")
+            reply = f"🕐 Сейчас {time_str} {date_str} (город: {city})"
+        update_user_memory(chat_id, "assistant", reply)
+        return {"reply": reply}
+    
+    # ==========================
+    # 4. ПАМЯТЬ: "помнишь" / "что мы обсуждали"
+    # ==========================
+    
+    if "что мы обсуждали" in lower or "что я спрашивал" in lower or "о чём мы говорили" in lower:
+        context = get_full_context(chat_id)
+        topics = context["topics"]
+        if topics:
+            topics_list = "\n".join([f"- {t}" for t in topics[:20]])
+            reply = f"📚 Мы обсуждали:\n{topics_list}\n\nХочешь вернуться к какой-то теме?"
+        else:
+            reply = "📚 Мы пока ничего не обсуждали. Напиши что-нибудь, и я запомню!"
+        update_user_memory(chat_id, "assistant", reply)
+        return {"reply": reply}
+    
+    if "помнишь" in lower:
+        search_query = re.sub(r'помнишь|ты помнишь|помнишь ли', '', lower).strip()
+        if search_query:
+            found = search_memory(chat_id, search_query)
+            if found:
+                reply = "🧠 Да, я помню:\n\n"
+                for msg in found[-3:]:
+                    reply += f"- {msg['content'][:200]}...\n"
+                update_user_memory(chat_id, "assistant", reply)
+                return {"reply": reply}
+    
+    # ==========================
+    # 5. ОБЫЧНЫЙ ДИАЛОГ (AI)
     # ==========================
     
     current_time, city = get_current_time_for_user(chat_id, ip)
@@ -1366,22 +1288,7 @@ async def process_message(request: Request, chat_id, text):
     if last_msg_time and (datetime.now() - last_msg_time) > timedelta(hours=48):
         send_message(chat_id, "👋 Давно не общались! Как дела?")
     
-    # ==========================
-    # ПОИСК
-    # ==========================
-    
-    search_result = None
-    search_triggers = ["новости", "погода", "найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "парикмахер", "авито"]
-    if any(word in search_text for word in search_triggers):
-        print(f"🔍 Глубокий поиск: {text}")
-        search_result = await search_web(text)
-        if search_result:
-            text = text + f"\n\n🔍 {search_result}"
-    
-    # ==========================
-    # СОХРАНЕНИЕ ТЕМ
-    # ==========================
-    
+    # Сохраняем темы
     stop_words = ["привет", "здравствуй", "спасибо", "пока", "да", "нет", "хорошо", "плохо"]
     words = re.findall(r'\b[а-яА-ЯёЁ]{4,}\b', text.lower())
     for word in words:
