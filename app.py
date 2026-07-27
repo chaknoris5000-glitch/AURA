@@ -74,6 +74,70 @@ if TavilyClient and TAVILY_API_KEY:
     except Exception as e:
         print(f"⚠️ Tavily: {e}")
 
+# ==========================
+# КЕШ ПАМЯТИ ПОЛЬЗОВАТЕЛЕЙ
+# ==========================
+
+USER_MEMORY_CACHE = {}
+
+def load_user_memory(chat_id):
+    """Загружает всю историю пользователя в кеш при старте"""
+    if chat_id not in USER_MEMORY_CACHE:
+        history = get_history(chat_id, limit=1000)
+        topics = get_all_topics(chat_id)
+        user_data = get_user(chat_id)
+        
+        USER_MEMORY_CACHE[chat_id] = {
+            "history": history,
+            "topics": topics,
+            "user": user_data,
+            "last_updated": datetime.now()
+        }
+        print(f"🧠 Загружена память для {chat_id}: {len(history)} сообщений, {len(topics)} тем")
+    return USER_MEMORY_CACHE[chat_id]
+
+def update_user_memory(chat_id, role, content):
+    """Обновляет кеш и БД"""
+    save_message(chat_id, role, content)
+    
+    if chat_id in USER_MEMORY_CACHE:
+        USER_MEMORY_CACHE[chat_id]["history"].append({
+            "role": role, 
+            "content": content,
+            "time": datetime.now().isoformat()
+        })
+        USER_MEMORY_CACHE[chat_id]["last_updated"] = datetime.now()
+    else:
+        load_user_memory(chat_id)
+
+def get_full_context(chat_id, limit=500):
+    """Возвращает полный контекст для AI"""
+    cache = USER_MEMORY_CACHE.get(chat_id)
+    if not cache:
+        cache = load_user_memory(chat_id)
+    
+    history = cache["history"][-limit:] if cache["history"] else []
+    topics = cache["topics"][:10] if cache["topics"] else []
+    
+    return {
+        "history": history,
+        "topics": topics,
+        "user": cache.get("user")
+    }
+
+def search_memory(chat_id, query):
+    """Поиск по истории пользователя"""
+    cache = USER_MEMORY_CACHE.get(chat_id)
+    if not cache:
+        cache = load_user_memory(chat_id)
+    
+    results = []
+    for msg in cache["history"]:
+        if query.lower() in msg.get("content", "").lower():
+            results.append(msg)
+    
+    return results[-10:]
+
 def set_bot_description():
     description = """👋Привет! Я — AURA, твой умный помощник! 
 🔥Даю тебе - 7 дней бесплатного доступа!"""
@@ -168,7 +232,6 @@ def send_voice_reply(chat_id, text):
     if LAST_VOICE_MESSAGE.get(chat_id) == text_hash:
         return True
 
-    # Пробуем Yandex, если не получается — gTTS
     audio_path = yandex_tts(voice_text)
     if not audio_path:
         try:
@@ -715,7 +778,7 @@ def save_message(user_id, role, content):
     conn.commit()
     conn.close()
 
-def get_history(user_id, limit=200):
+def get_history(user_id, limit=1000):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("SELECT role, content, created_at FROM history WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", (user_id, limit))
@@ -1063,6 +1126,22 @@ async def webhook(request: Request):
                 send_message(chat_id, f"📊 Текущая модель: {pref.upper()}")
                 return JSONResponse({"ok": True})
             
+            if text.startswith("/memory"):
+                context = get_full_context(chat_id)
+                topics = context["topics"]
+                history_count = len(context["history"])
+                
+                reply = f"🧠 **Память AURA:**\n"
+                reply += f"- Всего сообщений: {history_count}\n"
+                reply += f"- Сохранённых тем: {len(topics)}\n"
+                if topics:
+                    reply += f"\n**Темы:**\n" + "\n".join([f"- {t}" for t in topics[:10]])
+                else:
+                    reply += "\nТем пока нет."
+                
+                send_message(chat_id, reply)
+                return JSONResponse({"ok": True})
+            
             if text.startswith("/buy"):
                 keyboard = [
                     [{"text": "⭐ Собеседник — 50 Stars", "callback_data": "buy_собеседник"}],
@@ -1103,7 +1182,7 @@ async def webhook(request: Request):
             result = await process_message(request, chat_id, text)
             send_message(chat_id, result["reply"])
             if result["reply"] and not text.startswith("/"):
-                send_voice_reply(chat_id, result["reply"])  # БЕЗ ПОТОКОВ!
+                send_voice_reply(chat_id, result["reply"])
                 
         return JSONResponse({"ok": True})
     except Exception as e:
@@ -1125,7 +1204,11 @@ async def process_message(request: Request, chat_id, text):
     if not user:
         save_user(chat_id)
     
-    save_message(chat_id, "user", text)
+    # Загружаем память пользователя при первом сообщении
+    load_user_memory(chat_id)
+    
+    # Сохраняем сообщение пользователя
+    update_user_memory(chat_id, "user", text)
     
     lower = text.lower()
     normalized = normalize_query(text)
@@ -1166,15 +1249,42 @@ async def process_message(request: Request, chat_id, text):
             time_str = current_time.strftime("%H:%M")
             date_str = current_time.strftime("%d.%m.%Y")
             reply = f"🕐 Сейчас {time_str} {date_str} (город: {city})"
-            save_message(chat_id, "assistant", reply)
+            update_user_memory(chat_id, "assistant", reply)
             return {"reply": reply}
         else:
             current_time, city = get_current_time_for_user(chat_id, ip)
             time_str = current_time.strftime("%H:%M")
             date_str = current_time.strftime("%d.%m.%Y")
             reply = f"🕐 Сейчас {time_str} {date_str} (город: {city})"
-            save_message(chat_id, "assistant", reply)
+            update_user_memory(chat_id, "assistant", reply)
             return {"reply": reply}
+    
+    # ==========================
+    # ОБРАБОТКА ЗАПРОСОВ ПАМЯТИ
+    # ==========================
+    
+    # Проверяем, спрашивает ли пользователь о прошлых разговорах
+    if "что мы обсуждали" in lower or "что я спрашивал" in lower or "о чём мы говорили" in lower:
+        context = get_full_context(chat_id)
+        topics = context["topics"]
+        if topics:
+            topics_list = "\n".join([f"- {t}" for t in topics[:20]])
+            reply = f"📚 Мы обсуждали:\n{topics_list}\n\nХочешь вернуться к какой-то теме?"
+        else:
+            reply = "📚 Мы пока ничего не обсуждали. Напиши что-нибудь, и я запомню!"
+        update_user_memory(chat_id, "assistant", reply)
+        return {"reply": reply}
+    
+    if "помнишь" in lower:
+        search_query = re.sub(r'помнишь|ты помнишь|помнишь ли', '', lower).strip()
+        if search_query:
+            found = search_memory(chat_id, search_query)
+            if found:
+                reply = "🧠 Да, я помню:\n\n"
+                for msg in found[-3:]:
+                    reply += f"- {msg['content'][:200]}...\n"
+                update_user_memory(chat_id, "assistant", reply)
+                return {"reply": reply}
     
     # ==========================
     # ОСТАЛЬНАЯ ЛОГИКА (БЕЗ ЛИШНИХ СООБЩЕНИЙ)
@@ -1189,7 +1299,7 @@ async def process_message(request: Request, chat_id, text):
     if msg_count <= 1:
         welcome = f"👋 Привет! Сейчас {time_str} {date_str}."
         send_message(chat_id, welcome)
-        save_message(chat_id, "assistant", welcome)
+        update_user_memory(chat_id, "assistant", welcome)
     
     last_msg_time = get_last_message_time(chat_id)
     if last_msg_time and (datetime.now() - last_msg_time) > timedelta(hours=48):
@@ -1218,7 +1328,7 @@ async def process_message(request: Request, chat_id, text):
             if not query:
                 query = trigger
             reply = f"Вот {trigger}: {base_url}{query.replace(' ', '%20')}"
-            save_message(chat_id, "assistant", reply)
+            update_user_memory(chat_id, "assistant", reply)
             return {"reply": reply}
     
     # ==========================
@@ -1243,15 +1353,17 @@ async def process_message(request: Request, chat_id, text):
         if word not in stop_words and len(word) > 3:
             save_topic(chat_id, word)
     
-    topics = get_all_topics(chat_id)
-    topics_text = ", ".join(topics[:7]) if topics else "нет сохранённых тем"
-    history = get_history(chat_id, limit=200)
+    # Получаем контекст из кеша
+    context = get_full_context(chat_id, limit=500)
+    history = context["history"]
+    topics = context["topics"]
     
     user_name = get_memory(chat_id, "name")
     user_style = get_memory(chat_id, "style")
     likes = get_memory(chat_id, "likes")
     dislikes = get_memory(chat_id, "dislikes")
     
+    topics_text = ", ".join(topics[:7]) if topics else "нет сохранённых тем"
     memory_context = f"Ты помнишь: мы обсуждали {topics_text}."
     name_context = f"Имя пользователя: {user_name}" if user_name else ""
     style_context = f"Стиль пользователя: {user_style}" if user_style else ""
@@ -1271,7 +1383,7 @@ async def process_message(request: Request, chat_id, text):
     aura_prompt = AURA_PROMPT + f"\n\n{mood_context}\n\n{user_prompt}"
     
     messages = [{"role": "system", "content": aura_prompt}]
-    for msg in history[-30:]:
+    for msg in history[-50:]:
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": text})
     
@@ -1304,7 +1416,7 @@ async def process_message(request: Request, chat_id, text):
     if not reply.endswith("?") and len(reply) < 300:
         reply += "\n\nЧто думаешь?"
     
-    save_message(chat_id, "assistant", reply)
+    update_user_memory(chat_id, "assistant", reply)
     return {"reply": reply}
 
 @app.get("/")
