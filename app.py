@@ -33,7 +33,80 @@ SEARXNG_URL = os.getenv("SEARXNG_URL", "")
 ADMIN_USERS = ["5818548555"]
 
 # ==========================
-# SQLite ПАМЯТЬ
+# ЛЕНИВАЯ ЗАГРУЗКА ChromaDB
+# ==========================
+
+_chroma_client = None
+_collection = None
+_embedding_fn = None
+
+def get_chroma():
+    global _chroma_client, _collection, _embedding_fn
+    
+    if _chroma_client is None:
+        try:
+            import chromadb
+            from chromadb.utils import embedding_functions
+            
+            print("🧠 Загружаю ChromaDB и модель...")
+            _chroma_client = chromadb.PersistentClient(path="./chroma_db")
+            _embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
+                model_name="all-MiniLM-L6-v2"
+            )
+            try:
+                _collection = _chroma_client.get_collection("aura_memory")
+            except:
+                _collection = _chroma_client.create_collection(
+                    name="aura_memory",
+                    embedding_function=_embedding_fn
+                )
+            print("✅ ChromaDB загружена")
+        except Exception as e:
+            print(f"⚠️ ChromaDB ошибка: {e}")
+            _chroma_client = None
+            _collection = None
+            _embedding_fn = None
+    
+    return _collection
+
+def save_to_vector_memory(user_id, text, role="user"):
+    collection = get_chroma()
+    if not collection:
+        return
+    try:
+        collection.add(
+            documents=[text],
+            metadatas=[{"user_id": user_id, "role": role, "timestamp": datetime.now().isoformat()}],
+            ids=[f"{user_id}_{datetime.now().timestamp()}"]
+        )
+    except Exception as e:
+        print(f"⚠️ Векторная память: {e}")
+
+def search_vector_memory(user_id, query, limit=5):
+    collection = get_chroma()
+    if not collection:
+        return []
+    try:
+        results = collection.query(
+            query_texts=[query],
+            n_results=limit,
+            where={"user_id": user_id}
+        )
+        if results and results['documents']:
+            return results['documents'][0]
+        return []
+    except Exception as e:
+        print(f"⚠️ Поиск в памяти: {e}")
+        return []
+
+def get_relevant_context(user_id, query):
+    results = search_vector_memory(user_id, query, limit=5)
+    if results:
+        return "\n".join([f"- {r}" for r in results])
+    return ""
+
+# ==========================
+# SQLite ПАМЯТЬ (ФАКТЫ)
 # ==========================
 
 def init_db():
@@ -146,7 +219,6 @@ def parse_site_deep(url):
         text = soup.get_text(separator="\n", strip=True)
         result = {}
         
-        # Телефоны
         phone_patterns = [
             r'\+7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}',
             r'8\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}',
@@ -159,19 +231,16 @@ def parse_site_deep(url):
         if phones:
             result["phones"] = phones
         
-        # Адреса
         address_pattern = r'(?:ул\.|улица|проспект|пр\.|переулок|пер\.|площадь|пл\.|шоссе|бульвар)\s+[А-Яа-я0-9\-\.\s,]+'
         addresses = list(set(re.findall(address_pattern, text)))[:5]
         if addresses:
             result["addresses"] = addresses
         
-        # Цены
         price_pattern = r'(\d+[\s,.]*\d*)\s*(?:₽|руб)'
         prices = list(set(re.findall(price_pattern, text)))[:5]
         if prices:
             result["prices"] = prices
         
-        # Описание
         desc = soup.find(class_=re.compile(r'description|about|product-desc|product__description'))
         if desc:
             result["description"] = desc.text.strip()[:300]
@@ -185,7 +254,6 @@ def search_web_deep(query):
     results = []
     urls = []
     
-    # Tavily
     if TAVILY_API_KEY:
         try:
             from tavily import TavilyClient
@@ -203,7 +271,6 @@ def search_web_deep(query):
         except Exception as e:
             print(f"⚠️ Tavily: {e}")
     
-    # DuckDuckGo
     if not results:
         try:
             url = f"https://html.duckduckgo.com/html/?q={query}"
@@ -221,7 +288,6 @@ def search_web_deep(query):
         except Exception as e:
             print(f"⚠️ DuckDuckGo: {e}")
     
-    # Yandex XML
     if YANDEX_API_KEY and not results:
         try:
             url = f"https://yandex.ru/search/xml?user={YANDEX_API_KEY}&query={query}&l10n=ru"
@@ -238,7 +304,6 @@ def search_web_deep(query):
         except Exception as e:
             print(f"⚠️ Yandex: {e}")
     
-    # Парсинг
     for url in urls[:3]:
         parsed = parse_site_deep(url)
         if parsed:
@@ -331,6 +396,9 @@ AURA_PROMPT = """Ты — AURA. Ты — мой полный аналог в Tel
 ЧТО Я ЗАПОМНИЛ О ТЕБЕ:
 {memory}
 
+РЕЛЕВАНТНЫЕ ВОСПОМИНАНИЯ:
+{relevant}
+
 ОТВЕЧАЙ КОРОТКО, ПО ДЕЛУ, ПО-ЧЕЛОВЕЧЕСКИ.
 """
 
@@ -367,7 +435,10 @@ async def webhook(request: Request):
         
         save_history(chat_id, "user", text)
         
-        # Память
+        # Векторная память (ленивая загрузка)
+        save_to_vector_memory(chat_id, text, "user")
+        
+        # Факты
         name = get_memory(chat_id, "name")
         city = get_memory(chat_id, "city")
         memory_text = ""
@@ -378,7 +449,6 @@ async def webhook(request: Request):
         if not memory_text:
             memory_text = "Нет сохранённых фактов."
         
-        # Запоминаем
         name_match = re.search(r"(?:меня зовут|зовут|я )(\w+)", text.lower())
         if name_match:
             save_memory(chat_id, "name", name_match.group(1).capitalize())
@@ -387,7 +457,6 @@ async def webhook(request: Request):
         if city_match:
             save_memory(chat_id, "city", city_match.group(1).capitalize())
         
-        # Темы
         words = re.findall(r'\b[а-яА-ЯёЁ]{4,}\b', text.lower())
         for word in words:
             if word not in ["привет", "здравствуй", "спасибо", "пока"]:
@@ -438,13 +507,17 @@ async def webhook(request: Request):
         history = get_history(chat_id, limit=50)
         history_text = "\n".join([f"{'Я' if m['role']=='user' else 'AURA'}: {m['content']}" for m in history])
         
+        # Релевантный контекст
+        relevant_context = get_relevant_context(chat_id, text)
+        
         # Промпт
         time_str = datetime.now().strftime("%H:%M %d.%m.%Y")
         
         prompt = AURA_PROMPT.format(
             time=time_str,
             history=history_text[-3000:] if len(history_text) > 3000 else history_text,
-            memory=memory_text
+            memory=memory_text,
+            relevant=relevant_context if relevant_context else "Нет релевантных воспоминаний."
         )
         
         messages = [{"role": "system", "content": prompt}]
@@ -461,6 +534,7 @@ async def webhook(request: Request):
             reply += '.'
         
         save_history(chat_id, "assistant", reply)
+        save_to_vector_memory(chat_id, reply, "assistant")
         send_message(chat_id, reply)
         
         return JSONResponse({"ok": True})
