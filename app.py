@@ -192,7 +192,7 @@ def set_bot_description():
 set_bot_description()
 
 # ==========================
-# ВРЕМЯ (С ПРАВИЛЬНЫМИ ЧАСОВЫМИ ПОЯСАМИ)
+# ВРЕМЯ
 # ==========================
 
 def get_timezone_offset(city_name):
@@ -264,7 +264,27 @@ def get_current_time_for_user(user_id, ip=None):
     return datetime.utcnow() + timedelta(hours=3), "Москва"
 
 # ==========================
-# ПОИСК
+# ПРОВЕРКА ССЫЛОК
+# ==========================
+
+async def check_url(url):
+    """Проверяет, существует ли сайт"""
+    try:
+        bad_domains = ['2gis', 'avito', 'yandex', 'prodoctorov', 'diagnocenter', 'orgpage', 'vk.com', 'ok.ru']
+        if any(bad in url.lower() for bad in bad_domains):
+            return False
+        response = requests.head(url, timeout=5, allow_redirects=True)
+        if response.status_code == 200:
+            return True
+        elif response.status_code in [301, 302]:
+            return True
+        else:
+            return False
+    except:
+        return False
+
+# ==========================
+# ПАРСИНГ САЙТОВ
 # ==========================
 
 def parse_site_for_info(url):
@@ -323,8 +343,13 @@ def parse_site_for_info(url):
         print(f"❌ Ошибка парсинга: {e}")
         return None
 
+# ==========================
+# ПОИСК
+# ==========================
+
 async def search_web(query):
     results = []
+    checked_urls = []
     
     if tavily_client:
         try:
@@ -343,7 +368,9 @@ async def search_web(query):
                     url = r.get('url', '')
                     content = r.get('content', '')[:300]
                     if title and url:
-                        results.append(f"**{title}**\n{content}...\n🔗 {url}")
+                        if await check_url(url):
+                            checked_urls.append(url)
+                            results.append(f"**{title}**\n{content}...")
         except Exception as e:
             print(f"❌ Tavily: {e}")
     
@@ -359,30 +386,29 @@ async def search_web(query):
                     link = result.select_one('.result__url')
                     snippet = result.select_one('.result__snippet')
                     if snippet and link:
-                        results.append(f"**{title.text.strip()}**\n{snippet.text.strip()[:200]}...\n🔗 {link.text.strip()}")
+                        url = link.text.strip()
+                        if await check_url(url):
+                            checked_urls.append(url)
+                            results.append(f"**{title.text.strip()}**\n{snippet.text.strip()[:200]}...")
         except Exception as e:
             print(f"❌ DuckDuckGo: {e}")
     
-    urls = re.findall(r'https?://[^\s]+', "\n".join(results))
-    for url in urls[:3]:
+    for url in checked_urls[:3]:
         parsed = parse_site_for_info(url)
         if parsed:
             if parsed.get("phones"):
                 results.append(f"📞 Телефоны: {', '.join(parsed['phones'])}")
             if parsed.get("addresses"):
                 results.append(f"📍 Адреса: {', '.join(parsed['addresses'])}")
-            if parsed.get("prices"):
-                results.append(f"💰 Цены: {', '.join(parsed['prices'])}")
             if parsed.get("emails"):
                 results.append(f"✉️ Email: {', '.join(parsed['emails'])}")
             if parsed.get("sites"):
                 results.append(f"🌐 Сайты: {', '.join(parsed['sites'])}")
-            if parsed.get("product_title"):
-                results.append(f"📦 Товар: {parsed['product_title']}")
-            if parsed.get("product_description"):
-                results.append(f"📝 Описание: {parsed['product_description'][:200]}...")
     
-    return "\n\n".join(results) if results else None
+    return {
+        "text": "\n\n".join(results) if results else None,
+        "urls": checked_urls
+    }
 
 # ==========================
 # ФУНКЦИИ БАЗЫ
@@ -557,7 +583,7 @@ async def get_ai_response(messages, max_tokens=400):
             return "Извини, сейчас проблемы с подключением. Попробуй позже."
 
 # ==========================
-# ПРОМПТ (СТАБИЛЬНАЯ ВЕРСИЯ)
+# ПРОМПТ
 # ==========================
 
 AURA_PROMPT = """Ты — AURA. Ты — мой полный аналог в Telegram.
@@ -897,7 +923,7 @@ def save_payment(user_id, subscription, stars):
         pass
 
 # ==========================
-# ОСНОВНАЯ ЛОГИКА (СТАБИЛЬНАЯ)
+# ОСНОВНАЯ ЛОГИКА
 # ==========================
 
 USER_MODEL_PREFERENCE = {}
@@ -945,38 +971,57 @@ async def process_message(request: Request, chat_id, text):
         mood_prefix = "Пользователь в хорошем настроении. Можно с юмором."
     
     # ==========================
-    # ВИДЕО И КАРТИНКИ
+    # КАРТИНКИ, ВИДЕО, МУЗЫКА (С УМНОЙ ОЧИСТКОЙ)
     # ==========================
     
     visual_triggers = {
-        "картинк": "https://yandex.ru/images/search?text=",
-        "рисунк": "https://yandex.ru/images/search?text=",
-        "котик": "https://yandex.ru/images/search?text=коты",
-        "кот": "https://yandex.ru/images/search?text=коты",
-        "соба": "https://yandex.ru/images/search?text=собаки",
-        "видео": "https://yandex.ru/video/search?text=",
-        "ютуб": "https://yandex.ru/video/search?text=",
-        "музык": "https://music.yandex.ru/search?text=",
-        "песн": "https://music.yandex.ru/search?text=",
+        "картинк": {"url": "https://yandex.ru/images/search?text=", "type": "картинки"},
+        "рисунк": {"url": "https://yandex.ru/images/search?text=", "type": "картинки"},
+        "фото": {"url": "https://yandex.ru/images/search?text=", "type": "картинки"},
+        "видео": {"url": "https://yandex.ru/video/search?text=", "type": "видео"},
+        "ютуб": {"url": "https://yandex.ru/video/search?text=", "type": "видео"},
+        "музык": {"url": "https://music.yandex.ru/search?text=", "type": "музыку"},
+        "песн": {"url": "https://music.yandex.ru/search?text=", "type": "музыку"},
+        "клип": {"url": "https://yandex.ru/video/search?text=", "type": "видео"},
     }
     
-    for trigger, base_url in visual_triggers.items():
+    for trigger, data in visual_triggers.items():
         if trigger in lower:
-            query = text.strip()
-            for t in visual_triggers.keys():
-                query = re.sub(rf'\b{t}\b', '', query, flags=re.IGNORECASE).strip()
-            if not query:
-                query = trigger
-            if trigger in ["видео", "ютуб", "музык", "песн"]:
-                query = re.sub(r'найди|хочу|покажи|дай|ссылку', '', query, flags=re.IGNORECASE).strip()
-                if not query:
+            query = text.lower()
+            
+            stop_words = [
+                "картинк", "рисунк", "фото", "видео", "ютуб", "музык", "песн", "клип",
+                "найди", "хочу", "покажи", "дай", "ссылку", "про", "на", "с", "и", "в", "а",
+                "к", "у", "о", "от", "до", "за", "мне", "меня", "посмотреть", "найти",
+                "котик", "котика", "котиков", "кот", "кота", "котов"
+            ]
+            
+            for word in stop_words:
+                query = query.replace(word, " ")
+            
+            query = " ".join(query.split()).strip()
+            
+            if not query or len(query) < 3:
+                if "котик" in text.lower() or "кот" in text.lower():
                     query = "котики"
-            if trigger in ["видео", "ютуб"]:
-                reply = f"🎬 {base_url}{query.replace(' ', '%20')}"
-            elif trigger in ["музык", "песн"]:
-                reply = f"🎵 {base_url}{query.replace(' ', '%20')}"
-            else:
-                reply = f"🖼️ {base_url}{query.replace(' ', '%20')}"
+                elif "соба" in text.lower():
+                    query = "собаки"
+                elif "закат" in text.lower():
+                    query = "закаты"
+                elif "природа" in text.lower():
+                    query = "природа"
+                elif "красив" in text.lower():
+                    query = "красивые картинки"
+                else:
+                    query = trigger
+            
+            query = re.sub(r'[^а-яА-Яa-zA-Z0-9 ]', '', query)
+            
+            url = data["url"] + query.replace(" ", "%20")
+            content_type = data["type"]
+            
+            reply = f"🖼️ Вот {content_type} по запросу '{query}':\n{url}\n\nЧто ещё могу сделать?"
+            
             update_user_memory(chat_id, "assistant", reply)
             return {"reply": reply}
     
@@ -1004,22 +1049,32 @@ async def process_message(request: Request, chat_id, text):
         return {"reply": reply}
     
     # ==========================
-    # ПОИСК
+    # ПОИСК САЙТОВ (С ПРОВЕРКОЙ)
     # ==========================
     
-    search_triggers = ["найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "новости", "погода", "авито", "квартир"]
+    search_triggers = ["найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "новости", "погода", "авито", "квартир", "дром", "wildberries", "валдберис", "озон"]
     if any(word in lower for word in search_triggers):
         print(f"🔍 Поиск: {text}")
         search_result = await search_web(text)
         
-        if search_result:
-            messages = [
-                {"role": "system", "content": f"{AURA_PROMPT}\n\n{mood_prefix}"},
-                {"role": "user", "content": f"Вот что нашлось:\n{search_result}\n\nДай ответ на русском. Если есть ссылки — вставляй."}
-            ]
-            reply = await get_ai_response(messages, max_tokens=600)
+        if search_result and search_result.get("text"):
+            clean_text = search_result["text"]
+            clean_text = re.sub(r'https?://[^\s]+', '', clean_text)
+            clean_text = re.sub(r'\*\*.*?\*\*', '', clean_text)
+            clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+            if len(clean_text) > 250:
+                clean_text = clean_text[:250] + "..."
+            
+            first_url = search_result["urls"][0] if search_result.get("urls") else None
+            
+            if first_url:
+                reply = f"{clean_text}\n\n🔗 {first_url}"
+            else:
+                reply = clean_text
         else:
-            reply = "Ничего не нашёл. Переформулируй."
+            reply = "Ничего не нашёл. Попробуй переформулировать."
+        
+        reply += "\n\nЧто ещё могу сделать для тебя?"
         
         update_user_memory(chat_id, "assistant", reply)
         return {"reply": reply}
@@ -1042,7 +1097,7 @@ async def process_message(request: Request, chat_id, text):
         if topics:
             reply = "📚 " + ", ".join(topics[:10])
         else:
-            reply = "Пока ничего не обсуждали. Напиши что-нибудь, и я запомню."
+            reply = "Пока ничего не обсуждали."
         update_user_memory(chat_id, "assistant", reply)
         return {"reply": reply}
     
@@ -1088,7 +1143,6 @@ async def process_message(request: Request, chat_id, text):
     if not reply.endswith(('.', '!', '?')):
         reply += '.'
     
-    # Добавляем инициативу (если её нет)
     if not any(word in reply.lower() for word in ["что ещё", "может", "поищем", "ещё что-то"]):
         if "?" not in reply[-10:]:
             reply += " Что ещё могу сделать для тебя?"
