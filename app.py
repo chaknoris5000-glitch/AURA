@@ -1,6 +1,6 @@
 import os, re, json, requests, sqlite3, html, tempfile
 from fastapi import FastAPI, Request
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from openai import OpenAI
 from bs4 import BeautifulSoup
@@ -43,6 +43,25 @@ def get_history(uid, limit=15):
         rows = conn.execute("SELECT role, content FROM history WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", (uid, limit)).fetchall()
     return [{"role": r[0], "content": r[1]} for r in rows[::-1]]
 
+def search_in_history(uid, keyword):
+    """Ищет в истории сообщения по ключевому слову"""
+    with sqlite3.connect(DB) as conn:
+        rows = conn.execute(
+            "SELECT role, content, created_at FROM history WHERE user_id = ? AND content LIKE ? ORDER BY created_at DESC LIMIT 10",
+            (uid, f"%{keyword}%")
+        ).fetchall()
+    return rows
+
+def get_today_history(uid):
+    """Возвращает историю за сегодня"""
+    today = datetime.now().date().isoformat()
+    with sqlite3.connect(DB) as conn:
+        rows = conn.execute(
+            "SELECT role, content, created_at FROM history WHERE user_id = ? AND date(created_at) = ? ORDER BY created_at DESC LIMIT 20",
+            (uid, today)
+        ).fetchall()
+    return rows
+
 def save_topic(uid, topic):
     with sqlite3.connect(DB) as conn:
         conn.execute("INSERT INTO topics (user_id, topic) VALUES (?, ?)", (uid, topic))
@@ -55,8 +74,10 @@ def get_topics(uid):
 # ========================== РЕАЛЬНОЕ ВРЕМЯ ==========================
 def get_real_time(city):
     try:
-        zone = "Asia/Novokuznetsk" if city.lower() in ["белово", "belovo"] else "Europe/Moscow"
-        resp = requests.get(f"https://timeapi.io/api/Time/current/zone?timeZone={zone}", timeout=5)
+        if city.lower() in ["белово", "belovo"]:
+            resp = requests.get("https://timeapi.io/api/Time/current/zone?timeZone=Asia/Novokuznetsk", timeout=5)
+        else:
+            resp = requests.get("https://timeapi.io/api/Time/current/zone?timeZone=Europe/Moscow", timeout=5)
         if resp.status_code == 200:
             data = resp.json()
             return f"{data['hour']:02d}:{data['minute']:02d} {data['day']:02d}.{data['month']:02d}.{data['year']}"
@@ -74,21 +95,19 @@ def check_url(url):
 
 # ========================== ПОИСК (TAVILY + DUCK) ==========================
 def search_web(query):
-    # 1. Tavily
     if TAVILY_KEY:
         try:
             from tavily import TavilyClient
             client = TavilyClient(api_key=TAVILY_KEY)
             res = client.search(query, search_depth="advanced", max_results=3, include_answer=True)
             if res.get("answer"):
-                return {"text": res["answer"][:600], "urls": []}
+                return {"text": res["answer"][:500], "urls": []}
             if res.get("results"):
                 for r in res["results"][:3]:
                     if check_url(r["url"]):
                         return {"text": r["content"][:400], "urls": [r["url"]]}
         except:
             pass
-    # 2. DuckDuckGo
     try:
         url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -138,14 +157,14 @@ PROMPT = """Ты — AURA. Ты — живой умный помощник в Te
 
 def rewrite_query(user_text):
     messages = [
-        {"role": "system", "content": "Ты — ИИ-помощник. Перепиши запрос пользователя для поискового движка: оставь только суть, ключевые слова, убери стоп-слова. Ответь одной фразой на русском."},
+        {"role": "system", "content": "Перепиши запрос пользователя для поиска: оставь только ключевые слова, убери стоп-слова. Ответь одной фразой на русском."},
         {"role": "user", "content": user_text}
     ]
     return ask_ai(messages, max_tokens=60)
 
 def analyze_intent(text):
     messages = [
-        {"role": "system", "content": "Определи намерение пользователя. Ответь одним словом: search, image, video, time, chat."},
+        {"role": "system", "content": "Определи намерение. Ответь: search, image, video, time, chat, remind."},
         {"role": "user", "content": text}
     ]
     return ask_ai(messages, max_tokens=20)
@@ -189,7 +208,6 @@ async def webhook(request: Request):
         chat_id = str(msg["chat"]["id"])
         text = None
 
-        # ===== ГОЛОС =====
         if "voice" in msg:
             file_id = msg["voice"]["file_id"]
             file_resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}")
@@ -209,7 +227,9 @@ async def webhook(request: Request):
         save_msg(chat_id, "user", text)
         lower = text.lower()
 
-        # ===== ВРЕМЯ =====
+        # ==========================
+        # 1. ВРЕМЯ
+        # ==========================
         if any(w in lower for w in ["время", "который час", "сколько времени"]):
             city_match = re.search(r'(?:в|времени в|часов в|город)\s+([А-Яа-я\-]+)', lower)
             city = city_match.group(1).capitalize() if city_match else None
@@ -221,18 +241,57 @@ async def webhook(request: Request):
             if time_str:
                 reply = f"🕐 {time_str} ({city})"
             else:
-                reply = f"🕐 Не удалось проверить точное время. Посмотри на телефоне."
+                reply = f"🕐 Не удалось проверить точное время."
             send_msg(chat_id, reply)
             save_msg(chat_id, "assistant", reply)
             return {"ok": True}
 
-        # ===== АНАЛИЗ НАМЕРЕНИЯ =====
-        intent = analyze_intent(text)
-        if not intent:
-            intent = "chat"
+        # ==========================
+        # 2. НАПОМНИ / ЧТО МЫ ОБСУЖДАЛИ
+        # ==========================
+        if "напомни" in lower or "что мы обсуждали" in lower or "что я спрашивал" in lower:
+            # Проверяем, есть ли ключевое слово
+            keyword_match = re.search(r'напомни\s+(.+)', lower)
+            if keyword_match:
+                keyword = keyword_match.group(1).strip()
+                found = search_in_history(chat_id, keyword)
+                if found:
+                    reply = "🧠 Вот что я нашёл по твоему запросу:\n\n"
+                    for role, content, created_at in found[:5]:
+                        time_str = datetime.fromisoformat(created_at).strftime("%H:%M")
+                        role_label = "Ты" if role == "user" else "Я"
+                        reply += f"[{time_str}] {role_label}: {content[:150]}...\n"
+                else:
+                    reply = f"🔍 Ничего не нашёл по запросу «{keyword}» в истории."
+            else:
+                # Показываем последние темы
+                topics = get_topics(chat_id)
+                if topics:
+                    reply = f"📚 Мы обсуждали: {', '.join(topics[:10])}"
+                else:
+                    # Показываем последние 5 сообщений
+                    today_history = get_today_history(chat_id)
+                    if today_history:
+                        reply = "📝 Вот что мы обсуждали сегодня:\n\n"
+                        for role, content, created_at in today_history[:5]:
+                            time_str = datetime.fromisoformat(created_at).strftime("%H:%M")
+                            role_label = "Ты" if role == "user" else "Я"
+                            reply += f"[{time_str}] {role_label}: {content[:100]}...\n"
+                    else:
+                        reply = "Мы пока ничего не обсуждали сегодня. Напиши что-нибудь, и я запомню."
+            send_msg(chat_id, reply)
+            save_msg(chat_id, "assistant", reply)
+            return {"ok": True}
 
-        # ===== КАРТИНКИ =====
-        if "image" in intent.lower() or "картинк" in lower or "рисунк" in lower or "фото" in lower:
+        # ==========================
+        # 3. АНАЛИЗ НАМЕРЕНИЯ
+        # ==========================
+        intent = analyze_intent(text) or "chat"
+
+        # ==========================
+        # 4. КАРТИНКИ
+        # ==========================
+        if "image" in intent or "картинк" in lower or "рисунк" in lower or "фото" in lower:
             rewritten = rewrite_query(text) or text
             q = re.sub(r'[^а-яА-Яa-zA-Z0-9 ]', '', rewritten).strip()
             if not q:
@@ -243,8 +302,10 @@ async def webhook(request: Request):
             save_msg(chat_id, "assistant", reply)
             return {"ok": True}
 
-        # ===== ВИДЕО =====
-        if "video" in intent.lower() or "видео" in lower or "ютуб" in lower or "клип" in lower:
+        # ==========================
+        # 5. ВИДЕО
+        # ==========================
+        if "video" in intent or "видео" in lower or "ютуб" in lower or "клип" in lower:
             rewritten = rewrite_query(text) or text
             q = re.sub(r'[^а-яА-Яa-zA-Z0-9 ]', '', rewritten).strip()
             if not q:
@@ -255,28 +316,34 @@ async def webhook(request: Request):
             save_msg(chat_id, "assistant", reply)
             return {"ok": True}
 
-        # ===== ПОИСК =====
-        if "search" in intent.lower() or any(w in lower for w in ["найди", "узнай", "где", "сайт", "адрес", "телефон", "клиника", "авито", "дром", "озон"]):
+        # ==========================
+        # 6. ПОИСК
+        # ==========================
+        if "search" in intent or any(w in lower for w in ["найди", "узнай", "где", "сайт", "адрес", "телефон", "клиника", "авито", "дром", "озон"]):
             rewritten = rewrite_query(text) or text
             result = search_web(rewritten)
-            if result and result.get("text"):
-                reply = result["text"][:600]
-                if result.get("urls") and check_url(result["urls"][0]):
-                    reply += f"\n\n🔗 {result['urls'][0]}"
-                else:
-                    reply += "\n\n⚠️ Проверил ссылку — она не открывается. Нашёл информацию, но ссылку не даю."
+            if result and result.get("urls"):
+                reply = f"{result['text'][:400]}\n\n🔗 {result['urls'][0]}"
+            elif result and result.get("text"):
+                reply = result["text"][:400] + "\n\n⚠️ Ссылку проверить не удалось."
             else:
-                reply = "Ничего не нашёл. Попробуй переформулировать."
+                reply = "Не нашёл. Попробуй переформулировать."
             send_msg(chat_id, reply + "\n\nЧто ещё могу сделать?")
             save_msg(chat_id, "assistant", reply)
             return {"ok": True}
 
-        # ===== ДИАЛОГ =====
-        history = get_history(chat_id)
+        # ==========================
+        # 7. ДИАЛОГ (С ПАМЯТЬЮ 15 СООБЩЕНИЙ)
+        # ==========================
+        history = get_history(chat_id, limit=15)
         topics = get_topics(chat_id)
         context = f"Темы: {', '.join(topics)}" if topics else ""
 
-        messages = [{"role": "system", "content": PROMPT}] + history + [{"role": "user", "content": text}]
+        messages = [{"role": "system", "content": PROMPT}]
+        if context:
+            messages.append({"role": "system", "content": f"Контекст: {context}"})
+        messages += history
+        messages.append({"role": "user", "content": text})
 
         reply = ask_ai(messages)
         if reply:
