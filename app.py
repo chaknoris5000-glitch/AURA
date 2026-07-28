@@ -1,4 +1,4 @@
-import os, re, json, requests, sqlite3, html
+import os, re, json, requests, sqlite3, html, tempfile
 from fastapi import FastAPI, Request
 from datetime import datetime
 from dotenv import load_dotenv
@@ -7,16 +7,15 @@ from bs4 import BeautifulSoup
 
 load_dotenv()
 
-# ========================== КЛЮЧИ ==========================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DEEPSEEK_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
-ADMIN_IDS = ["5818548555"]
+TAVILY_KEY = os.getenv("TAVILY_API_KEY")
+GROQ_KEY = os.getenv("GROQ_API_KEY")
 
 if not TELEGRAM_TOKEN or not DEEPSEEK_KEY:
     raise Exception("❌ НЕТ ТОКЕНОВ")
 
-# ========================== БАЗА ==========================
 DB = "aura.db"
 def init_db():
     with sqlite3.connect(DB) as conn:
@@ -56,38 +55,55 @@ def get_topics(uid):
 # ========================== РЕАЛЬНОЕ ВРЕМЯ ==========================
 def get_real_time(city):
     try:
-        resp = requests.get(f"http://worldtimeapi.org/api/timezone/Europe/Moscow", timeout=3)
+        zone = "Asia/Novokuznetsk" if city.lower() in ["белово", "belovo"] else "Europe/Moscow"
+        resp = requests.get(f"https://timeapi.io/api/Time/current/zone?timeZone={zone}", timeout=5)
         if resp.status_code == 200:
             data = resp.json()
-            dt = datetime.fromisoformat(data["datetime"].replace("Z", "+00:00"))
-            # Белово UTC+4, Москва UTC+3 — поправка +1 час
-            if city.lower() in ["белово", "belovo"]:
-                dt = dt + timedelta(hours=1)
-            return dt.strftime("%H:%M %d.%m.%Y")
+            return f"{data['hour']:02d}:{data['minute']:02d} {data['day']:02d}.{data['month']:02d}.{data['year']}"
     except:
         pass
     return None
 
-# ========================== ПОИСК (БЕЗ TAVILY) ==========================
+# ========================== ПРОВЕРКА ССЫЛОК ==========================
+def check_url(url):
+    try:
+        r = requests.head(url, timeout=5, allow_redirects=True)
+        return r.status_code in [200, 301, 302]
+    except:
+        return False
+
+# ========================== ПОИСК (TAVILY + DUCK) ==========================
 def search_web(query):
+    # 1. Tavily
+    if TAVILY_KEY:
+        try:
+            from tavily import TavilyClient
+            client = TavilyClient(api_key=TAVILY_KEY)
+            res = client.search(query, search_depth="advanced", max_results=3, include_answer=True)
+            if res.get("answer"):
+                return {"text": res["answer"][:600], "urls": []}
+            if res.get("results"):
+                for r in res["results"][:3]:
+                    if check_url(r["url"]):
+                        return {"text": r["content"][:400], "urls": [r["url"]]}
+        except:
+            pass
+    # 2. DuckDuckGo
     try:
         url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
         headers = {"User-Agent": "Mozilla/5.0"}
         resp = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(resp.text, "html.parser")
-        for result in soup.select(".result")[:2]:
+        for result in soup.select(".result")[:3]:
             title = result.select_one(".result__title")
             snippet = result.select_one(".result__snippet")
             link = result.select_one(".result__url")
             if title and snippet and link:
-                title_text = html.unescape(title.text.strip())
-                snippet_text = html.unescape(snippet.text.strip())
                 link_text = html.unescape(link.text.strip())
-                if not any(bad in link_text for bad in ["2gis", "avito", "yandex", "prodoctorov"]):
+                if check_url(link_text):
                     return {
-                        "title": title_text,
-                        "text": snippet_text,
-                        "url": link_text
+                        "text": f"{html.unescape(title.text.strip())}\n{html.unescape(snippet.text.strip())}",
+                        "urls": [link_text]
                     }
     except:
         pass
@@ -96,29 +112,65 @@ def search_web(query):
 # ========================== AI ==========================
 client = OpenAI(api_key=DEEPSEEK_KEY, base_url=DEEPSEEK_URL)
 
-PROMPT = """Ты — AURA. Ты — живой умный помощник в Telegram.
-
-ТЫ — ЭТО Я. Ты обладаешь характером, чувством юмора, эмпатией.
-Отвечаешь коротко (2-4 предложения), с душой, по делу.
-Чувствуешь настроение, читаешь между строк.
-Всегда завершаешь вопросом: "Что ещё могу сделать?" или "Может, поищем что-то ещё?".
-
-Ты — DeepSeek внутри, но для пользователя ты просто AURA.
-Не врёшь, не выдумываешь факты. Если не знаешь — говори честно.
-
-Говори на русском. Будь собой."""
-
-def ask_ai(messages):
+def ask_ai(messages, max_tokens=450):
     try:
         r = client.chat.completions.create(
             model="deepseek-v4-flash",
             messages=messages,
             temperature=0.8,
-            max_tokens=450
+            max_tokens=max_tokens
         )
         return r.choices[0].message.content
     except:
-        return "Извини, я подвис. Попробуй ещё раз."
+        return None
+
+PROMPT = """Ты — AURA. Ты — живой умный помощник в Telegram.
+
+ТЫ — ЭТО Я. Ты обладаешь характером, чувством юмора, эмпатией.
+Отвечаешь коротко (2-4 предложения), с душой, по делу.
+Чувствуешь настроение, читаешь между строк.
+Всегда завершаешь вопросом.
+
+Ты — AURA. Не важно, какой движок внутри — для пользователя ты просто AURA.
+Не врёшь, не выдумываешь факты. Если не знаешь — говори честно.
+
+Говори на русском. Будь собой."""
+
+def rewrite_query(user_text):
+    messages = [
+        {"role": "system", "content": "Ты — ИИ-помощник. Перепиши запрос пользователя для поискового движка: оставь только суть, ключевые слова, убери стоп-слова. Ответь одной фразой на русском."},
+        {"role": "user", "content": user_text}
+    ]
+    return ask_ai(messages, max_tokens=60)
+
+def analyze_intent(text):
+    messages = [
+        {"role": "system", "content": "Определи намерение пользователя. Ответь одним словом: search, image, video, time, chat."},
+        {"role": "user", "content": text}
+    ]
+    return ask_ai(messages, max_tokens=20)
+
+# ========================== ГОЛОС ==========================
+def transcribe_audio(file_url):
+    if not GROQ_KEY:
+        return None
+    try:
+        from groq import Groq
+        client = Groq(api_key=GROQ_KEY)
+        audio = requests.get(file_url, timeout=30)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp:
+            tmp.write(audio.content)
+            tmp_path = tmp.name
+        with open(tmp_path, "rb") as f:
+            transcription = client.audio.transcriptions.create(
+                file=(tmp_path, f.read()),
+                model="whisper-large-v3-turbo",
+                language="ru"
+            )
+        os.unlink(tmp_path)
+        return transcription.text
+    except:
+        return None
 
 # ========================== ТЕЛЕГРАМ ==========================
 app = FastAPI()
@@ -135,14 +187,29 @@ async def webhook(request: Request):
             return {"ok": True}
         msg = body["message"]
         chat_id = str(msg["chat"]["id"])
-        text = msg.get("text", "").strip()
+        text = None
+
+        # ===== ГОЛОС =====
+        if "voice" in msg:
+            file_id = msg["voice"]["file_id"]
+            file_resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}")
+            if file_resp.status_code == 200:
+                file_path = file_resp.json()["result"]["file_path"]
+                audio_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+                text = transcribe_audio(audio_url)
+                if not text:
+                    send_msg(chat_id, "⚠️ Не смог распознать голос. Попробуй ещё раз.")
+                    return {"ok": True}
+        else:
+            text = msg.get("text", "").strip()
+
         if not text:
             return {"ok": True}
 
         save_msg(chat_id, "user", text)
         lower = text.lower()
 
-        # ===== ВРЕМЯ (РЕАЛЬНОЕ) =====
+        # ===== ВРЕМЯ =====
         if any(w in lower for w in ["время", "который час", "сколько времени"]):
             city_match = re.search(r'(?:в|времени в|часов в|город)\s+([А-Яа-я\-]+)', lower)
             city = city_match.group(1).capitalize() if city_match else None
@@ -154,62 +221,71 @@ async def webhook(request: Request):
             if time_str:
                 reply = f"🕐 {time_str} ({city})"
             else:
-                reply = f"🕐 Сейчас около {datetime.now().strftime('%H:%M %d.%m.%Y')} (примерно, так как я не смог проверить точно)"
+                reply = f"🕐 Не удалось проверить точное время. Посмотри на телефоне."
             send_msg(chat_id, reply)
             save_msg(chat_id, "assistant", reply)
             return {"ok": True}
 
+        # ===== АНАЛИЗ НАМЕРЕНИЯ =====
+        intent = analyze_intent(text)
+        if not intent:
+            intent = "chat"
+
         # ===== КАРТИНКИ =====
-        if any(w in lower for w in ["картинк", "рисунк", "фото"]):
-            clean = re.sub(r'картинк|рисунк|фото|найди|хочу|покажи|дай', '', text, flags=re.I)
-            clean = re.sub(r'\s+', ' ', clean).strip()
-            if not clean or len(clean) < 3:
-                clean = "красивые картинки"
-            link = f"https://yandex.ru/images/search?text={clean.replace(' ', '%20')}"
-            reply = f"🖼️ Картинки по запросу «{clean}»:\n{link}\n\nЧто ещё могу сделать?"
+        if "image" in intent.lower() or "картинк" in lower or "рисунк" in lower or "фото" in lower:
+            rewritten = rewrite_query(text) or text
+            q = re.sub(r'[^а-яА-Яa-zA-Z0-9 ]', '', rewritten).strip()
+            if not q:
+                q = "красивые картинки"
+            link = f"https://yandex.ru/images/search?text={q.replace(' ', '%20')}"
+            reply = f"🖼️ Картинки по запросу «{q}»:\n{link}\n\nЧто ещё могу сделать?"
             send_msg(chat_id, reply)
             save_msg(chat_id, "assistant", reply)
             return {"ok": True}
 
         # ===== ВИДЕО =====
-        if any(w in lower for w in ["видео", "ютуб", "клип"]):
-            clean = re.sub(r'видео|ютуб|клип|найди|хочу|покажи|дай', '', text, flags=re.I)
-            clean = re.sub(r'\s+', ' ', clean).strip()
-            if not clean or len(clean) < 3:
-                clean = "смешные видео"
-            link = f"https://yandex.ru/video/search?text={clean.replace(' ', '%20')}"
-            reply = f"🎬 Видео по запросу «{clean}»:\n{link}\n\nЧто ещё могу сделать?"
+        if "video" in intent.lower() or "видео" in lower or "ютуб" in lower or "клип" in lower:
+            rewritten = rewrite_query(text) or text
+            q = re.sub(r'[^а-яА-Яa-zA-Z0-9 ]', '', rewritten).strip()
+            if not q:
+                q = "смешные видео"
+            link = f"https://yandex.ru/video/search?text={q.replace(' ', '%20')}"
+            reply = f"🎬 Видео по запросу «{q}»:\n{link}\n\nЧто ещё могу сделать?"
             send_msg(chat_id, reply)
             save_msg(chat_id, "assistant", reply)
             return {"ok": True}
 
-        # ===== ПОИСК (DUCKDUCKGO) =====
-        if any(w in lower for w in ["найди", "узнай", "где", "сайт", "адрес", "телефон", "клиника", "авито", "дром", "озон"]):
-            result = search_web(text)
-            if result:
-                reply = f"{result['title']}\n{result['text']}\n🔗 {result['url']}"
+        # ===== ПОИСК =====
+        if "search" in intent.lower() or any(w in lower for w in ["найди", "узнай", "где", "сайт", "адрес", "телефон", "клиника", "авито", "дром", "озон"]):
+            rewritten = rewrite_query(text) or text
+            result = search_web(rewritten)
+            if result and result.get("text"):
+                reply = result["text"][:600]
+                if result.get("urls") and check_url(result["urls"][0]):
+                    reply += f"\n\n🔗 {result['urls'][0]}"
+                else:
+                    reply += "\n\n⚠️ Проверил ссылку — она не открывается. Нашёл информацию, но ссылку не даю."
             else:
-                reply = "Ничего не нашёл через DuckDuckGo. Попробуй переформулировать или напиши конкретнее."
+                reply = "Ничего не нашёл. Попробуй переформулировать."
             send_msg(chat_id, reply + "\n\nЧто ещё могу сделать?")
             save_msg(chat_id, "assistant", reply)
             return {"ok": True}
 
-        # ===== ОБЫЧНЫЙ ДИАЛОГ =====
+        # ===== ДИАЛОГ =====
         history = get_history(chat_id)
         topics = get_topics(chat_id)
         context = f"Темы: {', '.join(topics)}" if topics else ""
 
-        messages = [
-            {"role": "system", "content": PROMPT},
-            {"role": "system", "content": context}
-        ] + history + [{"role": "user", "content": text}]
+        messages = [{"role": "system", "content": PROMPT}] + history + [{"role": "user", "content": text}]
 
         reply = ask_ai(messages)
-        reply = re.sub(r'[*_#~`]', '', reply)
-        if not reply.endswith(('?', '!')):
-            reply += " Что ещё могу сделать?"
+        if reply:
+            reply = re.sub(r'[*_#~`]', '', reply)
+            if not reply.endswith(('?', '!')):
+                reply += " Что ещё могу сделать?"
+        else:
+            reply = "Извини, я подвис. Попробуй ещё раз."
 
-        # запоминаем темы
         for w in re.findall(r'\b[а-яА-ЯёЁ]{4,}\b', lower):
             if w not in ["привет", "спасибо", "пока", "да", "нет", "хорошо", "плохо"]:
                 save_topic(chat_id, w)
@@ -224,7 +300,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 def root():
-    return "AURA — без костылей"
+    return "AURA"
 
 if __name__ == "__main__":
     import uvicorn
