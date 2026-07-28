@@ -304,21 +304,24 @@ def parse_intent(text):
     text_lower = text.lower()
     
     # ==========================
-    # 1. ВИДЕО (YouTube, Яндекс Видео)
+    # 1. ВИДЕО
     # ==========================
     video_triggers = ['видео', 'ютуб', 'youtube', 'клип', 'ролик', 'видеоролик', 'видеозапись']
     if any(trigger in text_lower for trigger in video_triggers):
-        # Извлекаем запрос
+        # Извлекаем запрос — убираем только триггеры и самые явные стоп-слова
         query = text_lower
         stop_words = video_triggers + ['найди', 'хочу', 'покажи', 'дай', 'ссылку', 'про', 'на', 'с', 'и', 'в', 'а', 'к', 'у', 'о', 'от', 'до', 'за', 'мне', 'меня', 'посмотреть', 'найти']
         for word in stop_words:
             query = query.replace(word, " ")
         query = " ".join(query.split()).strip()
+        
+        # Если запрос пустой или слишком короткий — используем значение по умолчанию
         if not query or len(query) < 3:
-            query = "смешные котики"
+            query = "котики"
+        
+        # Оставляем только буквы, цифры и пробелы
         query = re.sub(r'[^а-яА-Яa-zA-Z0-9 ]', '', query)
         
-        # Яндекс Видео (лучше для РФ)
         url = f"https://yandex.ru/video/search?text={query.replace(' ', '%20')}"
         
         return {
@@ -329,17 +332,19 @@ def parse_intent(text):
         }
     
     # ==========================
-    # 2. КАРТИНКИ (Яндекс Картинки)
+    # 2. КАРТИНКИ
     # ==========================
     image_triggers = ['картинк', 'рисунк', 'фото', 'изображен', 'фотографи', 'снимк', 'иллюстраци', 'обои']
     if any(trigger in text_lower for trigger in image_triggers):
         query = text_lower
-        stop_words = image_triggers + ['найди', 'хочу', 'покажи', 'дай', 'ссылку', 'про', 'на', 'с', 'и', 'в', 'а', 'к', 'у', 'о', 'от', 'до', 'за', 'мне', 'меня', 'посмотреть', 'найти', 'красивых', 'красивые']
+        stop_words = image_triggers + ['найди', 'хочу', 'покажи', 'дай', 'ссылку', 'про', 'на', 'с', 'и', 'в', 'а', 'к', 'у', 'о', 'от', 'до', 'за', 'мне', 'меня', 'посмотреть', 'найти']
         for word in stop_words:
             query = query.replace(word, " ")
         query = " ".join(query.split()).strip()
+        
         if not query or len(query) < 3:
-            query = "красивые картинки"
+            query = "котики"
+        
         query = re.sub(r'[^а-яА-Яa-zA-Z0-9 ]', '', query)
         
         url = f"https://yandex.ru/images/search?text={query.replace(' ', '%20')}"
@@ -360,11 +365,11 @@ def parse_intent(text):
             'type': 'time',
             'query': None,
             'url': None,
-            'response': None  # Обрабатывается отдельно
+            'response': None
         }
     
     # ==========================
-    # 4. ПОИСК В ИНТЕРНЕТЕ (Tavily)
+    # 4. ПОИСК В ИНТЕРНЕТЕ
     # ==========================
     web_triggers = ['найди', 'узнай', 'поищи', 'где', 'кто', 'что такое', 'клиника', 'сайт', 'адрес', 'телефон', 'контакт', 'новости', 'погода']
     if any(trigger in text_lower for trigger in web_triggers):
@@ -380,7 +385,7 @@ def parse_intent(text):
             'type': 'web',
             'query': query,
             'url': None,
-            'response': None  # Обрабатывается через Tavily
+            'response': None
         }
     
     # ==========================
@@ -840,10 +845,9 @@ async def process_message(request: Request, chat_id, text):
         return {"reply": reply}
     
     # ==========================
-    # 5. ОБЫЧНЫЙ ДИАЛОГ
+    # 5. КОНТЕКСТНЫЙ ПОИСК ("дай ссылку", "сайт")
     # ==========================
     
-    # Если пользователь просит "ссылку" или "сайт" — ищем в истории
     if "ссылк" in text.lower() or "сайт" in text.lower():
         last_requests = []
         for msg in reversed(history[-10:]):
@@ -860,6 +864,10 @@ async def process_message(request: Request, chat_id, text):
                 update_user_memory(chat_id, "assistant", reply)
                 return {"reply": reply}
     
+    # ==========================
+    # 6. ПАМЯТЬ ("напомни", "что обсуждали")
+    # ==========================
+    
     if "напомни" in text.lower() or "что мы обсуждали" in text.lower():
         topics = context["topics"]
         if topics:
@@ -871,7 +879,7 @@ async def process_message(request: Request, chat_id, text):
         return {"reply": reply}
     
     # ==========================
-    # AI ДИАЛОГ
+    # 7. ОБЫЧНЫЙ ДИАЛОГ
     # ==========================
     
     history_text = ""
