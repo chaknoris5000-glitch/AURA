@@ -367,64 +367,38 @@ def parse_site_for_info(url):
         return None
 
 async def search_web(query):
+    """Очищенный поиск через Tavily — только факты, без мусора"""
     results = []
     if tavily_client:
         try:
             response = tavily_client.search(
                 query=query,
                 search_depth="advanced",
-                max_results=5,
+                max_results=3,
                 include_answer=True,
                 include_images=False
             )
             if response.get('answer'):
-                results.append(f"💡 {response['answer']}")
+                # Берём только краткий ответ
+                return response['answer']
+            
             if response.get('results'):
-                for r in response['results'][:5]:
+                for r in response['results'][:3]:
                     title = r.get('title', '')
-                    url = r.get('url', '')
-                    content = r.get('content', '')[:300]
-                    if title and url:
-                        results.append(f"**{title}**\n{content}...\n🔗 {url}")
+                    content = r.get('content', '')[:200]
+                    # Очищаем от мусора
+                    content = re.sub(r'<[^>]+>', '', content)
+                    content = re.sub(r'http\S+', '', content)
+                    content = re.sub(r'\d{10,}', '', content)
+                    results.append(f"{title}: {content}")
         except Exception as e:
             print(f"❌ Tavily: {e}")
     
     if not results:
-        try:
-            url = f"https://html.duckduckgo.com/html/?q={query}"
-            headers = {"User-Agent": "Mozilla/5.0"}
-            response = requests.get(url, headers=headers, timeout=10)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            for result in soup.select('.result')[:3]:
-                title = result.select_one('.result__title')
-                if title:
-                    link = result.select_one('.result__url')
-                    snippet = result.select_one('.result__snippet')
-                    if snippet and link:
-                        results.append(f"**{title.text.strip()}**\n{snippet.text.strip()[:200]}...\n🔗 {link.text.strip()}")
-        except Exception as e:
-            print(f"❌ DuckDuckGo: {e}")
+        return "Ничего не нашёл по твоему запросу. Попробуй переформулировать."
     
-    urls = re.findall(r'https?://[^\s]+', "\n".join(results))
-    for url in urls[:3]:
-        parsed = parse_site_for_info(url)
-        if parsed:
-            if parsed.get("phones"):
-                results.append(f"📞 Телефоны: {', '.join(parsed['phones'])}")
-            if parsed.get("addresses"):
-                results.append(f"📍 Адреса: {', '.join(parsed['addresses'])}")
-            if parsed.get("prices"):
-                results.append(f"💰 Цены: {', '.join(parsed['prices'])}")
-            if parsed.get("emails"):
-                results.append(f"✉️ Email: {', '.join(parsed['emails'])}")
-            if parsed.get("sites"):
-                results.append(f"🌐 Сайты: {', '.join(parsed['sites'])}")
-            if parsed.get("product_title"):
-                results.append(f"📦 Товар: {parsed['product_title']}")
-            if parsed.get("product_description"):
-                results.append(f"📝 Описание: {parsed['product_description'][:200]}...")
-    
-    return "\n\n".join(results) if results else None
+    # Собираем в чистый текст
+    return "\n".join(results[:3])
 
 def describe_image_with_groq(image_data):
     try:
@@ -1144,7 +1118,7 @@ def send_message(chat_id, text):
         return False
 
 # =======================================================
-# ОСНОВНАЯ ЛОГИКА ОБРАБОТКИ СООБЩЕНИЙ (ЧИСТАЯ ВЕРСИЯ)
+# ОСНОВНАЯ ЛОГИКА ОБРАБОТКИ СООБЩЕНИЙ (ФИНАЛЬНАЯ)
 # =======================================================
 
 async def process_message(request: Request, chat_id, text):
@@ -1152,6 +1126,7 @@ async def process_message(request: Request, chat_id, text):
     if not user:
         save_user(chat_id)
     
+    # ЗАГРУЖАЕМ ПАМЯТЬ ПРИ КАЖДОМ СООБЩЕНИИ
     load_user_memory(chat_id)
     update_user_memory(chat_id, "user", text)
     
@@ -1162,13 +1137,15 @@ async def process_message(request: Request, chat_id, text):
     mood = analyze_mood(text)
     mood_context = ""
     if mood == "sad":
-        mood_context = "Пользователь грустный. Отвечай тепло и поддерживающе."
+        mood_context = "Пользователь грустный. Отвечай тепло и коротко, 2 предложения."
     elif mood == "happy":
-        mood_context = "Пользователь в хорошем настроении. Отвечай бодро и с юмором."
+        mood_context = "Пользователь в хорошем настроении. Отвечай бодро и коротко, 2-3 предложения."
     elif mood == "anxious":
-        mood_context = "Пользователь тревожится. Отвечай спокойно и уверенно."
+        mood_context = "Пользователь тревожится. Отвечай спокойно и уверенно, 2 предложения."
     elif mood == "tired":
-        mood_context = "Пользователь устал. Отвечай мягко и без лишней информации."
+        mood_context = "Пользователь устал. Отвечай мягко и коротко, 2 предложения."
+    else:
+        mood_context = "Отвечай как человек: коротко, по делу, 2-3 предложения. Без списков, без ссылок, без технической информации."
     
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
@@ -1177,48 +1154,7 @@ async def process_message(request: Request, chat_id, text):
         ip = request.client.host if request.client else "127.0.0.1"
     
     # ==========================
-    # 1. ВИЗУАЛЬНЫЕ ТРИГГЕРЫ (Картинки, видео, музыка)
-    # ==========================
-    
-    visual_triggers = {
-        "картинк": "https://yandex.ru/images/search?text=",
-        "рисунк": "https://yandex.ru/images/search?text=",
-        "котик": "https://yandex.ru/images/search?text=коты",
-        "кот": "https://yandex.ru/images/search?text=коты",
-        "соба": "https://yandex.ru/images/search?text=собаки",
-        "видео": "https://yandex.ru/video/search?text=",
-        "музык": "https://music.yandex.ru/search?text=",
-        "песн": "https://music.yandex.ru/search?text=",
-    }
-    
-    for trigger, base_url in visual_triggers.items():
-        if trigger in search_text:
-            query = text.strip()
-            for t in visual_triggers.keys():
-                query = re.sub(rf'\b{t}\b', '', query, flags=re.IGNORECASE).strip()
-            if not query:
-                query = trigger
-            reply = f"Вот {trigger}: {base_url}{query.replace(' ', '%20')}"
-            update_user_memory(chat_id, "assistant", reply)
-            return {"reply": reply}
-    
-    # ==========================
-    # 2. ПОИСК (Tavily + DuckDuckGo)
-    # ==========================
-    
-    search_triggers = ["новости", "погода", "найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "парикмахер", "авито", "квартир"]
-    if any(word in search_text for word in search_triggers):
-        print(f"🔍 Глубокий поиск: {text}")
-        search_result = await search_web(text)
-        if search_result:
-            reply = search_result
-        else:
-            reply = "🔍 Ничего не нашёл по твоему запросу. Попробуй переформулировать."
-        update_user_memory(chat_id, "assistant", reply)
-        return {"reply": reply}
-    
-    # ==========================
-    # 3. ВРЕМЯ
+    # 1. ВРЕМЯ (С ИСПРАВЛЕНИЕМ)
     # ==========================
     
     time_queries = ["время", "который час", "сколько времени", "час", "сколько сейчас", "точное время"]
@@ -1244,17 +1180,58 @@ async def process_message(request: Request, chat_id, text):
         return {"reply": reply}
     
     # ==========================
-    # 4. ПАМЯТЬ: "помнишь" / "что мы обсуждали"
+    # 2. ВИЗУАЛЬНЫЕ ТРИГГЕРЫ
+    # ==========================
+    
+    visual_triggers = {
+        "картинк": "https://yandex.ru/images/search?text=",
+        "рисунк": "https://yandex.ru/images/search?text=",
+        "котик": "https://yandex.ru/images/search?text=коты",
+        "кот": "https://yandex.ru/images/search?text=коты",
+        "соба": "https://yandex.ru/images/search?text=собаки",
+        "видео": "https://yandex.ru/video/search?text=",
+        "музык": "https://music.yandex.ru/search?text=",
+        "песн": "https://music.yandex.ru/search?text=",
+    }
+    
+    for trigger, base_url in visual_triggers.items():
+        if trigger in search_text:
+            query = text.strip()
+            for t in visual_triggers.keys():
+                query = re.sub(rf'\b{t}\b', '', query, flags=re.IGNORECASE).strip()
+            if not query:
+                query = trigger
+            reply = f"Вот {trigger}: {base_url}{query.replace(' ', '%20')}"
+            update_user_memory(chat_id, "assistant", reply)
+            return {"reply": reply}
+    
+    # ==========================
+    # 3. ПОИСК (С ОЧИСТКОЙ)
+    # ==========================
+    
+    search_triggers = ["новости", "погода", "найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "парикмахер", "авито", "квартир"]
+    if any(word in search_text for word in search_triggers):
+        print(f"🔍 Глубокий поиск: {text}")
+        search_result = await search_web(text)
+        if search_result:
+            reply = search_result
+        else:
+            reply = "🔍 Ничего не нашёл. Попробуй переформулировать запрос."
+        update_user_memory(chat_id, "assistant", reply)
+        return {"reply": reply}
+    
+    # ==========================
+    # 4. ПАМЯТЬ
     # ==========================
     
     if "что мы обсуждали" in lower or "что я спрашивал" in lower or "о чём мы говорили" in lower:
         context = get_full_context(chat_id)
         topics = context["topics"]
         if topics:
-            topics_list = "\n".join([f"- {t}" for t in topics[:20]])
-            reply = f"📚 Мы обсуждали:\n{topics_list}\n\nХочешь вернуться к какой-то теме?"
+            topics_list = ", ".join(topics[:10])
+            reply = f"Мы обсуждали: {topics_list}. Вернёмся к какой-то теме?"
         else:
-            reply = "📚 Мы пока ничего не обсуждали. Напиши что-нибудь, и я запомню!"
+            reply = "Мы пока ничего не обсуждали. Напиши что-нибудь, и я запомню."
         update_user_memory(chat_id, "assistant", reply)
         return {"reply": reply}
     
@@ -1263,30 +1240,18 @@ async def process_message(request: Request, chat_id, text):
         if search_query:
             found = search_memory(chat_id, search_query)
             if found:
-                reply = "🧠 Да, я помню:\n\n"
-                for msg in found[-3:]:
-                    reply += f"- {msg['content'][:200]}...\n"
+                reply = "Да, помню: " + found[-1]["content"][:100] + "..."
                 update_user_memory(chat_id, "assistant", reply)
                 return {"reply": reply}
     
     # ==========================
-    # 5. ОБЫЧНЫЙ ДИАЛОГ (AI)
+    # 5. ОБЫЧНЫЙ ДИАЛОГ (КОРОТКИЙ)
     # ==========================
     
     current_time, city = get_current_time_for_user(chat_id, ip)
     time_str = current_time.strftime("%H:%M")
     date_str = current_time.strftime("%d.%m.%Y")
     day_str = current_time.strftime("%A")
-    
-    msg_count = get_message_count(chat_id)
-    if msg_count <= 1:
-        welcome = f"👋 Привет! Сейчас {time_str} {date_str}."
-        send_message(chat_id, welcome)
-        update_user_memory(chat_id, "assistant", welcome)
-    
-    last_msg_time = get_last_message_time(chat_id)
-    if last_msg_time and (datetime.now() - last_msg_time) > timedelta(hours=48):
-        send_message(chat_id, "👋 Давно не общались! Как дела?")
     
     # Сохраняем темы
     stop_words = ["привет", "здравствуй", "спасибо", "пока", "да", "нет", "хорошо", "плохо"]
@@ -1304,27 +1269,26 @@ async def process_message(request: Request, chat_id, text):
     likes = get_memory(chat_id, "likes")
     dislikes = get_memory(chat_id, "dislikes")
     
-    topics_text = ", ".join(topics[:7]) if topics else "нет сохранённых тем"
+    topics_text = ", ".join(topics[:5]) if topics else "нет сохранённых тем"
     memory_context = f"Ты помнишь: мы обсуждали {topics_text}."
     name_context = f"Имя пользователя: {user_name}" if user_name else ""
-    style_context = f"Стиль пользователя: {user_style}" if user_style else ""
     likes_context = f"Пользователю нравится: {likes}" if likes else ""
     dislikes_context = f"Пользователю не нравится: {dislikes}" if dislikes else ""
     
-    user_prompt = f"Сегодня {date_str} ({day_str}), сейчас {time_str} (город: {city}).\n{name_context}\n{style_context}\n{likes_context}\n{dislikes_context}\n{memory_context}\n\n{text}"
+    user_prompt = f"Сегодня {date_str}, сейчас {time_str} (город: {city}).\n{name_context}\n{likes_context}\n{dislikes_context}\n{memory_context}\n\nПользователь написал: {text}"
     
     expand_triggers = ["подробнее", "разверни", "расскажи детальнее", "подробно", "детально", "полный ответ"]
     short = not any(word in lower for word in expand_triggers)
     
     if not short:
-        mood_context += " Пользователь просит развёрнутый ответ. Дай полную информацию."
+        mood_context = "Пользователь просит развёрнутый ответ. Дай полную информацию, но структурированно."
     else:
-        mood_context += " Отвечай коротко, 2-3 предложения."
+        mood_context = "Отвечай коротко, 2-3 предложения. Без списков, без ссылок. Только суть."
     
     aura_prompt = AURA_PROMPT + f"\n\n{mood_context}\n\n{user_prompt}"
     
     messages = [{"role": "system", "content": aura_prompt}]
-    for msg in history[-50:]:
+    for msg in history[-30:]:
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": text})
     
