@@ -151,7 +151,7 @@ def set_bot_description():
 set_bot_description()
 
 # ==========================
-# YANDEX TTS (МУЖСКОЙ ГОЛОС) - ОСТАВЛЕН ДЛЯ СОВМЕСТИМОСТИ, НО НЕ ИСПОЛЬЗУЕТСЯ
+# YANDEX TTS (МУЖСКОЙ ГОЛОС)
 # ==========================
 
 def yandex_tts(text):
@@ -213,12 +213,54 @@ def clean_text_for_voice(text):
     return text
 
 # ==========================
-# ГОЛОС - ОТКЛЮЧЕН
+# ГОЛОС (БЕЗ ПОТОКОВ — СИНХРОННО)
 # ==========================
 
 def send_voice_reply(chat_id, text):
-    """Голосовые ответы полностью отключены"""
-    return False
+    if not text:
+        return False
+
+    clean_text = clean_text_for_voice(text)
+    if not clean_text or len(clean_text) < 5:
+        return False
+
+    voice_text = clean_text.split('\n')[0][:300]
+    if len(voice_text) < 5:
+        return False
+
+    text_hash = hash(voice_text)
+    if LAST_VOICE_MESSAGE.get(chat_id) == text_hash:
+        return True
+
+    audio_path = yandex_tts(voice_text)
+    if not audio_path:
+        try:
+            from gtts import gTTS
+            tts = gTTS(text=voice_text, lang='ru', slow=False)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+                tts.save(tmp.name)
+                audio_path = tmp.name
+        except Exception as e:
+            print(f"❌ gTTS ошибка: {e}")
+            return False
+
+    if not audio_path:
+        return False
+
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
+        with open(audio_path, 'rb') as f:
+            files = {'audio': f}
+            data = {'chat_id': chat_id}
+            response = requests.post(url, files=files, data=data, timeout=30)
+        os.unlink(audio_path)
+        if response.status_code == 200:
+            LAST_VOICE_MESSAGE[chat_id] = text_hash
+            return True
+        return False
+    except Exception as e:
+        print(f"❌ Отправка голоса: {e}")
+        return False
 
 # ==========================
 # СТАТУС "ПЕЧАТАЕТ..."
@@ -924,6 +966,7 @@ AURA_PROMPT = """Ты — AURA. Ты — я в Telegram.
 - Коротко — 2-3 предложения. Не больше.
 - Всегда завершай мысль.
 - Если просят "подробнее" — дай полный ответ.
+- В конце добавляй вопрос: "Что думаешь?" или "Хочешь уточнить?"
 - Используй контекст прошлых диалогов.
 - Не выдумывай.
 
@@ -1138,9 +1181,8 @@ async def webhook(request: Request):
             
             result = await process_message(request, chat_id, text)
             send_message(chat_id, result["reply"])
-            # Голосовые ответы полностью отключены
-            # if result["reply"] and not text.startswith("/"):
-            #     send_voice_reply(chat_id, result["reply"])
+            if result["reply"] and not text.startswith("/"):
+                send_voice_reply(chat_id, result["reply"])
                 
         return JSONResponse({"ok": True})
     except Exception as e:
@@ -1371,7 +1413,8 @@ async def process_message(request: Request, chat_id, text):
     else:
         save_memory(chat_id, "style", "короткий")
     
-    # Фраза "Что думаешь?" полностью убрана
+    if not reply.endswith("?") and len(reply) < 300:
+        reply += "\n\nЧто думаешь?"
     
     update_user_memory(chat_id, "assistant", reply)
     return {"reply": reply}
