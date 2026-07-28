@@ -263,9 +263,9 @@ def get_current_time_for_user(user_id, ip=None):
     
     return datetime.utcnow() + timedelta(hours=3), "Москва"
 
-# ==========================
-# ПОИСК
-# ==========================
+# ============================================================
+# БЛОК ПОИСКА — ИЗ ПЕРВОЙ ВЕРСИИ (ГЛУБОКИЙ + ПАРСИНГ)
+# ============================================================
 
 def parse_site_for_info(url):
     try:
@@ -311,11 +311,11 @@ def parse_site_for_info(url):
         
         title = soup.find('h1')
         if title:
-            result["title"] = title.text.strip()
+            result["product_title"] = title.text.strip()
         
         desc = soup.find(class_=re.compile(r'description|about|product-desc|product__description'))
         if desc:
-            result["description"] = desc.text.strip()[:500]
+            result["product_description"] = desc.text.strip()[:500]
         
         result["snippet"] = text[:1000].replace("\n", " ")
         return result
@@ -326,29 +326,29 @@ def parse_site_for_info(url):
 async def search_web(query):
     results = []
     
+    # 1. Tavily (основной)
     if tavily_client:
         try:
             response = tavily_client.search(
-                query=f"{query} сайт Россия .ru",
+                query=query,
                 search_depth="advanced",
                 max_results=5,
                 include_answer=True,
                 include_images=False
             )
             if response.get('answer'):
-                answer = response['answer']
-                if re.search(r'[а-яА-Я]', answer):
-                    results.append(answer)
+                results.append(f"💡 {response['answer']}")
             if response.get('results'):
                 for r in response['results'][:5]:
                     title = r.get('title', '')
                     url = r.get('url', '')
                     content = r.get('content', '')[:300]
-                    if title and url and re.search(r'[а-яА-Я]', content):
-                        results.append(f"{title}\n{content}...")
+                    if title and url:
+                        results.append(f"**{title}**\n{content}...\n🔗 {url}")
         except Exception as e:
             print(f"❌ Tavily: {e}")
     
+    # 2. DuckDuckGo (резерв, если Tavily не дал результатов)
     if not results:
         try:
             url = f"https://html.duckduckgo.com/html/?q={query}"
@@ -358,11 +358,32 @@ async def search_web(query):
             for result in soup.select('.result')[:3]:
                 title = result.select_one('.result__title')
                 if title:
+                    link = result.select_one('.result__url')
                     snippet = result.select_one('.result__snippet')
-                    if snippet:
-                        results.append(f"{title.text.strip()}\n{snippet.text.strip()[:200]}...")
+                    if snippet and link:
+                        results.append(f"**{title.text.strip()}**\n{snippet.text.strip()[:200]}...\n🔗 {link.text.strip()}")
         except Exception as e:
             print(f"❌ DuckDuckGo: {e}")
+    
+    # 3. Глубокий парсинг найденных ссылок
+    urls = re.findall(r'https?://[^\s]+', "\n".join(results))
+    for url in urls[:3]:
+        parsed = parse_site_for_info(url)
+        if parsed:
+            if parsed.get("phones"):
+                results.append(f"📞 Телефоны: {', '.join(parsed['phones'])}")
+            if parsed.get("addresses"):
+                results.append(f"📍 Адреса: {', '.join(parsed['addresses'])}")
+            if parsed.get("prices"):
+                results.append(f"💰 Цены: {', '.join(parsed['prices'])}")
+            if parsed.get("emails"):
+                results.append(f"✉️ Email: {', '.join(parsed['emails'])}")
+            if parsed.get("sites"):
+                results.append(f"🌐 Сайты: {', '.join(parsed['sites'])}")
+            if parsed.get("product_title"):
+                results.append(f"📦 Товар: {parsed['product_title']}")
+            if parsed.get("product_description"):
+                results.append(f"📝 Описание: {parsed['product_description'][:200]}...")
     
     return "\n\n".join(results) if results else None
 
@@ -997,18 +1018,18 @@ async def process_message(request: Request, chat_id, text):
         return {"reply": reply}
     
     # ==========================
-    # ПОИСК
+    # ПОИСК — СТАРАЯ ВЕРСИЯ (ГЛУБОКИЙ)
     # ==========================
     
     search_triggers = ["найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "новости", "погода", "авито", "квартир"]
     if any(word in lower for word in search_triggers):
-        print(f"🔍 Поиск: {text}")
+        print(f"🔍 Глубокий поиск: {text}")
         search_result = await search_web(text)
         
         if search_result:
             messages = [
                 {"role": "system", "content": f"{AURA_PROMPT}\n\n{mood_prefix}"},
-                {"role": "user", "content": f"Вот что нашлось по запросу пользователя:\n{search_result}\n\nДай ответ на русском. Если есть ссылки — вставляй их. Держи баланс между краткостью и полнотой."}
+                {"role": "user", "content": f"Вот что нашлось:\n{search_result}\n\nДай ответ на русском. Если есть ссылки — вставляй. Держи баланс между краткостью и полнотой."}
             ]
             reply = await get_ai_response(messages, max_tokens=600)
         else:
@@ -1075,8 +1096,6 @@ async def process_message(request: Request, chat_id, text):
     reply = await get_ai_response(messages, max_tokens=max_tokens)
     reply = re.sub(r'[*_#~`]', '', reply)
     
-    # Не обрезаем до 3 предложений, а оставляем как есть
-    # (но если слишком длинный — ограничиваем)
     if len(reply) > 800:
         sentences = re.split(r'(?<=[.!?])\s+', reply)
         reply = ' '.join(sentences[:4])
