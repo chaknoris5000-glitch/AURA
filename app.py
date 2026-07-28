@@ -55,10 +55,8 @@ def get_topics(uid):
 # ========================== РЕАЛЬНОЕ ВРЕМЯ ==========================
 def get_real_time(city):
     try:
-        if city.lower() in ["белово", "belovo"]:
-            resp = requests.get("https://timeapi.io/api/Time/current/zone?timeZone=Asia/Novokuznetsk", timeout=5)
-        else:
-            resp = requests.get("https://timeapi.io/api/Time/current/zone?timeZone=Europe/Moscow", timeout=5)
+        zone = "Asia/Novokuznetsk" if city.lower() in ["белово", "belovo"] else "Europe/Moscow"
+        resp = requests.get(f"https://timeapi.io/api/Time/current/zone?timeZone={zone}", timeout=5)
         if resp.status_code == 200:
             data = resp.json()
             return f"{data['hour']:02d}:{data['minute']:02d} {data['day']:02d}.{data['month']:02d}.{data['year']}"
@@ -76,19 +74,21 @@ def check_url(url):
 
 # ========================== ПОИСК (TAVILY + DUCK) ==========================
 def search_web(query):
+    # 1. Tavily
     if TAVILY_KEY:
         try:
             from tavily import TavilyClient
             client = TavilyClient(api_key=TAVILY_KEY)
             res = client.search(query, search_depth="advanced", max_results=3, include_answer=True)
             if res.get("answer"):
-                return {"text": res["answer"][:500], "urls": []}
+                return {"text": res["answer"][:600], "urls": []}
             if res.get("results"):
                 for r in res["results"][:3]:
                     if check_url(r["url"]):
                         return {"text": r["content"][:400], "urls": [r["url"]]}
         except:
             pass
+    # 2. DuckDuckGo
     try:
         url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -138,14 +138,14 @@ PROMPT = """Ты — AURA. Ты — живой умный помощник в Te
 
 def rewrite_query(user_text):
     messages = [
-        {"role": "system", "content": "Перепиши запрос пользователя для поиска: оставь только ключевые слова, убери стоп-слова. Ответь одной фразой на русском."},
+        {"role": "system", "content": "Ты — ИИ-помощник. Перепиши запрос пользователя для поискового движка: оставь только суть, ключевые слова, убери стоп-слова. Ответь одной фразой на русском."},
         {"role": "user", "content": user_text}
     ]
     return ask_ai(messages, max_tokens=60)
 
 def analyze_intent(text):
     messages = [
-        {"role": "system", "content": "Определи намерение. Ответь: search, image, video, time, chat."},
+        {"role": "system", "content": "Определи намерение пользователя. Ответь одним словом: search, image, video, time, chat."},
         {"role": "user", "content": text}
     ]
     return ask_ai(messages, max_tokens=20)
@@ -189,6 +189,7 @@ async def webhook(request: Request):
         chat_id = str(msg["chat"]["id"])
         text = None
 
+        # ===== ГОЛОС =====
         if "voice" in msg:
             file_id = msg["voice"]["file_id"]
             file_resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}")
@@ -220,16 +221,18 @@ async def webhook(request: Request):
             if time_str:
                 reply = f"🕐 {time_str} ({city})"
             else:
-                reply = f"🕐 Не удалось проверить точное время."
+                reply = f"🕐 Не удалось проверить точное время. Посмотри на телефоне."
             send_msg(chat_id, reply)
             save_msg(chat_id, "assistant", reply)
             return {"ok": True}
 
         # ===== АНАЛИЗ НАМЕРЕНИЯ =====
-        intent = analyze_intent(text) or "chat"
+        intent = analyze_intent(text)
+        if not intent:
+            intent = "chat"
 
         # ===== КАРТИНКИ =====
-        if "image" in intent or "картинк" in lower or "рисунк" in lower or "фото" in lower:
+        if "image" in intent.lower() or "картинк" in lower or "рисунк" in lower or "фото" in lower:
             rewritten = rewrite_query(text) or text
             q = re.sub(r'[^а-яА-Яa-zA-Z0-9 ]', '', rewritten).strip()
             if not q:
@@ -241,7 +244,7 @@ async def webhook(request: Request):
             return {"ok": True}
 
         # ===== ВИДЕО =====
-        if "video" in intent or "видео" in lower or "ютуб" in lower or "клип" in lower:
+        if "video" in intent.lower() or "видео" in lower or "ютуб" in lower or "клип" in lower:
             rewritten = rewrite_query(text) or text
             q = re.sub(r'[^а-яА-Яa-zA-Z0-9 ]', '', rewritten).strip()
             if not q:
@@ -253,15 +256,17 @@ async def webhook(request: Request):
             return {"ok": True}
 
         # ===== ПОИСК =====
-        if "search" in intent:
+        if "search" in intent.lower() or any(w in lower for w in ["найди", "узнай", "где", "сайт", "адрес", "телефон", "клиника", "авито", "дром", "озон"]):
             rewritten = rewrite_query(text) or text
             result = search_web(rewritten)
-            if result and result.get("urls"):
-                reply = f"{result['text'][:400]}\n\n🔗 {result['urls'][0]}"
-            elif result and result.get("text"):
-                reply = result["text"][:400] + "\n\n⚠️ Ссылку проверить не удалось."
+            if result and result.get("text"):
+                reply = result["text"][:600]
+                if result.get("urls") and check_url(result["urls"][0]):
+                    reply += f"\n\n🔗 {result['urls'][0]}"
+                else:
+                    reply += "\n\n⚠️ Проверил ссылку — она не открывается. Нашёл информацию, но ссылку не даю."
             else:
-                reply = "Не нашёл. Попробуй переформулировать."
+                reply = "Ничего не нашёл. Попробуй переформулировать."
             send_msg(chat_id, reply + "\n\nЧто ещё могу сделать?")
             save_msg(chat_id, "assistant", reply)
             return {"ok": True}
@@ -272,6 +277,7 @@ async def webhook(request: Request):
         context = f"Темы: {', '.join(topics)}" if topics else ""
 
         messages = [{"role": "system", "content": PROMPT}] + history + [{"role": "user", "content": text}]
+
         reply = ask_ai(messages)
         if reply:
             reply = re.sub(r'[*_#~`]', '', reply)
