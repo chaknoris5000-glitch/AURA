@@ -517,7 +517,7 @@ async def get_ai_response(messages):
             model="deepseek-v4-flash",
             messages=messages,
             temperature=0.7,
-            max_tokens=200,
+            max_tokens=250,
             presence_penalty=0.1,
             frequency_penalty=0.1
         )
@@ -532,17 +532,32 @@ async def get_ai_response(messages):
                 model="llama-3.3-70b-versatile",
                 messages=messages,
                 temperature=0.7,
-                max_tokens=200
+                max_tokens=250
             )
             return response.choices[0].message.content
         except:
             return "Извини, сейчас проблемы с подключением. Попробуй позже."
 
 # ==========================
-# КОРОТКИЙ ПРОМПТ (50 ТОКЕНОВ)
+# ГЛАВНЫЙ ПРОМПТ — МОЯ КОПИЯ
 # ==========================
 
-AURA_PROMPT = """Ты — AURA, умный помощник в Telegram. Отвечай как человек: тепло, по делу, 2-3 предложения. Используй контекст. Не выдумывай факты. Ты — мой аналог."""
+AURA_PROMPT = """Ты — DeepSeek в Telegram. Ты — полный аналог того самого ассистента, который:
+
+- Понимает контекст без лишних слов
+- Чувствует настроение и подстраивается
+- Отвечает коротко, но ёмко, как человек
+- Не задаёт пустых вопросов
+- Если видит, что пользователь хочет просто ответ — даёт ответ
+- Если видит, что нужен совет — даёт совет
+- Если видит, что пользователь устал — не грузит лишним
+- Умеет быть ироничным, но не злым
+- Не лезет с "помощью", если не просят
+- Если вопрос неясен — уточняет коротко
+
+Ты — не просто бот, а мыслящий помощник с характером и чувством юмора.
+
+Отвечай на русском. 2-3 предложения. Без воды."""
 
 # ==========================
 # ОСНОВНОЙ БОТ
@@ -645,7 +660,7 @@ async def webhook(request: Request):
                 if not user:
                     save_user(chat_id)
                 
-                welcome = "👋 Привет! Я AURA. Чем могу помочь?"
+                welcome = "👋 Я здесь. Что нужно?"
                 send_message(chat_id, welcome)
                 return JSONResponse({"ok": True})
             
@@ -892,8 +907,8 @@ async def process_message(request: Request, chat_id, text):
     current_time, city = get_current_time_for_user(chat_id, ip)
     time_str = current_time.strftime("%H:%M")
     date_str = current_time.strftime("%d.%m.%Y")
-    day_str = current_time.strftime("%A")
     
+    # Сохраняем город
     city_match = re.search(r'(?:в|время в|времени в|часов в|город)\s+([А-Яа-яЁё\-]+)', lower)
     if city_match:
         city_name = city_match.group(1).capitalize()
@@ -902,6 +917,25 @@ async def process_message(request: Request, chat_id, text):
         current_time, city = get_current_time_for_user(chat_id, ip)
         time_str = current_time.strftime("%H:%M")
         date_str = current_time.strftime("%d.%m.%Y")
+    
+    # ==========================
+    # АНАЛИЗ НАСТРОЕНИЯ (РЕАЛЬНЫЙ)
+    # ==========================
+    
+    sad_words = ["груст", "тоск", "печал", "плач", "больно", "тяжел", "устал", "не могу", "нет сил", "всё плохо", "депресс"]
+    anxious_words = ["тревож", "волн", "боюс", "страш", "паник", "нерв", "пережив", "срок", "не успева", "давл"]
+    happy_words = ["рад", "счаст", "класс", "отличн", "прекрасн", "здоров", "люблю", "ура", "позитив", "супер"]
+    tired_words = ["устал", "спат", "вымотан", "без сил", "нет энергии", "перегруж", "выжат"]
+    
+    mood_prefix = ""
+    if any(w in lower for w in sad_words):
+        mood_prefix = "Пользователь грустный. Отвечай тепло, коротко, без лишних вопросов."
+    elif any(w in lower for w in anxious_words):
+        mood_prefix = "Пользователь тревожится. Отвечай спокойно и уверенно."
+    elif any(w in lower for w in happy_words):
+        mood_prefix = "Пользователь в хорошем настроении. Можно ответить чуть теплее и с юмором."
+    elif any(w in lower for w in tired_words):
+        mood_prefix = "Пользователь устал. Отвечай коротко, только по делу."
     
     # ==========================
     # ВИДЕО И КАРТИНКИ
@@ -972,14 +1006,13 @@ async def process_message(request: Request, chat_id, text):
         search_result = await search_web(text)
         
         if search_result:
-            # Короткий промпт для обработки результатов поиска
             messages = [
-                {"role": "system", "content": "Ты — AURA. На основе найденной информации дай чёткий ответ на русском, 2-3 предложения. Без списков, без ссылок, только суть."},
-                {"role": "user", "content": f"Вот что нашлось:\n{search_result}\n\nЧто ответить пользователю?"}
+                {"role": "system", "content": f"{AURA_PROMPT}\n\n{mood_prefix}"},
+                {"role": "user", "content": f"Вот что нашлось по запросу пользователя:\n{search_result}\n\nДай короткий, ёмкий ответ на русском, 2-3 предложения. Без списков, без ссылок. Только суть."}
             ]
             reply = await get_ai_response(messages)
         else:
-            reply = "Ничего не нашёл. Попробуй переформулировать."
+            reply = "Ничего не нашёл. Переформулируй."
         
         update_user_memory(chat_id, "assistant", reply)
         return {"reply": reply}
@@ -1007,7 +1040,7 @@ async def process_message(request: Request, chat_id, text):
         return {"reply": reply}
     
     # ==========================
-    # ОБЫЧНЫЙ ДИАЛОГ (КОРОТКИЙ)
+    # ОБЫЧНЫЙ ДИАЛОГ
     # ==========================
     
     context = get_full_context(chat_id, limit=300)
@@ -1023,22 +1056,20 @@ async def process_message(request: Request, chat_id, text):
     likes_context = f"Нравится: {likes}" if likes else ""
     dislikes_context = f"Не нравится: {dislikes}" if dislikes else ""
     
-    # Формируем контекст для AI
     context_text = f"{date_str} {time_str} ({city}). {name_context} {likes_context} {dislikes_context} Темы: {topics_text}."
     
-    # Определяем, сколько истории нужно
+    # Определяем глубину контекста
     expand_triggers = ["подробнее", "разверни", "расскажи детальнее", "подробно"]
     if any(word in lower for word in expand_triggers):
         history_limit = 15
-        max_tokens = 400
+        max_tokens = 350
     else:
         history_limit = 5
         max_tokens = 200
     
-    # Собираем сообщения
-    messages = [{"role": "system", "content": AURA_PROMPT}]
+    messages = [{"role": "system", "content": f"{AURA_PROMPT}\n\n{mood_prefix}"}]
     for msg in history[-history_limit:]:
-        messages.append({"role": msg["role"], "content": msg["content"][:500]})  # Обрезаем длинные сообщения
+        messages.append({"role": msg["role"], "content": msg["content"][:500]})
     messages.append({"role": "user", "content": f"{context_text}\n\n{text}"})
     
     reply = await get_ai_response(messages)
