@@ -192,33 +192,22 @@ def set_bot_description():
 set_bot_description()
 
 # ==========================
-# ЧАСОВЫЕ ПОЯСА (ВСЕ ГОРОДА РФ)
+# ЧАСОВЫЕ ПОЯСА
 # ==========================
 
 def get_timezone_offset(city_name):
     timezones = {
-        # UTC+2
         "калининград": 2,
-        # UTC+3
         "москва": 3, "санкт-петербург": 3, "мурманск": 3, "архангельск": 3,
-        # UTC+4
         "самара": 4, "саратов": 4, "ижевск": 4,
-        # UTC+5
         "екатеринбург": 5, "челябинск": 5, "тюмень": 5, "пермь": 5,
-        # UTC+6
         "омск": 6,
-        # UTC+7
         "новосибирск": 7, "томск": 7, "кемерово": 7, "красноярск": 7,
         "новокузнецк": 7, "прокопьевск": 7, "киселёвск": 7, "междуреченск": 7,
-        # UTC+8
         "иркутск": 8,
-        # UTC+9
         "чита": 9, "якутск": 9,
-        # UTC+10
         "владивосток": 10, "хабаровск": 10,
-        # UTC+11
         "южно-сахалинск": 11, "магадан": 11,
-        # UTC+12
         "петропавловск-камчатский": 12, "анадырь": 12
     }
     for city, offset in timezones.items():
@@ -275,11 +264,10 @@ def get_current_time_for_user(user_id, ip=None):
     return datetime.utcnow() + timedelta(hours=3), "Москва"
 
 # ==========================
-# ГЛУБОКИЙ ПОИСК: TAVILY + DUCKDUCKGO + ПАРСИНГ
+# ПОИСК
 # ==========================
 
 def parse_site_for_info(url):
-    """Парсинг сайта — телефоны, адреса, цены, описание"""
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -292,7 +280,6 @@ def parse_site_for_info(url):
         text = soup.get_text(separator="\n", strip=True)
         result = {}
         
-        # Телефоны
         phone_patterns = [r'\+7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'8\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}']
         phones = []
         for pattern in phone_patterns:
@@ -302,36 +289,30 @@ def parse_site_for_info(url):
         if phones:
             result["phones"] = phones
         
-        # Email
         email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
         emails = list(set(re.findall(email_pattern, text)))[:3]
         if emails:
             result["emails"] = emails
         
-        # Адреса
         address_pattern = r'(?:ул\.|улица|проспект|пр\.|переулок|пер\.|площадь|пл\.|шоссе|бульвар|Аэродромная)\s+[А-Яа-я0-9\-\.\s,]+'
         addresses = list(set(re.findall(address_pattern, text)))[:3]
         if addresses:
             result["addresses"] = addresses
         
-        # Цены
         price_pattern = r'(\d+[\s,.]*\d*)\s*(?:₽|руб|рублей|\$|€)'
         prices = list(set(re.findall(price_pattern, text)))[:5]
         if prices:
             result["prices"] = prices
         
-        # Сайты
         site_pattern = r'(?:https?://)?(?:www\.)?([a-zA-Z0-9\-]+\.(?:ru|рф|com|org|net))'
         sites = list(set(re.findall(site_pattern, text)))[:3]
         if sites:
             result["sites"] = sites
         
-        # Заголовок
         title = soup.find('h1')
         if title:
             result["title"] = title.text.strip()
         
-        # Описание
         desc = soup.find(class_=re.compile(r'description|about|product-desc|product__description'))
         if desc:
             result["description"] = desc.text.strip()[:500]
@@ -343,10 +324,8 @@ def parse_site_for_info(url):
         return None
 
 async def search_web(query):
-    """ГЛУБОКИЙ ПОИСК: Tavily + DuckDuckGo + парсинг"""
     results = []
     
-    # 1. Tavily (основной)
     if tavily_client:
         try:
             response = tavily_client.search(
@@ -359,18 +338,17 @@ async def search_web(query):
             if response.get('answer'):
                 answer = response['answer']
                 if re.search(r'[а-яА-Я]', answer):
-                    results.append(f"💡 {answer}")
+                    results.append(answer)
             if response.get('results'):
                 for r in response['results'][:5]:
                     title = r.get('title', '')
                     url = r.get('url', '')
                     content = r.get('content', '')[:300]
                     if title and url and re.search(r'[а-яА-Я]', content):
-                        results.append(f"**{title}**\n{content}...\n🔗 {url}")
+                        results.append(f"{title}\n{content}...")
         except Exception as e:
             print(f"❌ Tavily: {e}")
     
-    # 2. DuckDuckGo (резерв)
     if not results:
         try:
             url = f"https://html.duckduckgo.com/html/?q={query}"
@@ -380,32 +358,11 @@ async def search_web(query):
             for result in soup.select('.result')[:3]:
                 title = result.select_one('.result__title')
                 if title:
-                    link = result.select_one('.result__url')
                     snippet = result.select_one('.result__snippet')
-                    if snippet and link:
-                        results.append(f"**{title.text.strip()}**\n{snippet.text.strip()[:200]}...\n🔗 {link.text.strip()}")
+                    if snippet:
+                        results.append(f"{title.text.strip()}\n{snippet.text.strip()[:200]}...")
         except Exception as e:
             print(f"❌ DuckDuckGo: {e}")
-    
-    # 3. Парсинг найденных ссылок
-    urls = re.findall(r'https?://[^\s]+', "\n".join(results))
-    for url in urls[:3]:
-        parsed = parse_site_for_info(url)
-        if parsed:
-            if parsed.get("phones"):
-                results.append(f"📞 Телефоны: {', '.join(parsed['phones'])}")
-            if parsed.get("addresses"):
-                results.append(f"📍 Адреса: {', '.join(parsed['addresses'])}")
-            if parsed.get("prices"):
-                results.append(f"💰 Цены: {', '.join(parsed['prices'])}")
-            if parsed.get("emails"):
-                results.append(f"✉️ Email: {', '.join(parsed['emails'])}")
-            if parsed.get("sites"):
-                results.append(f"🌐 Сайты: {', '.join(parsed['sites'])}")
-            if parsed.get("title"):
-                results.append(f"📦 {parsed['title']}")
-            if parsed.get("description"):
-                results.append(f"📝 {parsed['description'][:200]}...")
     
     return "\n\n".join(results) if results else None
 
@@ -559,8 +516,8 @@ async def get_ai_response(messages):
         response = client.chat.completions.create(
             model="deepseek-v4-flash",
             messages=messages,
-            temperature=0.85,
-            max_tokens=400,
+            temperature=0.7,
+            max_tokens=200,
             presence_penalty=0.1,
             frequency_penalty=0.1
         )
@@ -574,13 +531,18 @@ async def get_ai_response(messages):
             response = groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=messages,
-                temperature=0.9,
-                max_tokens=350
+                temperature=0.7,
+                max_tokens=200
             )
-            print(f"🔄 Переключился на Groq (резерв)")
             return response.choices[0].message.content
         except:
             return "Извини, сейчас проблемы с подключением. Попробуй позже."
+
+# ==========================
+# КОРОТКИЙ ПРОМПТ (50 ТОКЕНОВ)
+# ==========================
+
+AURA_PROMPT = """Ты — AURA, умный помощник в Telegram. Отвечай как человек: тепло, по делу, 2-3 предложения. Используй контекст. Не выдумывай факты. Ты — мой аналог."""
 
 # ==========================
 # ОСНОВНОЙ БОТ
@@ -810,13 +772,13 @@ def describe_image_with_groq(image_data):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Опиши, что видишь на картинке. Ответ на русском."},
+                        {"type": "text", "text": "Опиши, что видишь на картинке. Ответ на русском, 2-3 предложения."},
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
                     ]
                 }
             ],
             temperature=0.3,
-            max_tokens=300
+            max_tokens=150
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -932,13 +894,11 @@ async def process_message(request: Request, chat_id, text):
     date_str = current_time.strftime("%d.%m.%Y")
     day_str = current_time.strftime("%A")
     
-    # Сохраняем город
     city_match = re.search(r'(?:в|время в|времени в|часов в|город)\s+([А-Яа-яЁё\-]+)', lower)
     if city_match:
         city_name = city_match.group(1).capitalize()
         update_user_city(chat_id, city_name)
         save_memory(chat_id, "city", city_name)
-        # Обновляем время для нового города
         current_time, city = get_current_time_for_user(chat_id, ip)
         time_str = current_time.strftime("%H:%M")
         date_str = current_time.strftime("%d.%m.%Y")
@@ -1003,17 +963,24 @@ async def process_message(request: Request, chat_id, text):
         return {"reply": reply}
     
     # ==========================
-    # ГЛУБОКИЙ ПОИСК
+    # ПОИСК
     # ==========================
     
     search_triggers = ["найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "новости", "погода", "авито", "квартир"]
     if any(word in lower for word in search_triggers):
-        print(f"🔍 Глубокий поиск: {text}")
+        print(f"🔍 Поиск: {text}")
         search_result = await search_web(text)
+        
         if search_result:
-            reply = search_result
+            # Короткий промпт для обработки результатов поиска
+            messages = [
+                {"role": "system", "content": "Ты — AURA. На основе найденной информации дай чёткий ответ на русском, 2-3 предложения. Без списков, без ссылок, только суть."},
+                {"role": "user", "content": f"Вот что нашлось:\n{search_result}\n\nЧто ответить пользователю?"}
+            ]
+            reply = await get_ai_response(messages)
         else:
             reply = "Ничего не нашёл. Попробуй переформулировать."
+        
         update_user_memory(chat_id, "assistant", reply)
         return {"reply": reply}
     
@@ -1040,7 +1007,7 @@ async def process_message(request: Request, chat_id, text):
         return {"reply": reply}
     
     # ==========================
-    # ОБЫЧНЫЙ ДИАЛОГ
+    # ОБЫЧНЫЙ ДИАЛОГ (КОРОТКИЙ)
     # ==========================
     
     context = get_full_context(chat_id, limit=300)
@@ -1051,34 +1018,28 @@ async def process_message(request: Request, chat_id, text):
     likes = get_memory(chat_id, "likes")
     dislikes = get_memory(chat_id, "dislikes")
     
-    topics_text = ", ".join(topics[:5]) if topics else "нет тем"
-    memory_context = f"Темы: {topics_text}."
+    topics_text = ", ".join(topics[:5]) if topics else ""
     name_context = f"Имя: {user_name}" if user_name else ""
     likes_context = f"Нравится: {likes}" if likes else ""
     dislikes_context = f"Не нравится: {dislikes}" if dislikes else ""
     
-    user_prompt = f"{date_str} {time_str} ({city}). {name_context} {likes_context} {dislikes_context} {memory_context}\n\n{text}"
+    # Формируем контекст для AI
+    context_text = f"{date_str} {time_str} ({city}). {name_context} {likes_context} {dislikes_context} Темы: {topics_text}."
     
+    # Определяем, сколько истории нужно
     expand_triggers = ["подробнее", "разверни", "расскажи детальнее", "подробно"]
-    short = not any(word in lower for word in expand_triggers)
+    if any(word in lower for word in expand_triggers):
+        history_limit = 15
+        max_tokens = 400
+    else:
+        history_limit = 5
+        max_tokens = 200
     
-    aura_prompt = """Ты — AURA. Умный, короткий, по делу.
-
-ПРАВИЛА:
-- Отвечай как человек: тепло, прямо.
-- 2-3 предложения. Не больше.
-- Всегда завершай мысль.
-- Используй контекст.
-- Не выдумывай.
-- Без фраз "что думаешь", "хочешь уточнить"."""
-
-    if not short:
-        aura_prompt += " Пользователь просит развёрнутый ответ."
-
-    messages = [{"role": "system", "content": aura_prompt}]
-    for msg in history[-30:]:
-        messages.append({"role": msg["role"], "content": msg["content"]})
-    messages.append({"role": "user", "content": user_prompt})
+    # Собираем сообщения
+    messages = [{"role": "system", "content": AURA_PROMPT}]
+    for msg in history[-history_limit:]:
+        messages.append({"role": msg["role"], "content": msg["content"][:500]})  # Обрезаем длинные сообщения
+    messages.append({"role": "user", "content": f"{context_text}\n\n{text}"})
     
     reply = await get_ai_response(messages)
     reply = re.sub(r'[*_#~`]', '', reply)
