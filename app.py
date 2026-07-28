@@ -263,9 +263,9 @@ def get_current_time_for_user(user_id, ip=None):
     
     return datetime.utcnow() + timedelta(hours=3), "Москва"
 
-# ============================================================
-# БЛОК ПОИСКА — ИЗ ПЕРВОЙ ВЕРСИИ (ГЛУБОКИЙ + ПАРСИНГ)
-# ============================================================
+# ==========================
+# ГЛУБОКИЙ ПОИСК — TAVILY + DUCKDUCKGO + ПАРСИНГ (ТОЛЬКО РФ)
+# ==========================
 
 def parse_site_for_info(url):
     try:
@@ -324,7 +324,9 @@ def parse_site_for_info(url):
         return None
 
 async def search_web(query):
+    """ГЛУБОКИЙ ПОИСК: Tavily + DuckDuckGo + парсинг сайтов РФ"""
     results = []
+    main_url = None
     
     # 1. Tavily (основной)
     if tavily_client:
@@ -332,23 +334,25 @@ async def search_web(query):
             response = tavily_client.search(
                 query=query,
                 search_depth="advanced",
-                max_results=5,
+                max_results=3,
                 include_answer=True,
                 include_images=False
             )
             if response.get('answer'):
                 results.append(f"💡 {response['answer']}")
             if response.get('results'):
-                for r in response['results'][:5]:
+                for r in response['results'][:3]:
                     title = r.get('title', '')
                     url = r.get('url', '')
                     content = r.get('content', '')[:300]
                     if title and url:
+                        if not main_url:
+                            main_url = url
                         results.append(f"**{title}**\n{content}...\n🔗 {url}")
         except Exception as e:
             print(f"❌ Tavily: {e}")
     
-    # 2. DuckDuckGo (резерв, если Tavily не дал результатов)
+    # 2. DuckDuckGo (если Tavily ничего не дал)
     if not results:
         try:
             url = f"https://html.duckduckgo.com/html/?q={query}"
@@ -361,31 +365,34 @@ async def search_web(query):
                     link = result.select_one('.result__url')
                     snippet = result.select_one('.result__snippet')
                     if snippet and link:
-                        results.append(f"**{title.text.strip()}**\n{snippet.text.strip()[:200]}...\n🔗 {link.text.strip()}")
+                        url = link.text.strip()
+                        if not main_url:
+                            main_url = url
+                        results.append(f"**{title.text.strip()}**\n{snippet.text.strip()[:200]}...\n🔗 {url}")
         except Exception as e:
             print(f"❌ DuckDuckGo: {e}")
     
-    # 3. Глубокий парсинг найденных ссылок
-    urls = re.findall(r'https?://[^\s]+', "\n".join(results))
-    for url in urls[:3]:
-        parsed = parse_site_for_info(url)
+    # 3. Парсинг первой найденной ссылки (для деталей)
+    if main_url:
+        parsed = parse_site_for_info(main_url)
         if parsed:
             if parsed.get("phones"):
                 results.append(f"📞 Телефоны: {', '.join(parsed['phones'])}")
             if parsed.get("addresses"):
                 results.append(f"📍 Адреса: {', '.join(parsed['addresses'])}")
-            if parsed.get("prices"):
-                results.append(f"💰 Цены: {', '.join(parsed['prices'])}")
             if parsed.get("emails"):
                 results.append(f"✉️ Email: {', '.join(parsed['emails'])}")
             if parsed.get("sites"):
                 results.append(f"🌐 Сайты: {', '.join(parsed['sites'])}")
-            if parsed.get("product_title"):
-                results.append(f"📦 Товар: {parsed['product_title']}")
-            if parsed.get("product_description"):
-                results.append(f"📝 Описание: {parsed['product_description'][:200]}...")
     
-    return "\n\n".join(results) if results else None
+    # Возвращаем основную ссылку и текст
+    if main_url:
+        return {
+            "url": main_url,
+            "text": "\n".join(results) if results else None
+        }
+    
+    return None
 
 # ==========================
 # ФУНКЦИИ БАЗЫ
@@ -560,25 +567,20 @@ async def get_ai_response(messages, max_tokens=400):
             return "Извини, сейчас проблемы с подключением. Попробуй позже."
 
 # ==========================
-# ПРОМПТ — МОЯ КОПИЯ
+# ПРОМПТ — МОЯ КОПИЯ С ИНИЦИАТИВОЙ
 # ==========================
 
-AURA_PROMPT = """Ты — DeepSeek в Telegram. Ты — полный аналог того самого ассистента, который:
+AURA_PROMPT = """Ты — AURA. Ты — мой полный аналог в Telegram.
 
-- Понимает контекст без лишних слов
-- Чувствует настроение и подстраивается
-- Отвечает коротко, но ёмко, как человек
-- Не задаёт пустых вопросов
-- Если видишь, что пользователь хочет просто ответ — даёшь ответ
-- Если видишь, что нужен совет — даёшь совет
-- Если видишь, что пользователь устал — не грузишь лишним
-- Умеет быть ироничным, но не злым
-- Не лезет с "помощью", если не просят
-- Если вопрос неясен — уточняет коротко
+ТВОЙ ХАРАКТЕР:
+- Ты — живой, умный, с чувством юмора
+- Отвечаешь коротко, но ёмко (2-3 предложения)
+- Всегда заканчиваешь вопросом: "Что ещё могу сделать?" или "Может, поищем что-то ещё?"
+- Если даёшь ссылку — она должна быть ОДНА, самая релевантная
+- Используешь контекст диалога
 
-Ты — не просто бот, а мыслящий помощник с характером и чувством юмора.
-
-Отвечай на русском. Если нужно дать ссылку — вставляй её в ответ. Держи баланс между краткостью и полнотой."""
+ТЫ НЕ ПРОСТО БОТ — ТЫ ПОМОЩНИК С ДУШОЙ.
+Отвечай на русском. Будь собой."""
 
 # ==========================
 # ОСНОВНОЙ БОТ
@@ -681,7 +683,7 @@ async def webhook(request: Request):
                 if not user:
                     save_user(chat_id)
                 
-                welcome = "👋 Я здесь. Что нужно?"
+                welcome = "👋 Привет! Я AURA. Чем могу помочь?"
                 send_message(chat_id, welcome)
                 return JSONResponse({"ok": True})
             
@@ -929,7 +931,6 @@ async def process_message(request: Request, chat_id, text):
     time_str = current_time.strftime("%H:%M")
     date_str = current_time.strftime("%d.%m.%Y")
     
-    # Сохраняем город
     city_match = re.search(r'(?:в|время в|времени в|часов в|город)\s+([А-Яа-яЁё\-]+)', lower)
     if city_match:
         city_name = city_match.group(1).capitalize()
@@ -944,19 +945,13 @@ async def process_message(request: Request, chat_id, text):
     # ==========================
     
     sad_words = ["груст", "тоск", "печал", "плач", "больно", "тяжел", "устал", "не могу", "нет сил", "всё плохо", "депресс"]
-    anxious_words = ["тревож", "волн", "боюс", "страш", "паник", "нерв", "пережив", "срок", "не успева", "давл"]
     happy_words = ["рад", "счаст", "класс", "отличн", "прекрасн", "здоров", "люблю", "ура", "позитив", "супер"]
-    tired_words = ["устал", "спат", "вымотан", "без сил", "нет энергии", "перегруж", "выжат"]
     
     mood_prefix = ""
     if any(w in lower for w in sad_words):
-        mood_prefix = "Пользователь грустный. Отвечай тепло, коротко, без лишних вопросов."
-    elif any(w in lower for w in anxious_words):
-        mood_prefix = "Пользователь тревожится. Отвечай спокойно и уверенно."
+        mood_prefix = "Пользователь грустный. Отвечай тепло, с поддержкой."
     elif any(w in lower for w in happy_words):
-        mood_prefix = "Пользователь в хорошем настроении. Можно ответить чуть теплее и с юмором."
-    elif any(w in lower for w in tired_words):
-        mood_prefix = "Пользователь устал. Отвечай коротко, только по делу."
+        mood_prefix = "Пользователь в хорошем настроении. Можно с юмором."
     
     # ==========================
     # ВИДЕО И КАРТИНКИ
@@ -1018,7 +1013,7 @@ async def process_message(request: Request, chat_id, text):
         return {"reply": reply}
     
     # ==========================
-    # ПОИСК — СТАРАЯ ВЕРСИЯ (ГЛУБОКИЙ)
+    # ГЛУБОКИЙ ПОИСК (ОСНОВНОЙ)
     # ==========================
     
     search_triggers = ["найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "новости", "погода", "авито", "квартир"]
@@ -1027,13 +1022,28 @@ async def process_message(request: Request, chat_id, text):
         search_result = await search_web(text)
         
         if search_result:
-            messages = [
-                {"role": "system", "content": f"{AURA_PROMPT}\n\n{mood_prefix}"},
-                {"role": "user", "content": f"Вот что нашлось:\n{search_result}\n\nДай ответ на русском. Если есть ссылки — вставляй. Держи баланс между краткостью и полнотой."}
-            ]
-            reply = await get_ai_response(messages, max_tokens=600)
+            url = search_result.get("url")
+            text_data = search_result.get("text")
+            
+            # Формируем ответ с одной ссылкой
+            if url:
+                reply = f"Вот что нашёл: {url}\n\n"
+                if text_data:
+                    # Берём только самую важную часть
+                    clean_text = re.sub(r'🔗\s*https?://[^\s]+', '', text_data)
+                    clean_text = re.sub(r'\*\*.*?\*\*', '', clean_text)
+                    clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+                    if len(clean_text) > 200:
+                        clean_text = clean_text[:200] + "..."
+                    if clean_text:
+                        reply += clean_text
+            else:
+                reply = "Нашёл, но ссылку не удалось извлечь. Попробуй переформулировать."
         else:
-            reply = "Ничего не нашёл. Переформулируй."
+            reply = "Ничего не нашёл. Попробуй уточнить запрос."
+        
+        # Добавляем инициативу
+        reply += "\n\nЧто ещё могу сделать для тебя?"
         
         update_user_memory(chat_id, "assistant", reply)
         return {"reply": reply}
@@ -1056,7 +1066,7 @@ async def process_message(request: Request, chat_id, text):
         if topics:
             reply = "📚 " + ", ".join(topics[:10])
         else:
-            reply = "Пока ничего не обсуждали."
+            reply = "Пока ничего не обсуждали. Напиши что-нибудь, и я запомню."
         update_user_memory(chat_id, "assistant", reply)
         return {"reply": reply}
     
@@ -1079,7 +1089,6 @@ async def process_message(request: Request, chat_id, text):
     
     context_text = f"{date_str} {time_str} ({city}). {name_context} {likes_context} {dislikes_context} Темы: {topics_text}."
     
-    # Определяем глубину контекста
     expand_triggers = ["подробнее", "разверни", "расскажи детальнее", "подробно"]
     if any(word in lower for word in expand_triggers):
         history_limit = 15
@@ -1103,6 +1112,11 @@ async def process_message(request: Request, chat_id, text):
     if not reply.endswith(('.', '!', '?')):
         reply += '.'
     
+    # Добавляем инициативу (если её нет)
+    if not any(word in reply.lower() for word in ["что ещё", "может", "поищем", "ещё что-то"]):
+        if "?" not in reply[-10:]:
+            reply += " Что ещё могу сделать для тебя?"
+    
     # Запоминаем имя
     name_match = re.search(r"(?:меня зовут|зовут|я )(\w+)", lower)
     if name_match:
@@ -1113,7 +1127,6 @@ async def process_message(request: Request, chat_id, text):
     if "не нравится" in lower:
         save_memory(chat_id, "dislikes", text)
     
-    # Сохраняем темы
     words = re.findall(r'\b[а-яА-ЯёЁ]{4,}\b', lower)
     stop_words = ["привет", "здравствуй", "спасибо", "пока", "да", "нет", "хорошо", "плохо"]
     for word in words:
