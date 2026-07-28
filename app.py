@@ -164,9 +164,24 @@ def get_full_context(chat_id, limit=500):
         "user": cache.get("user")
     }
 
+def search_memory(chat_id, query):
+    if not supabase:
+        return []
+    try:
+        response = supabase.table("history")\
+            .select("*")\
+            .eq("user_id", chat_id)\
+            .ilike("content", f"%{query}%")\
+            .order("created_at", desc=True)\
+            .limit(10)\
+            .execute()
+        return response.data if response.data else []
+    except Exception as e:
+        print(f"❌ Ошибка поиска: {e}")
+        return []
+
 def set_bot_description():
-    description = """👋Привет! Я — AURA, твой умный помощник! 
-🔥Даю тебе - 7 дней бесплатного доступа!"""
+    description = """👋Привет! Я — AURA, твой умный помощник!"""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setMyDescription"
         data = {"description": description}
@@ -177,21 +192,34 @@ def set_bot_description():
 set_bot_description()
 
 # ==========================
-# ВРЕМЯ
+# ЧАСОВЫЕ ПОЯСА (ВСЕ ГОРОДА РФ)
 # ==========================
 
 def get_timezone_offset(city_name):
     timezones = {
-        "белово": 7, "кемерово": 7, "новокузнецк": 7,
-        "прокопьевск": 7, "киселёвск": 7, "междуреченск": 7,
-        "москва": 3, "санкт-петербург": 3, "калининград": 2,
-        "мурманск": 3, "архангельск": 3, "екатеринбург": 5,
-        "челябинск": 5, "тюмень": 5, "новосибирск": 7,
-        "омск": 6, "томск": 7, "красноярск": 7,
-        "иркутск": 8, "улан-удэ": 8, "чита": 9,
-        "владивосток": 10, "хабаровск": 10, "южно-сахалинск": 11,
-        "петропавловск-камчатский": 12, "магадан": 11, "анадырь": 12,
-        "амстердам": 2
+        # UTC+2
+        "калининград": 2,
+        # UTC+3
+        "москва": 3, "санкт-петербург": 3, "мурманск": 3, "архангельск": 3,
+        # UTC+4
+        "самара": 4, "саратов": 4, "ижевск": 4,
+        # UTC+5
+        "екатеринбург": 5, "челябинск": 5, "тюмень": 5, "пермь": 5,
+        # UTC+6
+        "омск": 6,
+        # UTC+7
+        "новосибирск": 7, "томск": 7, "кемерово": 7, "красноярск": 7,
+        "новокузнецк": 7, "прокопьевск": 7, "киселёвск": 7, "междуреченск": 7,
+        # UTC+8
+        "иркутск": 8,
+        # UTC+9
+        "чита": 9, "якутск": 9,
+        # UTC+10
+        "владивосток": 10, "хабаровск": 10,
+        # UTC+11
+        "южно-сахалинск": 11, "магадан": 11,
+        # UTC+12
+        "петропавловск-камчатский": 12, "анадырь": 12
     }
     for city, offset in timezones.items():
         if city in city_name.lower():
@@ -247,156 +275,139 @@ def get_current_time_for_user(user_id, ip=None):
     return datetime.utcnow() + timedelta(hours=3), "Москва"
 
 # ==========================
-# ПОИСК
+# ГЛУБОКИЙ ПОИСК: TAVILY + DUCKDUCKGO + ПАРСИНГ
 # ==========================
+
+def parse_site_for_info(url):
+    """Парсинг сайта — телефоны, адреса, цены, описание"""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept-Language": "ru-RU,ru;q=0.9"
+        }
+        response = requests.get(url, headers=headers, timeout=15)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        for script in soup(["script", "style", "nav", "footer", "header"]):
+            script.decompose()
+        text = soup.get_text(separator="\n", strip=True)
+        result = {}
+        
+        # Телефоны
+        phone_patterns = [r'\+7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'8\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}']
+        phones = []
+        for pattern in phone_patterns:
+            phones.extend(re.findall(pattern, text))
+        phones = [re.sub(r'\s+', ' ', p).strip() for p in phones]
+        phones = list(set(phones))[:5]
+        if phones:
+            result["phones"] = phones
+        
+        # Email
+        email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+        emails = list(set(re.findall(email_pattern, text)))[:3]
+        if emails:
+            result["emails"] = emails
+        
+        # Адреса
+        address_pattern = r'(?:ул\.|улица|проспект|пр\.|переулок|пер\.|площадь|пл\.|шоссе|бульвар|Аэродромная)\s+[А-Яа-я0-9\-\.\s,]+'
+        addresses = list(set(re.findall(address_pattern, text)))[:3]
+        if addresses:
+            result["addresses"] = addresses
+        
+        # Цены
+        price_pattern = r'(\d+[\s,.]*\d*)\s*(?:₽|руб|рублей|\$|€)'
+        prices = list(set(re.findall(price_pattern, text)))[:5]
+        if prices:
+            result["prices"] = prices
+        
+        # Сайты
+        site_pattern = r'(?:https?://)?(?:www\.)?([a-zA-Z0-9\-]+\.(?:ru|рф|com|org|net))'
+        sites = list(set(re.findall(site_pattern, text)))[:3]
+        if sites:
+            result["sites"] = sites
+        
+        # Заголовок
+        title = soup.find('h1')
+        if title:
+            result["title"] = title.text.strip()
+        
+        # Описание
+        desc = soup.find(class_=re.compile(r'description|about|product-desc|product__description'))
+        if desc:
+            result["description"] = desc.text.strip()[:500]
+        
+        result["snippet"] = text[:1000].replace("\n", " ")
+        return result
+    except Exception as e:
+        print(f"❌ Ошибка парсинга: {e}")
+        return None
 
 async def search_web(query):
-    """Поиск через Tavily — только факты, на русском языке"""
-    if not tavily_client:
-        return None
+    """ГЛУБОКИЙ ПОИСК: Tavily + DuckDuckGo + парсинг"""
+    results = []
     
-    try:
-        search_query = f"{query} на русском языке"
-        
-        response = tavily_client.search(
-            query=search_query,
-            search_depth="advanced",
-            max_results=3,
-            include_answer=True,
-            include_images=False
-        )
-        
-        if response.get('answer'):
-            answer = response['answer']
-            if re.search(r'[а-яА-Я]', answer):
-                answer = re.sub(r'http\S+', '', answer)
-                answer = re.sub(r'\d{10,}', '', answer)
-                return answer[:500]
-        
-        if response.get('results'):
-            for r in response['results'][:3]:
-                content = r.get('content', '')[:300]
-                if re.search(r'[а-яА-Я]', content):
-                    content = re.sub(r'<[^>]+>', '', content)
-                    content = re.sub(r'http\S+', '', content)
-                    content = re.sub(r'\d{10,}', '', content)
-                    return content[:500]
-        
-        return None
-        
-    except Exception as e:
-        print(f"❌ Tavily ошибка: {e}")
-        return None
-
-# ==========================
-# ОПРЕДЕЛЕНИЕ НАМЕРЕНИЯ (УНИВЕРСАЛЬНЫЙ ПАРСЕР)
-# ==========================
-
-def parse_intent(text):
-    """
-    Определяет, что хочет пользователь и где искать
-    Возвращает: {
-        'type': 'images' | 'video' | 'web' | 'time' | 'chat',
-        'query': 'очищенный запрос',
-        'url': 'ссылка для поиска (если применимо)'
-    }
-    """
-    text_lower = text.lower()
+    # 1. Tavily (основной)
+    if tavily_client:
+        try:
+            response = tavily_client.search(
+                query=f"{query} сайт Россия .ru",
+                search_depth="advanced",
+                max_results=5,
+                include_answer=True,
+                include_images=False
+            )
+            if response.get('answer'):
+                answer = response['answer']
+                if re.search(r'[а-яА-Я]', answer):
+                    results.append(f"💡 {answer}")
+            if response.get('results'):
+                for r in response['results'][:5]:
+                    title = r.get('title', '')
+                    url = r.get('url', '')
+                    content = r.get('content', '')[:300]
+                    if title and url and re.search(r'[а-яА-Я]', content):
+                        results.append(f"**{title}**\n{content}...\n🔗 {url}")
+        except Exception as e:
+            print(f"❌ Tavily: {e}")
     
-    # ==========================
-    # 1. ВИДЕО
-    # ==========================
-    video_triggers = ['видео', 'ютуб', 'youtube', 'клип', 'ролик', 'видеоролик', 'видеозапись']
-    if any(trigger in text_lower for trigger in video_triggers):
-        # Извлекаем запрос — убираем только триггеры и самые явные стоп-слова
-        query = text_lower
-        stop_words = video_triggers + ['найди', 'хочу', 'покажи', 'дай', 'ссылку', 'про', 'на', 'с', 'и', 'в', 'а', 'к', 'у', 'о', 'от', 'до', 'за', 'мне', 'меня', 'посмотреть', 'найти']
-        for word in stop_words:
-            query = query.replace(word, " ")
-        query = " ".join(query.split()).strip()
-        
-        # Если запрос пустой или слишком короткий — используем значение по умолчанию
-        if not query or len(query) < 3:
-            query = "котики"
-        
-        # Оставляем только буквы, цифры и пробелы
-        query = re.sub(r'[^а-яА-Яa-zA-Z0-9 ]', '', query)
-        
-        url = f"https://yandex.ru/video/search?text={query.replace(' ', '%20')}"
-        
-        return {
-            'type': 'video',
-            'query': query,
-            'url': url,
-            'response': f"🎬 Вот видео по запросу '{query}':\n{url}"
-        }
+    # 2. DuckDuckGo (резерв)
+    if not results:
+        try:
+            url = f"https://html.duckduckgo.com/html/?q={query}"
+            headers = {"User-Agent": "Mozilla/5.0"}
+            response = requests.get(url, headers=headers, timeout=10)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            for result in soup.select('.result')[:3]:
+                title = result.select_one('.result__title')
+                if title:
+                    link = result.select_one('.result__url')
+                    snippet = result.select_one('.result__snippet')
+                    if snippet and link:
+                        results.append(f"**{title.text.strip()}**\n{snippet.text.strip()[:200]}...\n🔗 {link.text.strip()}")
+        except Exception as e:
+            print(f"❌ DuckDuckGo: {e}")
     
-    # ==========================
-    # 2. КАРТИНКИ
-    # ==========================
-    image_triggers = ['картинк', 'рисунк', 'фото', 'изображен', 'фотографи', 'снимк', 'иллюстраци', 'обои']
-    if any(trigger in text_lower for trigger in image_triggers):
-        query = text_lower
-        stop_words = image_triggers + ['найди', 'хочу', 'покажи', 'дай', 'ссылку', 'про', 'на', 'с', 'и', 'в', 'а', 'к', 'у', 'о', 'от', 'до', 'за', 'мне', 'меня', 'посмотреть', 'найти']
-        for word in stop_words:
-            query = query.replace(word, " ")
-        query = " ".join(query.split()).strip()
-        
-        if not query or len(query) < 3:
-            query = "котики"
-        
-        query = re.sub(r'[^а-яА-Яa-zA-Z0-9 ]', '', query)
-        
-        url = f"https://yandex.ru/images/search?text={query.replace(' ', '%20')}"
-        
-        return {
-            'type': 'images',
-            'query': query,
-            'url': url,
-            'response': f"🖼️ Вот картинки по запросу '{query}':\n{url}"
-        }
+    # 3. Парсинг найденных ссылок
+    urls = re.findall(r'https?://[^\s]+', "\n".join(results))
+    for url in urls[:3]:
+        parsed = parse_site_for_info(url)
+        if parsed:
+            if parsed.get("phones"):
+                results.append(f"📞 Телефоны: {', '.join(parsed['phones'])}")
+            if parsed.get("addresses"):
+                results.append(f"📍 Адреса: {', '.join(parsed['addresses'])}")
+            if parsed.get("prices"):
+                results.append(f"💰 Цены: {', '.join(parsed['prices'])}")
+            if parsed.get("emails"):
+                results.append(f"✉️ Email: {', '.join(parsed['emails'])}")
+            if parsed.get("sites"):
+                results.append(f"🌐 Сайты: {', '.join(parsed['sites'])}")
+            if parsed.get("title"):
+                results.append(f"📦 {parsed['title']}")
+            if parsed.get("description"):
+                results.append(f"📝 {parsed['description'][:200]}...")
     
-    # ==========================
-    # 3. ВРЕМЯ
-    # ==========================
-    time_triggers = ['время', 'который час', 'сколько времени', 'сколько сейчас', 'точное время']
-    if any(trigger in text_lower for trigger in time_triggers):
-        return {
-            'type': 'time',
-            'query': None,
-            'url': None,
-            'response': None
-        }
-    
-    # ==========================
-    # 4. ПОИСК В ИНТЕРНЕТЕ
-    # ==========================
-    web_triggers = ['найди', 'узнай', 'поищи', 'где', 'кто', 'что такое', 'клиника', 'сайт', 'адрес', 'телефон', 'контакт', 'новости', 'погода']
-    if any(trigger in text_lower for trigger in web_triggers):
-        query = text_lower
-        stop_words = web_triggers + ['пожалуйста', 'информацию', 'про', 'о', 'на', 'в', 'с', 'и', 'а', 'к', 'у']
-        for word in stop_words:
-            query = query.replace(word, " ")
-        query = " ".join(query.split()).strip()
-        if not query or len(query) < 3:
-            query = text
-        
-        return {
-            'type': 'web',
-            'query': query,
-            'url': None,
-            'response': None
-        }
-    
-    # ==========================
-    # 5. ОБЫЧНЫЙ ДИАЛОГ
-    # ==========================
-    return {
-        'type': 'chat',
-        'query': text,
-        'url': None,
-        'response': None
-    }
+    return "\n\n".join(results) if results else None
 
 # ==========================
 # ФУНКЦИИ БАЗЫ
@@ -495,6 +506,46 @@ def save_topic(user_id, topic):
     except:
         pass
 
+def get_all_topics(user_id):
+    if not supabase:
+        return []
+    try:
+        response = supabase.table("topics")\
+            .select("topic")\
+            .eq("user_id", user_id)\
+            .execute()
+        return [t["topic"] for t in response.data] if response.data else []
+    except:
+        return []
+
+def get_message_count(user_id):
+    if not supabase:
+        return 0
+    try:
+        response = supabase.table("history")\
+            .select("id", count="exact")\
+            .eq("user_id", user_id)\
+            .execute()
+        return response.count if hasattr(response, 'count') else 0
+    except:
+        return 0
+
+def get_last_message_time(user_id):
+    if not supabase:
+        return None
+    try:
+        response = supabase.table("history")\
+            .select("created_at")\
+            .eq("user_id", user_id)\
+            .order("created_at", desc=True)\
+            .limit(1)\
+            .execute()
+        if response.data:
+            return datetime.fromisoformat(response.data[0]["created_at"].replace("Z", "+00:00"))
+        return None
+    except:
+        return None
+
 # ==========================
 # AI
 # ==========================
@@ -509,7 +560,7 @@ async def get_ai_response(messages):
             model="deepseek-v4-flash",
             messages=messages,
             temperature=0.85,
-            max_tokens=600,
+            max_tokens=400,
             presence_penalty=0.1,
             frequency_penalty=0.1
         )
@@ -524,7 +575,7 @@ async def get_ai_response(messages):
                 model="llama-3.3-70b-versatile",
                 messages=messages,
                 temperature=0.9,
-                max_tokens=400
+                max_tokens=350
             )
             print(f"🔄 Переключился на Groq (резерв)")
             return response.choices[0].message.content
@@ -551,7 +602,7 @@ async def webhook(request: Request):
             data = {"pre_checkout_query_id": query["id"], "ok": True}
             requests.post(url, json=data)
             
-            send_message(chat_id, "✅ Оплата прошла успешно! Спасибо за поддержку.")
+            send_message(chat_id, "✅ Оплата прошла успешно!")
             return JSONResponse({"ok": True})
         
         if "message" not in body:
@@ -562,15 +613,31 @@ async def webhook(request: Request):
             chat_id = str(callback["message"]["chat"]["id"])
             data = callback["data"]
             
-            if data == "help":
-                send_message(chat_id, "Я умею:\n- Отвечать на вопросы\n- Искать информацию\n- Показывать время\n- Давать ссылки на картинки и видео")
+            if data.startswith("buy_"):
+                subscription = data.replace("buy_", "")
+                tariff = TARIFFS.get(subscription)
+                if tariff:
+                    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendInvoice"
+                    invoice_data = {
+                        "chat_id": chat_id,
+                        "title": f"Подписка AURA — {tariff['name']}",
+                        "description": "Полный доступ на 30 дней",
+                        "payload": f"subscription_{subscription}",
+                        "provider_token": "",
+                        "currency": "XTR",
+                        "prices": [{"label": "Подписка на 30 дней", "amount": tariff["stars"]}],
+                        "start_parameter": "aura_sub"
+                    }
+                    requests.post(url, json=invoice_data)
+                return JSONResponse({"ok": True})
+            
+            elif data == "cancel":
+                send_message(chat_id, "❌ Отменено.")
                 return JSONResponse({"ok": True})
         
         message = body["message"]
         chat_id = str(message["chat"]["id"])
         text = None
-        
-        send_typing(chat_id)
         
         if "voice" in message:
             file_id = message["voice"]["file_id"]
@@ -607,27 +674,6 @@ async def webhook(request: Request):
                     send_message(chat_id, "⚠️ Не удалось загрузить фото")
                     return JSONResponse({"ok": True})
         
-        elif "document" in message:
-            document = message["document"]
-            file_id = document["file_id"]
-            file_name = document.get("file_name", "unknown")
-            file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
-            file_response = requests.get(file_url)
-            file_data_resp = file_response.json()
-            if file_data_resp.get("ok"):
-                file_path = file_data_resp["result"]["file_path"]
-                file_url_full = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
-                file_response_full = requests.get(file_url_full, timeout=30)
-                if file_response_full.status_code == 200:
-                    file_data = file_response_full.content
-                    send_message(chat_id, f"📄 Обрабатываю файл: {file_name}...")
-                    file_text = read_file(file_data, file_name)
-                    send_message(chat_id, f"📄 Содержимое:\n\n{file_text[:2000]}")
-                    return JSONResponse({"ok": True})
-                else:
-                    send_message(chat_id, "⚠️ Не удалось загрузить файл")
-                    return JSONResponse({"ok": True})
-        
         elif "text" in message:
             text = message["text"].strip()
         
@@ -637,12 +683,67 @@ async def webhook(request: Request):
                 if not user:
                     save_user(chat_id)
                 
-                welcome = "👋 Привет! Я AURA — твой умный помощник. Задавай любые вопросы, я здесь, чтобы помочь."
+                welcome = "👋 Привет! Я AURA. Чем могу помочь?"
                 send_message(chat_id, welcome)
                 return JSONResponse({"ok": True})
             
-            if text.startswith("/help"):
-                send_message(chat_id, "Я умею:\n- Отвечать на вопросы\n- Искать информацию в интернете\n- Показывать время в любом городе\n- Находить картинки и видео по запросу\n\nПросто напиши, что тебе нужно!")
+            if text.startswith("/pro"):
+                USER_MODEL_PREFERENCE[chat_id] = "pro"
+                send_message(chat_id, "🧠 Pro режим включён.")
+                return JSONResponse({"ok": True})
+            
+            if text.startswith("/flash"):
+                USER_MODEL_PREFERENCE[chat_id] = "flash"
+                send_message(chat_id, "⚡ Flash режим включён.")
+                return JSONResponse({"ok": True})
+            
+            if text.startswith("/model"):
+                pref = USER_MODEL_PREFERENCE.get(chat_id, "flash")
+                send_message(chat_id, f"📊 Текущая модель: {pref.upper()}")
+                return JSONResponse({"ok": True})
+            
+            if text.startswith("/buy"):
+                keyboard = [
+                    [{"text": "⭐ Собеседник — 50 Stars", "callback_data": "buy_собеседник"}],
+                    [{"text": "⭐ Партнёр — 120 Stars", "callback_data": "buy_партнёр"}],
+                    [{"text": "⭐ Агент жизни — 250 Stars", "callback_data": "buy_агент_жизни"}],
+                    [{"text": "❌ Отмена", "callback_data": "cancel"}]
+                ]
+                url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+                data = {
+                    "chat_id": chat_id,
+                    "text": "💳 **Выбери подписку:**\n\n⭐ Собеседник — 50 Stars\n⭐ Партнёр — 120 Stars\n⭐ Агент жизни — 250 Stars",
+                    "parse_mode": "Markdown",
+                    "reply_markup": json.dumps({"inline_keyboard": keyboard})
+                }
+                requests.post(url, json=data)
+                return JSONResponse({"ok": True})
+            
+            if text.startswith("/remind"):
+                parts = text.split(" ", 3)
+                if len(parts) >= 4:
+                    date_str = parts[1]
+                    time_str = parts[2]
+                    reminder_text = parts[3]
+                    try:
+                        dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+                        save_reminder(chat_id, reminder_text, dt.isoformat(), chat_id)
+                        send_message(chat_id, f"⏰ Напомню в {date_str} {time_str}")
+                    except:
+                        send_message(chat_id, "❌ Формат: /remind ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ")
+                else:
+                    send_message(chat_id, "❌ Формат: /remind ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ")
+                return JSONResponse({"ok": True})
+            
+            if text.startswith("/memory"):
+                context = get_full_context(chat_id)
+                topics = context["topics"]
+                history_count = len(context["history"])
+                
+                reply = f"🧠 **Память:**\n- Сообщений: {history_count}\n- Тем: {len(topics)}"
+                if topics:
+                    reply += "\n\n**Темы:**\n" + "\n".join([f"- {t}" for t in topics[:10]])
+                send_message(chat_id, reply)
                 return JSONResponse({"ok": True})
             
             result = await process_message(request, chat_id, text)
@@ -662,14 +763,6 @@ def send_message(chat_id, text):
     except Exception as e:
         print(f"❌ Отправка: {e}")
         return False
-
-def send_typing(chat_id):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction"
-        data = {"chat_id": chat_id, "action": "typing"}
-        requests.post(url, json=data, timeout=3)
-    except:
-        pass
 
 def transcribe_audio_with_groq(audio_url):
     try:
@@ -717,50 +810,106 @@ def describe_image_with_groq(image_data):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Опиши подробно, что ты видишь на этой картинке. Ответ дай на русском."},
+                        {"type": "text", "text": "Опиши, что видишь на картинке. Ответ на русском."},
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
                     ]
                 }
             ],
             temperature=0.3,
-            max_tokens=500
+            max_tokens=300
         )
         return response.choices[0].message.content
     except Exception as e:
         print(f"❌ Vision ошибка: {e}")
         return None
 
-def read_file(file_data, file_name):
+# ==========================
+# МОНЕТИЗАЦИЯ
+# ==========================
+
+TARIFFS = {
+    "собеседник": {"name": "Собеседник", "price": 50, "stars": 50},
+    "партнёр": {"name": "Партнёр", "price": 120, "stars": 120},
+    "агент_жизни": {"name": "Агент жизни", "price": 250, "stars": 250}
+}
+
+TRIAL_DAYS = 7
+
+def get_user_subscription(user_id):
+    if not supabase:
+        return ("free", None)
     try:
-        if file_name.endswith('.txt'):
-            return file_data.decode('utf-8')
-        elif file_name.endswith('.pdf'):
-            try:
-                import PyPDF2
-                from io import BytesIO
-                pdf_reader = PyPDF2.PdfReader(BytesIO(file_data))
-                text = ""
-                for page in pdf_reader.pages:
-                    text += page.extract_text()
-                return text
-            except:
-                return "⚠️ Не удалось прочитать PDF."
-        elif file_name.endswith('.docx'):
-            try:
-                import docx
-                from io import BytesIO
-                doc = docx.Document(BytesIO(file_data))
-                return "\n".join([para.text for para in doc.paragraphs])
-            except:
-                return "⚠️ Не удалось прочитать DOCX."
-        else:
-            return "⚠️ Формат не поддерживается. Используй TXT, PDF или DOCX."
-    except Exception as e:
-        return f"⚠️ Ошибка: {e}"
+        response = supabase.table("users")\
+            .select("subscription, trial_start")\
+            .eq("user_id", user_id)\
+            .execute()
+        if response.data:
+            data = response.data[0]
+            return (data.get("subscription", "free"), data.get("trial_start"))
+        return ("free", None)
+    except:
+        return ("free", None)
+
+def is_trial_active(trial_start):
+    if not trial_start:
+        return False
+    trial_date = datetime.fromisoformat(trial_start.replace("Z", "+00:00"))
+    return datetime.now() - trial_date < timedelta(days=TRIAL_DAYS)
+
+def has_access(user_id):
+    if user_id in ADMIN_USERS:
+        return True
+    subscription, trial_start = get_user_subscription(user_id)
+    if is_trial_active(trial_start):
+        return True
+    if subscription != "free":
+        return True
+    return False
+
+def save_reminder(user_id, text, remind_time, chat_id):
+    if not supabase:
+        return
+    try:
+        supabase.table("reminders").insert({
+            "user_id": user_id,
+            "text": text,
+            "remind_time": remind_time,
+            "chat_id": chat_id,
+            "status": "pending"
+        }).execute()
+    except:
+        pass
+
+def update_user_subscription(user_id, subscription):
+    if not supabase:
+        return
+    try:
+        supabase.table("users")\
+            .update({"subscription": subscription})\
+            .eq("user_id", user_id)\
+            .execute()
+    except:
+        pass
+
+def save_payment(user_id, subscription, stars):
+    if not supabase:
+        return
+    try:
+        supabase.table("payments").insert({
+            "user_id": user_id,
+            "subscription": subscription,
+            "stars": stars,
+            "status": "pending",
+            "created_at": datetime.now().isoformat()
+        }).execute()
+    except:
+        pass
 
 # ==========================
 # ОСНОВНАЯ ЛОГИКА
 # ==========================
+
+USER_MODEL_PREFERENCE = {}
 
 async def process_message(request: Request, chat_id, text):
     user = get_user(chat_id)
@@ -770,8 +919,7 @@ async def process_message(request: Request, chat_id, text):
     load_user_memory(chat_id)
     update_user_memory(chat_id, "user", text)
     
-    context = get_full_context(chat_id, limit=300)
-    history = context["history"]
+    lower = text.lower()
     
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
@@ -782,139 +930,183 @@ async def process_message(request: Request, chat_id, text):
     current_time, city = get_current_time_for_user(chat_id, ip)
     time_str = current_time.strftime("%H:%M")
     date_str = current_time.strftime("%d.%m.%Y")
+    day_str = current_time.strftime("%A")
     
-    city_match = re.search(r'(?:в|время в|времени в|часов в|город)\s+([А-Яа-яЁё\-]+)', text.lower())
+    # Сохраняем город
+    city_match = re.search(r'(?:в|время в|времени в|часов в|город)\s+([А-Яа-яЁё\-]+)', lower)
     if city_match:
         city_name = city_match.group(1).capitalize()
         update_user_city(chat_id, city_name)
         save_memory(chat_id, "city", city_name)
-        print(f"🏙️ Сохранён город: {city_name}")
-
-    # ==========================
-    # АНАЛИЗ НАМЕРЕНИЯ
-    # ==========================
-    
-    intent = parse_intent(text)
+        # Обновляем время для нового города
+        current_time, city = get_current_time_for_user(chat_id, ip)
+        time_str = current_time.strftime("%H:%M")
+        date_str = current_time.strftime("%d.%m.%Y")
     
     # ==========================
-    # 1. ВИДЕО
+    # ВИДЕО И КАРТИНКИ
     # ==========================
-    if intent['type'] == 'video':
-        reply = intent['response']
-        update_user_memory(chat_id, "assistant", reply)
-        return {"reply": reply}
+    
+    visual_triggers = {
+        "картинк": "https://yandex.ru/images/search?text=",
+        "рисунк": "https://yandex.ru/images/search?text=",
+        "котик": "https://yandex.ru/images/search?text=коты",
+        "кот": "https://yandex.ru/images/search?text=коты",
+        "соба": "https://yandex.ru/images/search?text=собаки",
+        "видео": "https://yandex.ru/video/search?text=",
+        "ютуб": "https://yandex.ru/video/search?text=",
+        "музык": "https://music.yandex.ru/search?text=",
+        "песн": "https://music.yandex.ru/search?text=",
+    }
+    
+    for trigger, base_url in visual_triggers.items():
+        if trigger in lower:
+            query = text.strip()
+            for t in visual_triggers.keys():
+                query = re.sub(rf'\b{t}\b', '', query, flags=re.IGNORECASE).strip()
+            if not query:
+                query = trigger
+            if trigger in ["видео", "ютуб", "музык", "песн"]:
+                query = re.sub(r'найди|хочу|покажи|дай|ссылку', '', query, flags=re.IGNORECASE).strip()
+                if not query:
+                    query = "котики"
+            if trigger in ["видео", "ютуб"]:
+                reply = f"🎬 {base_url}{query.replace(' ', '%20')}"
+            elif trigger in ["музык", "песн"]:
+                reply = f"🎵 {base_url}{query.replace(' ', '%20')}"
+            else:
+                reply = f"🖼️ {base_url}{query.replace(' ', '%20')}"
+            update_user_memory(chat_id, "assistant", reply)
+            return {"reply": reply}
     
     # ==========================
-    # 2. КАРТИНКИ
+    # ВРЕМЯ
     # ==========================
-    if intent['type'] == 'images':
-        reply = intent['response']
-        update_user_memory(chat_id, "assistant", reply)
-        return {"reply": reply}
     
-    # ==========================
-    # 3. ВРЕМЯ
-    # ==========================
-    if intent['type'] == 'time':
-        city_match = re.search(r'(?:в|время в|времени в|часов в|город)\s+([А-Яа-яЁё\-]+)', text.lower())
+    time_queries = ["время", "который час", "сколько времени", "сколько сейчас"]
+    if any(query in lower for query in time_queries):
+        city_match = re.search(r'(?:в|время в|времени в|часов в|город)\s+([А-Яа-яЁё\-]+)', lower)
         if city_match:
-            city_name = city_match.group(1).capitalize()
-            current_time, _ = get_current_time_for_user(chat_id, ip)
+            city = city_match.group(1).capitalize()
+            update_user_city(chat_id, city)
+            save_memory(chat_id, "city", city)
+            current_time, city = get_current_time_for_user(chat_id, ip)
             time_str = current_time.strftime("%H:%M")
             date_str = current_time.strftime("%d.%m.%Y")
-            reply = f"🕐 Сейчас {time_str} {date_str} (город: {city_name})"
+            reply = f"🕐 {time_str} {date_str} ({city})"
         else:
             current_time, city = get_current_time_for_user(chat_id, ip)
             time_str = current_time.strftime("%H:%M")
             date_str = current_time.strftime("%d.%m.%Y")
-            reply = f"🕐 Сейчас {time_str} {date_str} (город: {city})"
+            reply = f"🕐 {time_str} {date_str} ({city})"
         update_user_memory(chat_id, "assistant", reply)
         return {"reply": reply}
     
     # ==========================
-    # 4. ПОИСК В ИНТЕРНЕТЕ
-    # ==========================
-    if intent['type'] == 'web':
-        print(f"🔍 Поиск: {intent['query']}")
-        search_result = await search_web(intent['query'])
-        if search_result:
-            reply = search_result
-        else:
-            reply = f"🔍 Ничего не нашёл по запросу '{intent['query']}'. Попробуй переформулировать."
-        update_user_memory(chat_id, "assistant", reply)
-        return {"reply": reply}
-    
-    # ==========================
-    # 5. КОНТЕКСТНЫЙ ПОИСК ("дай ссылку", "сайт")
+    # ГЛУБОКИЙ ПОИСК
     # ==========================
     
-    if "ссылк" in text.lower() or "сайт" in text.lower():
-        last_requests = []
-        for msg in reversed(history[-10:]):
-            if msg["role"] == "user":
-                if any(word in msg["content"].lower() for word in ["найди", "узнай", "где", "кто", "что такое", "клиника", "адрес", "телефон"]):
-                    last_requests.append(msg["content"])
-        
-        if last_requests:
-            search_query = last_requests[0]
-            print(f"🔍 Контекстный поиск: {search_query}")
-            search_result = await search_web(search_query)
-            if search_result:
-                reply = search_result
-                update_user_memory(chat_id, "assistant", reply)
-                return {"reply": reply}
-    
-    # ==========================
-    # 6. ПАМЯТЬ ("напомни", "что обсуждали")
-    # ==========================
-    
-    if "напомни" in text.lower() or "что мы обсуждали" in text.lower():
-        topics = context["topics"]
-        if topics:
-            topics_list = ", ".join(topics[:10])
-            reply = f"Мы обсуждали: {topics_list}. Хочешь вернуться к какой-то теме?"
-        else:
-            reply = "Мы пока ничего не обсуждали. Напиши что-нибудь, и я запомню."
-        update_user_memory(chat_id, "assistant", reply)
-        return {"reply": reply}
-    
-    # ==========================
-    # 7. ОБЫЧНЫЙ ДИАЛОГ
-    # ==========================
-    
-    history_text = ""
-    for msg in history[-15:]:
-        role = "Пользователь" if msg["role"] == "user" else "AURA"
-        history_text += f"{role}: {msg['content']}\n"
-    
-    system_prompt = f"""Ты — AURA, умный и эмпатичный помощник в Telegram.
-
-ТЫ ПОНИМАЕШЬ КОНТЕКСТ:
-- Ты видишь всю историю диалога
-- Отвечаешь коротко, 2-3 предложения
-- Всегда завершаешь мысль
-- Не выдумываешь факты
-
-СЕЙЧАС:
-- Город: {city}
-- Время: {time_str}
-- Дата: {date_str}
-
-ИСТОРИЯ:
-{history_text}
-
-ПОЛЬЗОВАТЕЛЬ: {text}
-
-ОТВЕТЬ КОРОТКО И ПО ДЕЛУ НА РУССКОМ."""
-    
-    messages = [{"role": "system", "content": system_prompt}]
-    reply = await get_ai_response(messages)
-    
-    # Если ответ слишком короткий — пробуем поиск
-    if len(reply) < 30:
+    search_triggers = ["найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "новости", "погода", "авито", "квартир"]
+    if any(word in lower for word in search_triggers):
+        print(f"🔍 Глубокий поиск: {text}")
         search_result = await search_web(text)
         if search_result:
             reply = search_result
+        else:
+            reply = "Ничего не нашёл. Попробуй переформулировать."
+        update_user_memory(chat_id, "assistant", reply)
+        return {"reply": reply}
+    
+    # ==========================
+    # ПАМЯТЬ
+    # ==========================
+    
+    if "помнишь" in lower:
+        search_query = re.sub(r'помнишь|ты помнишь|помнишь ли', '', lower).strip()
+        if search_query:
+            found = search_memory(chat_id, search_query)
+            if found:
+                reply = "🧠 " + found[-1]["content"][:200]
+                update_user_memory(chat_id, "assistant", reply)
+                return {"reply": reply}
+    
+    if "что мы обсуждали" in lower:
+        topics = get_all_topics(chat_id)
+        if topics:
+            reply = "📚 " + ", ".join(topics[:10])
+        else:
+            reply = "Пока ничего не обсуждали."
+        update_user_memory(chat_id, "assistant", reply)
+        return {"reply": reply}
+    
+    # ==========================
+    # ОБЫЧНЫЙ ДИАЛОГ
+    # ==========================
+    
+    context = get_full_context(chat_id, limit=300)
+    history = context["history"]
+    topics = get_all_topics(chat_id)
+    
+    user_name = get_memory(chat_id, "name")
+    likes = get_memory(chat_id, "likes")
+    dislikes = get_memory(chat_id, "dislikes")
+    
+    topics_text = ", ".join(topics[:5]) if topics else "нет тем"
+    memory_context = f"Темы: {topics_text}."
+    name_context = f"Имя: {user_name}" if user_name else ""
+    likes_context = f"Нравится: {likes}" if likes else ""
+    dislikes_context = f"Не нравится: {dislikes}" if dislikes else ""
+    
+    user_prompt = f"{date_str} {time_str} ({city}). {name_context} {likes_context} {dislikes_context} {memory_context}\n\n{text}"
+    
+    expand_triggers = ["подробнее", "разверни", "расскажи детальнее", "подробно"]
+    short = not any(word in lower for word in expand_triggers)
+    
+    aura_prompt = """Ты — AURA. Умный, короткий, по делу.
+
+ПРАВИЛА:
+- Отвечай как человек: тепло, прямо.
+- 2-3 предложения. Не больше.
+- Всегда завершай мысль.
+- Используй контекст.
+- Не выдумывай.
+- Без фраз "что думаешь", "хочешь уточнить"."""
+
+    if not short:
+        aura_prompt += " Пользователь просит развёрнутый ответ."
+
+    messages = [{"role": "system", "content": aura_prompt}]
+    for msg in history[-30:]:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.append({"role": "user", "content": user_prompt})
+    
+    reply = await get_ai_response(messages)
+    reply = re.sub(r'[*_#~`]', '', reply)
+    
+    # Обрезаем до 3 предложений
+    sentences = re.split(r'(?<=[.!?])\s+', reply)
+    if len(sentences) > 3:
+        reply = ' '.join(sentences[:3])
+    
+    if not reply.endswith(('.', '!', '?')):
+        reply += '.'
+    
+    # Запоминаем имя
+    name_match = re.search(r"(?:меня зовут|зовут|я )(\w+)", lower)
+    if name_match:
+        save_memory(chat_id, "name", name_match.group(1).capitalize())
+    
+    if "нравится" in lower:
+        save_memory(chat_id, "likes", text)
+    if "не нравится" in lower:
+        save_memory(chat_id, "dislikes", text)
+    
+    # Сохраняем темы
+    words = re.findall(r'\b[а-яА-ЯёЁ]{4,}\b', lower)
+    stop_words = ["привет", "здравствуй", "спасибо", "пока", "да", "нет", "хорошо", "плохо"]
+    for word in words:
+        if word not in stop_words and len(word) > 3:
+            save_topic(chat_id, word)
     
     update_user_memory(chat_id, "assistant", reply)
     return {"reply": reply}
