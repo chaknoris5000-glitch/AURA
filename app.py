@@ -367,38 +367,49 @@ def parse_site_for_info(url):
         return None
 
 async def search_web(query):
-    """Очищенный поиск через Tavily — только факты, без мусора"""
-    results = []
-    if tavily_client:
-        try:
-            response = tavily_client.search(
-                query=query,
-                search_depth="advanced",
-                max_results=3,
-                include_answer=True,
-                include_images=False
-            )
-            if response.get('answer'):
-                # Берём только краткий ответ
-                return response['answer']
-            
-            if response.get('results'):
-                for r in response['results'][:3]:
-                    title = r.get('title', '')
-                    content = r.get('content', '')[:200]
+    """Очищенный поиск через Tavily — только факты, на русском языке"""
+    if not tavily_client:
+        return "⚠️ Поиск временно недоступен"
+    
+    try:
+        # ЯВНО УКАЗЫВАЕМ РУССКИЙ ЯЗЫК
+        search_query = f"{query} на русском языке"
+        
+        response = tavily_client.search(
+            query=search_query,
+            search_depth="advanced",
+            max_results=3,
+            include_answer=True,
+            include_images=False
+        )
+        
+        # Проверяем, есть ли ответ
+        if response.get('answer'):
+            answer = response['answer']
+            # Проверяем, что ответ на русском
+            if re.search(r'[а-яА-Я]', answer):
+                # Очищаем от лишних ссылок и цифр
+                answer = re.sub(r'http\S+', '', answer)
+                answer = re.sub(r'\d{10,}', '', answer)
+                return answer[:500]  # Ограничиваем длину
+        
+        # Если ответа нет или он не на русском — ищем в результатах
+        if response.get('results'):
+            for r in response['results'][:3]:
+                content = r.get('content', '')[:300]
+                # Проверяем, что контент на русском
+                if re.search(r'[а-яА-Я]', content):
                     # Очищаем от мусора
                     content = re.sub(r'<[^>]+>', '', content)
                     content = re.sub(r'http\S+', '', content)
                     content = re.sub(r'\d{10,}', '', content)
-                    results.append(f"{title}: {content}")
-        except Exception as e:
-            print(f"❌ Tavily: {e}")
-    
-    if not results:
-        return "Ничего не нашёл по твоему запросу. Попробуй переформулировать."
-    
-    # Собираем в чистый текст
-    return "\n".join(results[:3])
+                    return content[:500]
+        
+        return "По твоему запросу ничего не нашлось на русском языке. Попробуй переформулировать."
+        
+    except Exception as e:
+        print(f"❌ Tavily ошибка: {e}")
+        return "Извини, поиск временно недоступен. Попробуй позже."
 
 def describe_image_with_groq(image_data):
     try:
@@ -1154,7 +1165,7 @@ async def process_message(request: Request, chat_id, text):
         ip = request.client.host if request.client else "127.0.0.1"
     
     # ==========================
-    # 1. ВРЕМЯ (С ИСПРАВЛЕНИЕМ)
+    # 1. ВРЕМЯ
     # ==========================
     
     time_queries = ["время", "который час", "сколько времени", "час", "сколько сейчас", "точное время"]
@@ -1206,7 +1217,7 @@ async def process_message(request: Request, chat_id, text):
             return {"reply": reply}
     
     # ==========================
-    # 3. ПОИСК (С ОЧИСТКОЙ)
+    # 3. ПОИСК (ТОЛЬКО НА РУССКОМ)
     # ==========================
     
     search_triggers = ["новости", "погода", "найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "парикмахер", "авито", "квартир"]
