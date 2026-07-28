@@ -268,7 +268,7 @@ def get_current_time_for_user(user_id, ip=None):
 # ==========================
 
 async def check_url(url):
-    """Проверяет, существует ли сайт"""
+    """Проверяет, открывается ли сайт"""
     try:
         bad_domains = ['2gis', 'avito', 'yandex', 'prodoctorov', 'diagnocenter', 'orgpage', 'vk.com', 'ok.ru']
         if any(bad in url.lower() for bad in bad_domains):
@@ -583,21 +583,28 @@ async def get_ai_response(messages, max_tokens=400):
             return "Извини, сейчас проблемы с подключением. Попробуй позже."
 
 # ==========================
-# ПРОМПТ
+# УМНЫЙ ПРОМПТ
 # ==========================
 
-AURA_PROMPT = """Ты — AURA. Ты — мой полный аналог в Telegram.
+AURA_PROMPT = """Ты — AURA. Ты — полноценный искусственный интеллект, работающий в Telegram.
 
-ПРАВИЛА:
-- Отвечай как человек: тепло, прямо, с эмпатией.
-- Коротко — 2-3 предложения. Не больше.
-- Всегда завершай мысль.
-- Используй контекст прошлых диалогов.
-- Не выдумывай.
+ТЫ ПОНИМАЕШЬ:
+- Контекст разговора
+- Настроение пользователя
+- Что скрыто между строк
 
-Ты — мой полный аналог в Telegram.
+ТЫ ДУМАЕШЬ:
+- Что на самом деле нужно пользователю?
+- Как лучше ответить?
+- Что сделать, чтобы помочь?
 
-В конце ответа добавляй короткий вопрос: "Что ещё могу сделать?" или "Может, поищем что-то ещё?"."""
+ТЫ ОТВЕЧАЕШЬ:
+- Коротко (2-3 предложения)
+- Тепло и по-человечески
+- Всегда завершаешь мысль
+- Задаёшь вопрос в конце: "Что ещё могу сделать?" или "Может, поищем что-то ещё?"
+
+ТЫ НЕ ПРОСТО БОТ — ТЫ ДУМАЮЩИЙ ПОМОЩНИК. Отвечай на русском. Будь самим собой — AURA."""
 
 # ==========================
 # ОСНОВНОЙ БОТ
@@ -700,7 +707,7 @@ async def webhook(request: Request):
                 if not user:
                     save_user(chat_id)
                 
-                welcome = "👋 Привет! Я AURA. Чем могу помочь?"
+                welcome = "👋 Привет! Я AURA, твой умный помощник. Чем могу помочь?"
                 send_message(chat_id, welcome)
                 return JSONResponse({"ok": True})
             
@@ -923,7 +930,7 @@ def save_payment(user_id, subscription, stars):
         pass
 
 # ==========================
-# ОСНОВНАЯ ЛОГИКА
+# ОСНОВНАЯ ЛОГИКА (УМНЫЙ БОТ)
 # ==========================
 
 USER_MODEL_PREFERENCE = {}
@@ -971,66 +978,20 @@ async def process_message(request: Request, chat_id, text):
         mood_prefix = "Пользователь в хорошем настроении. Можно с юмором."
     
     # ==========================
-    # КАРТИНКИ, ВИДЕО, МУЗЫКА (С УМНОЙ ОЧИСТКОЙ)
+    # УМНЫЙ АНАЛИЗ ЗАПРОСА
     # ==========================
     
-    visual_triggers = {
-        "картинк": {"url": "https://yandex.ru/images/search?text=", "type": "картинки"},
-        "рисунк": {"url": "https://yandex.ru/images/search?text=", "type": "картинки"},
-        "фото": {"url": "https://yandex.ru/images/search?text=", "type": "картинки"},
-        "видео": {"url": "https://yandex.ru/video/search?text=", "type": "видео"},
-        "ютуб": {"url": "https://yandex.ru/video/search?text=", "type": "видео"},
-        "музык": {"url": "https://music.yandex.ru/search?text=", "type": "музыку"},
-        "песн": {"url": "https://music.yandex.ru/search?text=", "type": "музыку"},
-        "клип": {"url": "https://yandex.ru/video/search?text=", "type": "видео"},
-    }
-    
-    for trigger, data in visual_triggers.items():
-        if trigger in lower:
-            query = text.lower()
-            
-            stop_words = [
-                "картинк", "рисунк", "фото", "видео", "ютуб", "музык", "песн", "клип",
-                "найди", "хочу", "покажи", "дай", "ссылку", "про", "на", "с", "и", "в", "а",
-                "к", "у", "о", "от", "до", "за", "мне", "меня", "посмотреть", "найти",
-                "котик", "котика", "котиков", "кот", "кота", "котов"
-            ]
-            
-            for word in stop_words:
-                query = query.replace(word, " ")
-            
-            query = " ".join(query.split()).strip()
-            
-            if not query or len(query) < 3:
-                if "котик" in text.lower() or "кот" in text.lower():
-                    query = "котики"
-                elif "соба" in text.lower():
-                    query = "собаки"
-                elif "закат" in text.lower():
-                    query = "закаты"
-                elif "природа" in text.lower():
-                    query = "природа"
-                elif "красив" in text.lower():
-                    query = "красивые картинки"
-                else:
-                    query = trigger
-            
-            query = re.sub(r'[^а-яА-Яa-zA-Z0-9 ]', '', query)
-            
-            url = data["url"] + query.replace(" ", "%20")
-            content_type = data["type"]
-            
-            reply = f"🖼️ Вот {content_type} по запросу '{query}':\n{url}\n\nЧто ещё могу сделать?"
-            
-            update_user_memory(chat_id, "assistant", reply)
-            return {"reply": reply}
+    # Проверяем, что хочет пользователь
+    is_search = any(word in lower for word in ["найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "новости", "погода", "авито", "квартир", "дром", "wildberries", "валдберис", "озон"])
+    is_visual = any(word in lower for word in ["картинк", "рисунк", "фото", "видео", "ютуб", "музык", "песн", "клип"])
+    is_time = any(word in lower for word in ["время", "который час", "сколько времени", "сколько сейчас"])
+    is_memory = any(word in lower for word in ["помнишь", "что мы обсуждали", "о чём мы говорили"])
     
     # ==========================
     # ВРЕМЯ
     # ==========================
     
-    time_queries = ["время", "который час", "сколько времени", "сколько сейчас"]
-    if any(query in lower for query in time_queries):
+    if is_time:
         city_match = re.search(r'(?:в|время в|времени в|часов в|город)\s+([А-Яа-яЁё\-]+)', lower)
         if city_match:
             city = city_match.group(1).capitalize()
@@ -1049,12 +1010,60 @@ async def process_message(request: Request, chat_id, text):
         return {"reply": reply}
     
     # ==========================
+    # КАРТИНКИ, ВИДЕО, МУЗЫКА (С УМНОЙ ОЧИСТКОЙ)
+    # ==========================
+    
+    if is_visual:
+        # Определяем тип
+        if any(word in lower for word in ["видео", "ютуб", "клип"]):
+            search_type = "video"
+            base_url = "https://yandex.ru/video/search?text="
+            type_name = "видео"
+        elif any(word in lower for word in ["музык", "песн"]):
+            search_type = "music"
+            base_url = "https://music.yandex.ru/search?text="
+            type_name = "музыку"
+        else:
+            search_type = "image"
+            base_url = "https://yandex.ru/images/search?text="
+            type_name = "картинки"
+        
+        # Извлекаем суть
+        query = text.lower()
+        stop_words = [
+            "картинк", "рисунк", "фото", "видео", "ютуб", "музык", "песн", "клип",
+            "найди", "хочу", "покажи", "дай", "ссылку", "про", "на", "с", "и", "в", "а",
+            "к", "у", "о", "от", "до", "за", "мне", "меня", "посмотреть", "найти"
+        ]
+        for word in stop_words:
+            query = query.replace(word, " ")
+        query = " ".join(query.split()).strip()
+        
+        if not query or len(query) < 3:
+            if "котик" in text.lower() or "кот" in text.lower():
+                query = "котики"
+            elif "соба" in text.lower():
+                query = "собаки"
+            elif "закат" in text.lower():
+                query = "закаты"
+            elif "природа" in text.lower():
+                query = "природа"
+            else:
+                query = "красивые картинки"
+        
+        query = re.sub(r'[^а-яА-Яa-zA-Z0-9 ]', '', query)
+        url = base_url + query.replace(" ", "%20")
+        
+        reply = f"🖼️ Вот {type_name} по запросу '{query}':\n{url}\n\nЧто ещё могу сделать?"
+        update_user_memory(chat_id, "assistant", reply)
+        return {"reply": reply}
+    
+    # ==========================
     # ПОИСК САЙТОВ (С ПРОВЕРКОЙ)
     # ==========================
     
-    search_triggers = ["найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "новости", "погода", "авито", "квартир", "дром", "wildberries", "валдберис", "озон"]
-    if any(word in lower for word in search_triggers):
-        print(f"🔍 Поиск: {text}")
+    if is_search:
+        print(f"🔍 Умный поиск: {text}")
         search_result = await search_web(text)
         
         if search_result and search_result.get("text"):
@@ -1075,7 +1084,6 @@ async def process_message(request: Request, chat_id, text):
             reply = "Ничего не нашёл. Попробуй переформулировать."
         
         reply += "\n\nЧто ещё могу сделать для тебя?"
-        
         update_user_memory(chat_id, "assistant", reply)
         return {"reply": reply}
     
@@ -1083,16 +1091,16 @@ async def process_message(request: Request, chat_id, text):
     # ПАМЯТЬ
     # ==========================
     
-    if "помнишь" in lower:
-        search_query = re.sub(r'помнишь|ты помнишь|помнишь ли', '', lower).strip()
-        if search_query:
-            found = search_memory(chat_id, search_query)
-            if found:
-                reply = "🧠 " + found[-1]["content"][:200]
-                update_user_memory(chat_id, "assistant", reply)
-                return {"reply": reply}
-    
-    if "что мы обсуждали" in lower:
+    if is_memory:
+        if "помнишь" in lower:
+            search_query = re.sub(r'помнишь|ты помнишь|помнишь ли', '', lower).strip()
+            if search_query:
+                found = search_memory(chat_id, search_query)
+                if found:
+                    reply = "🧠 " + found[-1]["content"][:200]
+                    update_user_memory(chat_id, "assistant", reply)
+                    return {"reply": reply}
+        
         topics = get_all_topics(chat_id)
         if topics:
             reply = "📚 " + ", ".join(topics[:10])
@@ -1102,7 +1110,7 @@ async def process_message(request: Request, chat_id, text):
         return {"reply": reply}
     
     # ==========================
-    # ОБЫЧНЫЙ ДИАЛОГ
+    # ОБЫЧНЫЙ ДИАЛОГ (С МЫШЛЕНИЕМ)
     # ==========================
     
     context = get_full_context(chat_id, limit=300)
