@@ -38,10 +38,15 @@ def save_msg(uid, role, text):
         conn.execute("INSERT INTO history (user_id, role, content, created_at) VALUES (?, ?, ?, ?)",
                      (uid, role, text, datetime.now().isoformat()))
 
-def get_history(uid, limit=15):
+def get_history(uid, limit=50):
     with sqlite3.connect(DB) as conn:
         rows = conn.execute("SELECT role, content FROM history WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", (uid, limit)).fetchall()
     return [{"role": r[0], "content": r[1]} for r in rows[::-1]]
+
+def clear_old_history(uid, keep=100):
+    with sqlite3.connect(DB) as conn:
+        conn.execute("DELETE FROM history WHERE user_id = ? AND id NOT IN (SELECT id FROM history WHERE user_id = ? ORDER BY created_at DESC LIMIT ?)",
+                     (uid, uid, keep))
 
 def save_topic(uid, topic):
     with sqlite3.connect(DB) as conn:
@@ -55,8 +60,10 @@ def get_topics(uid):
 # ========================== РЕАЛЬНОЕ ВРЕМЯ ==========================
 def get_real_time(city):
     try:
-        zone = "Asia/Novokuznetsk" if city.lower() in ["белово", "belovo"] else "Europe/Moscow"
-        resp = requests.get(f"https://timeapi.io/api/Time/current/zone?timeZone={zone}", timeout=5)
+        if city.lower() in ["белово", "belovo"]:
+            resp = requests.get("https://timeapi.io/api/Time/current/zone?timeZone=Asia/Novokuznetsk", timeout=5)
+        else:
+            resp = requests.get("https://timeapi.io/api/Time/current/zone?timeZone=Europe/Moscow", timeout=5)
         if resp.status_code == 200:
             data = resp.json()
             return f"{data['hour']:02d}:{data['minute']:02d} {data['day']:02d}.{data['month']:02d}.{data['year']}"
@@ -74,40 +81,49 @@ def check_url(url):
 
 # ========================== ПОИСК (TAVILY + DUCK) ==========================
 def search_web(query):
-    # 1. Tavily
+    results = []
+    
     if TAVILY_KEY:
         try:
             from tavily import TavilyClient
             client = TavilyClient(api_key=TAVILY_KEY)
-            res = client.search(query, search_depth="advanced", max_results=3, include_answer=True)
+            res = client.search(query, search_depth="advanced", max_results=5, include_answer=True)
             if res.get("answer"):
-                return {"text": res["answer"][:600], "urls": []}
+                results.append({"text": res["answer"], "urls": []})
             if res.get("results"):
-                for r in res["results"][:3]:
-                    if check_url(r["url"]):
-                        return {"text": r["content"][:400], "urls": [r["url"]]}
+                for r in res["results"][:5]:
+                    results.append({
+                        "text": r.get("content", "")[:400],
+                        "urls": [r.get("url", "")]
+                    })
         except:
             pass
-    # 2. DuckDuckGo
-    try:
-        url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        resp = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        for result in soup.select(".result")[:3]:
-            title = result.select_one(".result__title")
-            snippet = result.select_one(".result__snippet")
-            link = result.select_one(".result__url")
-            if title and snippet and link:
-                link_text = html.unescape(link.text.strip())
-                if check_url(link_text):
-                    return {
+    
+    if not results:
+        try:
+            url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
+            headers = {"User-Agent": "Mozilla/5.0"}
+            resp = requests.get(url, headers=headers, timeout=10)
+            soup = BeautifulSoup(resp.text, "html.parser")
+            for result in soup.select(".result")[:3]:
+                title = result.select_one(".result__title")
+                snippet = result.select_one(".result__snippet")
+                link = result.select_one(".result__url")
+                if title and snippet and link:
+                    results.append({
                         "text": f"{html.unescape(title.text.strip())}\n{html.unescape(snippet.text.strip())}",
-                        "urls": [link_text]
-                    }
-    except:
-        pass
-    return None
+                        "urls": [html.unescape(link.text.strip())]
+                    })
+        except:
+            pass
+    
+    for item in results:
+        if item.get("urls") and item["urls"][0]:
+            item["valid"] = check_url(item["urls"][0])
+        else:
+            item["valid"] = False
+    
+    return results
 
 # ========================== AI ==========================
 client = OpenAI(api_key=DEEPSEEK_KEY, base_url=DEEPSEEK_URL)
@@ -138,14 +154,14 @@ PROMPT = """Ты — AURA. Ты — живой умный помощник в Te
 
 def rewrite_query(user_text):
     messages = [
-        {"role": "system", "content": "Ты — ИИ-помощник. Перепиши запрос пользователя для поискового движка: оставь только суть, ключевые слова, убери стоп-слова. Ответь одной фразой на русском."},
+        {"role": "system", "content": "Перепиши запрос пользователя для поиска: оставь только смысл, удали стоп-слова. Ответь одной фразой."},
         {"role": "user", "content": user_text}
     ]
     return ask_ai(messages, max_tokens=60)
 
 def analyze_intent(text):
     messages = [
-        {"role": "system", "content": "Определи намерение пользователя. Ответь одним словом: search, image, video, time, chat."},
+        {"role": "system", "content": "Определи намерение. Ответь: search, image, video, time, chat."},
         {"role": "user", "content": text}
     ]
     return ask_ai(messages, max_tokens=20)
@@ -189,7 +205,6 @@ async def webhook(request: Request):
         chat_id = str(msg["chat"]["id"])
         text = None
 
-        # ===== ГОЛОС =====
         if "voice" in msg:
             file_id = msg["voice"]["file_id"]
             file_resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}")
@@ -221,18 +236,16 @@ async def webhook(request: Request):
             if time_str:
                 reply = f"🕐 {time_str} ({city})"
             else:
-                reply = f"🕐 Не удалось проверить точное время. Посмотри на телефоне."
+                reply = f"🕐 Не удалось проверить точное время."
             send_msg(chat_id, reply)
             save_msg(chat_id, "assistant", reply)
             return {"ok": True}
 
         # ===== АНАЛИЗ НАМЕРЕНИЯ =====
-        intent = analyze_intent(text)
-        if not intent:
-            intent = "chat"
+        intent = analyze_intent(text) or "chat"
 
         # ===== КАРТИНКИ =====
-        if "image" in intent.lower() or "картинк" in lower or "рисунк" in lower or "фото" in lower:
+        if "image" in intent or "картинк" in lower or "рисунк" in lower or "фото" in lower:
             rewritten = rewrite_query(text) or text
             q = re.sub(r'[^а-яА-Яa-zA-Z0-9 ]', '', rewritten).strip()
             if not q:
@@ -244,7 +257,7 @@ async def webhook(request: Request):
             return {"ok": True}
 
         # ===== ВИДЕО =====
-        if "video" in intent.lower() or "видео" in lower or "ютуб" in lower or "клип" in lower:
+        if "video" in intent or "видео" in lower or "ютуб" in lower or "клип" in lower:
             rewritten = rewrite_query(text) or text
             q = re.sub(r'[^а-яА-Яa-zA-Z0-9 ]', '', rewritten).strip()
             if not q:
@@ -256,27 +269,43 @@ async def webhook(request: Request):
             return {"ok": True}
 
         # ===== ПОИСК =====
-        if "search" in intent.lower() or any(w in lower for w in ["найди", "узнай", "где", "сайт", "адрес", "телефон", "клиника", "авито", "дром", "озон"]):
+        if "search" in intent or any(w in lower for w in ["найди", "узнай", "где", "сайт", "адрес", "телефон", "клиника", "авито", "дром", "озон"]):
             rewritten = rewrite_query(text) or text
-            result = search_web(rewritten)
-            if result and result.get("text"):
-                reply = result["text"][:600]
-                if result.get("urls") and check_url(result["urls"][0]):
-                    reply += f"\n\n🔗 {result['urls'][0]}"
-                else:
-                    reply += "\n\n⚠️ Проверил ссылку — она не открывается. Нашёл информацию, но ссылку не даю."
+            results = search_web(rewritten)
+            
+            if results:
+                reply = ""
+                for item in results[:2]:
+                    if item.get("text"):
+                        reply += item["text"][:350] + "\n"
+                    if item.get("urls") and item["urls"][0]:
+                        if item.get("valid", False):
+                            reply += f"🔗 {item['urls'][0]}\n\n"
+                        else:
+                            reply += f"⚠️ Ссылка не открылась, но вот адрес: {item['urls'][0]}\n\n"
+                reply = reply.strip()
             else:
-                reply = "Ничего не нашёл. Попробуй переформулировать."
+                reply = "Не нашёл. Попробуй переформулировать."
+            
             send_msg(chat_id, reply + "\n\nЧто ещё могу сделать?")
             save_msg(chat_id, "assistant", reply)
             return {"ok": True}
 
-        # ===== ДИАЛОГ =====
+        # ===== ДИАЛОГ (С ПАМЯТЬЮ) =====
         history = get_history(chat_id)
         topics = get_topics(chat_id)
         context = f"Темы: {', '.join(topics)}" if topics else ""
 
-        messages = [{"role": "system", "content": PROMPT}] + history + [{"role": "user", "content": text}]
+        # Формируем сообщения с историей
+        messages = [{"role": "system", "content": PROMPT}]
+        if context:
+            messages.append({"role": "system", "content": f"Контекст: {context}"})
+        
+        # Добавляем историю (до 50 сообщений)
+        for msg in history:
+            messages.append(msg)
+        
+        messages.append({"role": "user", "content": text})
 
         reply = ask_ai(messages)
         if reply:
@@ -286,12 +315,17 @@ async def webhook(request: Request):
         else:
             reply = "Извини, я подвис. Попробуй ещё раз."
 
+        # Запоминаем темы
         for w in re.findall(r'\b[а-яА-ЯёЁ]{4,}\b', lower):
             if w not in ["привет", "спасибо", "пока", "да", "нет", "хорошо", "плохо"]:
                 save_topic(chat_id, w)
 
         send_msg(chat_id, reply)
         save_msg(chat_id, "assistant", reply)
+        
+        # Чистим старую историю (оставляем последние 100 сообщений)
+        clear_old_history(chat_id, 100)
+        
         return {"ok": True}
 
     except Exception as e:
