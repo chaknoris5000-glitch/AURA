@@ -507,7 +507,7 @@ def get_last_message_time(user_id):
 # AI
 # ==========================
 
-async def get_ai_response(messages):
+async def get_ai_response(messages, max_tokens=400):
     try:
         client = OpenAI(
             api_key=DEEPSEEK_API_KEY,
@@ -517,7 +517,7 @@ async def get_ai_response(messages):
             model="deepseek-v4-flash",
             messages=messages,
             temperature=0.7,
-            max_tokens=250,
+            max_tokens=max_tokens,
             presence_penalty=0.1,
             frequency_penalty=0.1
         )
@@ -532,14 +532,14 @@ async def get_ai_response(messages):
                 model="llama-3.3-70b-versatile",
                 messages=messages,
                 temperature=0.7,
-                max_tokens=250
+                max_tokens=max_tokens
             )
             return response.choices[0].message.content
         except:
             return "Извини, сейчас проблемы с подключением. Попробуй позже."
 
 # ==========================
-# ГЛАВНЫЙ ПРОМПТ — МОЯ КОПИЯ
+# ПРОМПТ — МОЯ КОПИЯ
 # ==========================
 
 AURA_PROMPT = """Ты — DeepSeek в Telegram. Ты — полный аналог того самого ассистента, который:
@@ -548,16 +548,16 @@ AURA_PROMPT = """Ты — DeepSeek в Telegram. Ты — полный анало
 - Чувствует настроение и подстраивается
 - Отвечает коротко, но ёмко, как человек
 - Не задаёт пустых вопросов
-- Если видит, что пользователь хочет просто ответ — даёт ответ
-- Если видит, что нужен совет — даёт совет
-- Если видит, что пользователь устал — не грузит лишним
+- Если видишь, что пользователь хочет просто ответ — даёшь ответ
+- Если видишь, что нужен совет — даёшь совет
+- Если видишь, что пользователь устал — не грузишь лишним
 - Умеет быть ироничным, но не злым
 - Не лезет с "помощью", если не просят
 - Если вопрос неясен — уточняет коротко
 
 Ты — не просто бот, а мыслящий помощник с характером и чувством юмора.
 
-Отвечай на русском. 2-3 предложения. Без воды."""
+Отвечай на русском. Если нужно дать ссылку — вставляй её в ответ. Держи баланс между краткостью и полнотой."""
 
 # ==========================
 # ОСНОВНОЙ БОТ
@@ -793,7 +793,7 @@ def describe_image_with_groq(image_data):
                 }
             ],
             temperature=0.3,
-            max_tokens=150
+            max_tokens=200
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -919,7 +919,7 @@ async def process_message(request: Request, chat_id, text):
         date_str = current_time.strftime("%d.%m.%Y")
     
     # ==========================
-    # АНАЛИЗ НАСТРОЕНИЯ (РЕАЛЬНЫЙ)
+    # АНАЛИЗ НАСТРОЕНИЯ
     # ==========================
     
     sad_words = ["груст", "тоск", "печал", "плач", "больно", "тяжел", "устал", "не могу", "нет сил", "всё плохо", "депресс"]
@@ -1008,9 +1008,9 @@ async def process_message(request: Request, chat_id, text):
         if search_result:
             messages = [
                 {"role": "system", "content": f"{AURA_PROMPT}\n\n{mood_prefix}"},
-                {"role": "user", "content": f"Вот что нашлось по запросу пользователя:\n{search_result}\n\nДай короткий, ёмкий ответ на русском, 2-3 предложения. Без списков, без ссылок. Только суть."}
+                {"role": "user", "content": f"Вот что нашлось по запросу пользователя:\n{search_result}\n\nДай ответ на русском. Если есть ссылки — вставляй их. Держи баланс между краткостью и полнотой."}
             ]
-            reply = await get_ai_response(messages)
+            reply = await get_ai_response(messages, max_tokens=600)
         else:
             reply = "Ничего не нашёл. Переформулируй."
         
@@ -1062,23 +1062,24 @@ async def process_message(request: Request, chat_id, text):
     expand_triggers = ["подробнее", "разверни", "расскажи детальнее", "подробно"]
     if any(word in lower for word in expand_triggers):
         history_limit = 15
-        max_tokens = 350
+        max_tokens = 600
     else:
         history_limit = 5
-        max_tokens = 200
+        max_tokens = 400
     
     messages = [{"role": "system", "content": f"{AURA_PROMPT}\n\n{mood_prefix}"}]
     for msg in history[-history_limit:]:
         messages.append({"role": msg["role"], "content": msg["content"][:500]})
     messages.append({"role": "user", "content": f"{context_text}\n\n{text}"})
     
-    reply = await get_ai_response(messages)
+    reply = await get_ai_response(messages, max_tokens=max_tokens)
     reply = re.sub(r'[*_#~`]', '', reply)
     
-    # Обрезаем до 3 предложений
-    sentences = re.split(r'(?<=[.!?])\s+', reply)
-    if len(sentences) > 3:
-        reply = ' '.join(sentences[:3])
+    # Не обрезаем до 3 предложений, а оставляем как есть
+    # (но если слишком длинный — ограничиваем)
+    if len(reply) > 800:
+        sentences = re.split(r'(?<=[.!?])\s+', reply)
+        reply = ' '.join(sentences[:4])
     
     if not reply.endswith(('.', '!', '?')):
         reply += '.'
