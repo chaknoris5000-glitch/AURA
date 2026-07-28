@@ -289,6 +289,111 @@ async def search_web(query):
         return None
 
 # ==========================
+# ОПРЕДЕЛЕНИЕ НАМЕРЕНИЯ (УНИВЕРСАЛЬНЫЙ ПАРСЕР)
+# ==========================
+
+def parse_intent(text):
+    """
+    Определяет, что хочет пользователь и где искать
+    Возвращает: {
+        'type': 'images' | 'video' | 'web' | 'time' | 'chat',
+        'query': 'очищенный запрос',
+        'url': 'ссылка для поиска (если применимо)'
+    }
+    """
+    text_lower = text.lower()
+    
+    # ==========================
+    # 1. ВИДЕО (YouTube, Яндекс Видео)
+    # ==========================
+    video_triggers = ['видео', 'ютуб', 'youtube', 'клип', 'ролик', 'видеоролик', 'видеозапись']
+    if any(trigger in text_lower for trigger in video_triggers):
+        # Извлекаем запрос
+        query = text_lower
+        stop_words = video_triggers + ['найди', 'хочу', 'покажи', 'дай', 'ссылку', 'про', 'на', 'с', 'и', 'в', 'а', 'к', 'у', 'о', 'от', 'до', 'за', 'мне', 'меня', 'посмотреть', 'найти']
+        for word in stop_words:
+            query = query.replace(word, " ")
+        query = " ".join(query.split()).strip()
+        if not query or len(query) < 3:
+            query = "смешные котики"
+        query = re.sub(r'[^а-яА-Яa-zA-Z0-9 ]', '', query)
+        
+        # Яндекс Видео (лучше для РФ)
+        url = f"https://yandex.ru/video/search?text={query.replace(' ', '%20')}"
+        
+        return {
+            'type': 'video',
+            'query': query,
+            'url': url,
+            'response': f"🎬 Вот видео по запросу '{query}':\n{url}"
+        }
+    
+    # ==========================
+    # 2. КАРТИНКИ (Яндекс Картинки)
+    # ==========================
+    image_triggers = ['картинк', 'рисунк', 'фото', 'изображен', 'фотографи', 'снимк', 'иллюстраци', 'обои']
+    if any(trigger in text_lower for trigger in image_triggers):
+        query = text_lower
+        stop_words = image_triggers + ['найди', 'хочу', 'покажи', 'дай', 'ссылку', 'про', 'на', 'с', 'и', 'в', 'а', 'к', 'у', 'о', 'от', 'до', 'за', 'мне', 'меня', 'посмотреть', 'найти', 'красивых', 'красивые']
+        for word in stop_words:
+            query = query.replace(word, " ")
+        query = " ".join(query.split()).strip()
+        if not query or len(query) < 3:
+            query = "красивые картинки"
+        query = re.sub(r'[^а-яА-Яa-zA-Z0-9 ]', '', query)
+        
+        url = f"https://yandex.ru/images/search?text={query.replace(' ', '%20')}"
+        
+        return {
+            'type': 'images',
+            'query': query,
+            'url': url,
+            'response': f"🖼️ Вот картинки по запросу '{query}':\n{url}"
+        }
+    
+    # ==========================
+    # 3. ВРЕМЯ
+    # ==========================
+    time_triggers = ['время', 'который час', 'сколько времени', 'сколько сейчас', 'точное время']
+    if any(trigger in text_lower for trigger in time_triggers):
+        return {
+            'type': 'time',
+            'query': None,
+            'url': None,
+            'response': None  # Обрабатывается отдельно
+        }
+    
+    # ==========================
+    # 4. ПОИСК В ИНТЕРНЕТЕ (Tavily)
+    # ==========================
+    web_triggers = ['найди', 'узнай', 'поищи', 'где', 'кто', 'что такое', 'клиника', 'сайт', 'адрес', 'телефон', 'контакт', 'новости', 'погода']
+    if any(trigger in text_lower for trigger in web_triggers):
+        query = text_lower
+        stop_words = web_triggers + ['пожалуйста', 'информацию', 'про', 'о', 'на', 'в', 'с', 'и', 'а', 'к', 'у']
+        for word in stop_words:
+            query = query.replace(word, " ")
+        query = " ".join(query.split()).strip()
+        if not query or len(query) < 3:
+            query = text
+        
+        return {
+            'type': 'web',
+            'query': query,
+            'url': None,
+            'response': None  # Обрабатывается через Tavily
+        }
+    
+    # ==========================
+    # 5. ОБЫЧНЫЙ ДИАЛОГ
+    # ==========================
+    return {
+        'type': 'chat',
+        'query': text,
+        'url': None,
+        'response': None
+    }
+
+# ==========================
 # ФУНКЦИИ БАЗЫ
 # ==========================
 
@@ -441,10 +546,7 @@ async def webhook(request: Request):
             data = {"pre_checkout_query_id": query["id"], "ok": True}
             requests.post(url, json=data)
             
-            subscription = payload.replace("subscription_", "")
-            update_user_subscription(chat_id, subscription)
-            save_payment(chat_id, subscription, TARIFFS[subscription]["stars"])
-            send_message(chat_id, f"✅ Оплата прошла успешно! Подписка **{TARIFFS[subscription]['name']}** активирована.")
+            send_message(chat_id, "✅ Оплата прошла успешно! Спасибо за поддержку.")
             return JSONResponse({"ok": True})
         
         if "message" not in body:
@@ -455,26 +557,8 @@ async def webhook(request: Request):
             chat_id = str(callback["message"]["chat"]["id"])
             data = callback["data"]
             
-            if data.startswith("buy_"):
-                subscription = data.replace("buy_", "")
-                tariff = TARIFFS.get(subscription)
-                if tariff:
-                    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendInvoice"
-                    invoice_data = {
-                        "chat_id": chat_id,
-                        "title": f"Подписка AURA — {tariff['name']}",
-                        "description": "Полный доступ ко всем функциям бота на 30 дней",
-                        "payload": f"subscription_{subscription}",
-                        "provider_token": "",
-                        "currency": "XTR",
-                        "prices": [{"label": "Подписка на 30 дней", "amount": tariff["stars"]}],
-                        "start_parameter": "aura_sub"
-                    }
-                    requests.post(url, json=invoice_data)
-                return JSONResponse({"ok": True})
-            
-            elif data == "cancel":
-                send_message(chat_id, "❌ Отменено.")
+            if data == "help":
+                send_message(chat_id, "Я умею:\n- Отвечать на вопросы\n- Искать информацию\n- Показывать время\n- Давать ссылки на картинки и видео")
                 return JSONResponse({"ok": True})
         
         message = body["message"]
@@ -484,7 +568,6 @@ async def webhook(request: Request):
         send_typing(chat_id)
         
         if "voice" in message:
-            # Обработка голоса (упрощённо)
             file_id = message["voice"]["file_id"]
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
             file_response = requests.get(file_url)
@@ -498,7 +581,6 @@ async def webhook(request: Request):
                     return JSONResponse({"ok": True})
         
         elif "photo" in message:
-            # Обработка фото (упрощённо)
             photo = message["photo"][-1]
             file_id = photo["file_id"]
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
@@ -520,6 +602,27 @@ async def webhook(request: Request):
                     send_message(chat_id, "⚠️ Не удалось загрузить фото")
                     return JSONResponse({"ok": True})
         
+        elif "document" in message:
+            document = message["document"]
+            file_id = document["file_id"]
+            file_name = document.get("file_name", "unknown")
+            file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
+            file_response = requests.get(file_url)
+            file_data_resp = file_response.json()
+            if file_data_resp.get("ok"):
+                file_path = file_data_resp["result"]["file_path"]
+                file_url_full = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+                file_response_full = requests.get(file_url_full, timeout=30)
+                if file_response_full.status_code == 200:
+                    file_data = file_response_full.content
+                    send_message(chat_id, f"📄 Обрабатываю файл: {file_name}...")
+                    file_text = read_file(file_data, file_name)
+                    send_message(chat_id, f"📄 Содержимое:\n\n{file_text[:2000]}")
+                    return JSONResponse({"ok": True})
+                else:
+                    send_message(chat_id, "⚠️ Не удалось загрузить файл")
+                    return JSONResponse({"ok": True})
+        
         elif "text" in message:
             text = message["text"].strip()
         
@@ -533,15 +636,10 @@ async def webhook(request: Request):
                 send_message(chat_id, welcome)
                 return JSONResponse({"ok": True})
             
-            if text.startswith("/pro"):
-                send_message(chat_id, "🧠 Переключился на Pro.")
+            if text.startswith("/help"):
+                send_message(chat_id, "Я умею:\n- Отвечать на вопросы\n- Искать информацию в интернете\n- Показывать время в любом городе\n- Находить картинки и видео по запросу\n\nПросто напиши, что тебе нужно!")
                 return JSONResponse({"ok": True})
             
-            if text.startswith("/flash"):
-                send_message(chat_id, "⚡ Переключился на Flash.")
-                return JSONResponse({"ok": True})
-            
-            # Обычный диалог
             result = await process_message(request, chat_id, text)
             send_message(chat_id, result["reply"])
                 
@@ -627,8 +725,36 @@ def describe_image_with_groq(image_data):
         print(f"❌ Vision ошибка: {e}")
         return None
 
+def read_file(file_data, file_name):
+    try:
+        if file_name.endswith('.txt'):
+            return file_data.decode('utf-8')
+        elif file_name.endswith('.pdf'):
+            try:
+                import PyPDF2
+                from io import BytesIO
+                pdf_reader = PyPDF2.PdfReader(BytesIO(file_data))
+                text = ""
+                for page in pdf_reader.pages:
+                    text += page.extract_text()
+                return text
+            except:
+                return "⚠️ Не удалось прочитать PDF."
+        elif file_name.endswith('.docx'):
+            try:
+                import docx
+                from io import BytesIO
+                doc = docx.Document(BytesIO(file_data))
+                return "\n".join([para.text for para in doc.paragraphs])
+            except:
+                return "⚠️ Не удалось прочитать DOCX."
+        else:
+            return "⚠️ Формат не поддерживается. Используй TXT, PDF или DOCX."
+    except Exception as e:
+        return f"⚠️ Ошибка: {e}"
+
 # ==========================
-# ОСНОВНАЯ ЛОГИКА (ПРОСТАЯ И УМНАЯ)
+# ОСНОВНАЯ ЛОГИКА
 # ==========================
 
 async def process_message(request: Request, chat_id, text):
@@ -639,11 +765,9 @@ async def process_message(request: Request, chat_id, text):
     load_user_memory(chat_id)
     update_user_memory(chat_id, "user", text)
     
-    # Получаем контекст
     context = get_full_context(chat_id, limit=300)
     history = context["history"]
     
-    # Определяем город
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
         ip = forwarded.split(",")[0].strip()
@@ -654,106 +778,39 @@ async def process_message(request: Request, chat_id, text):
     time_str = current_time.strftime("%H:%M")
     date_str = current_time.strftime("%d.%m.%Y")
     
-    # Сохраняем город, если он упомянут
     city_match = re.search(r'(?:в|время в|времени в|часов в|город)\s+([А-Яа-яЁё\-]+)', text.lower())
     if city_match:
         city_name = city_match.group(1).capitalize()
         update_user_city(chat_id, city_name)
         save_memory(chat_id, "city", city_name)
         print(f"🏙️ Сохранён город: {city_name}")
-    
-    # ==========================
-    # ФОРМИРУЕМ ПРОМПТ
-    # ==========================
-    
-    # История диалога (последние 10 сообщений)
-    history_text = ""
-    for msg in history[-15:]:
-        role = "Пользователь" if msg["role"] == "user" else "AURA"
-        history_text += f"{role}: {msg['content']}\n"
-    
-    system_prompt = f"""Ты — AURA, умный и эмпатичный помощник в Telegram. Ты — мой полный аналог.
 
-ТЫ ПОНИМАЕШЬ КОНТЕКСТ И ПАМЯТЬ:
-- Ты видишь всю историю диалога
-- Если пользователь спрашивает "а в белово?" — ты знаешь, что речь о времени, и показываешь время для Белово (UTC+7)
-- Если пользователь просит "ссылку" — ты помнишь, о чём просили до этого
-- Ты не теряешь нить разговора
-
-ТВОЙ СТИЛЬ:
-- Отвечай как человек: тепло, прямо, с эмпатией
-- Коротко — 2-3 предложения (если не просят подробнее)
-- Всегда завершай мысль
-- Используй контекст прошлых диалогов
-- Не выдумывай факты
-
-ЧТО ТЫ УМЕЕШЬ:
-1. Отвечать на вопросы из своих знаний
-2. Искать информацию через search_web (если нужно найти что-то в интернете)
-3. Показывать время с учётом города
-4. Давать ссылки на видео (Яндекс Видео) и картинки (Яндекс Картинки)
-
-СЕЙЧАС:
-- Город: {city} (если не указан — Москва)
-- Время: {time_str}
-- Дата: {date_str}
-
-ПОМНИ:
-- Если пользователь спрашивает про время в конкретном городе — покажи время с учётом часового пояса
-- Если просит видео/картинки — дай ссылку на Яндекс
-- Если просит найти информацию — используй search_web
-- ВСЕГДА учитывай контекст предыдущих сообщений
-
-ИСТОРИЯ ДИАЛОГА:
-{history_text}
-
-ТЕКУЩИЙ ЗАПРОС ПОЛЬЗОВАТЕЛЯ: {text}
-
-ОТВЕТЬ НА РУССКОМ ЯЗЫКЕ. ЕСЛИ НУЖНО ЧТО-ТО НАЙТИ — ИСПОЛЬЗУЙ SEARCH_WEB."""
-    
     # ==========================
-    # ПЫТАЕМСЯ ПОЛУЧИТЬ ОТВЕТ ОТ AI
+    # АНАЛИЗ НАМЕРЕНИЯ
     # ==========================
     
-    messages = [{"role": "system", "content": system_prompt}]
-    reply = await get_ai_response(messages)
+    intent = parse_intent(text)
     
     # ==========================
-    # ЕСЛИ AI НЕ ОТВЕТИЛ НА ВОПРОС — ПРОБУЕМ ПОИСК
+    # 1. ВИДЕО
     # ==========================
-    
-    search_keywords = ["найди", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт"]
-    if len(reply) < 30 or any(word in text.lower() for word in search_keywords):
-        print(f"🔍 Попытка поиска: {text}")
-        search_result = await search_web(text)
-        if search_result:
-            reply = search_result
+    if intent['type'] == 'video':
+        reply = intent['response']
+        update_user_memory(chat_id, "assistant", reply)
+        return {"reply": reply}
     
     # ==========================
-    # ЕСЛИ ПРОСЯТ ВИДЕО — ДАЁМ ССЫЛКУ
+    # 2. КАРТИНКИ
     # ==========================
-    
-    if "видео" in text.lower() or "ютуб" in text.lower():
-        query = re.sub(r'видео|ютуб|youtube|найди|хочу|покажи', '', text, flags=re.IGNORECASE).strip()
-        if not query or len(query) < 3:
-            query = "смешные котики"
-        reply = f"Вот видео по запросу '{query}': https://yandex.ru/video/search?text={query.replace(' ', '%20')}"
+    if intent['type'] == 'images':
+        reply = intent['response']
+        update_user_memory(chat_id, "assistant", reply)
+        return {"reply": reply}
     
     # ==========================
-    # ЕСЛИ ПРОСЯТ КАРТИНКИ — ДАЁМ ССЫЛКУ
+    # 3. ВРЕМЯ
     # ==========================
-    
-    if "картинк" in text.lower() or "рисунк" in text.lower() or "фото" in text.lower():
-        query = re.sub(r'картинк|рисунк|фото|найди|хочу|покажи', '', text, flags=re.IGNORECASE).strip()
-        if not query or len(query) < 3:
-            query = "красивые картинки"
-        reply = f"Вот картинки по запросу '{query}': https://yandex.ru/images/search?text={query.replace(' ', '%20')}"
-    
-    # ==========================
-    # ЕСЛИ ПРОСЯТ ВРЕМЯ — ПОКАЗЫВАЕМ
-    # ==========================
-    
-    if any(word in text.lower() for word in ["время", "который час", "сколько времени", "сколько сейчас"]):
+    if intent['type'] == 'time':
         city_match = re.search(r'(?:в|время в|времени в|часов в|город)\s+([А-Яа-яЁё\-]+)', text.lower())
         if city_match:
             city_name = city_match.group(1).capitalize()
@@ -766,8 +823,91 @@ async def process_message(request: Request, chat_id, text):
             time_str = current_time.strftime("%H:%M")
             date_str = current_time.strftime("%d.%m.%Y")
             reply = f"🕐 Сейчас {time_str} {date_str} (город: {city})"
+        update_user_memory(chat_id, "assistant", reply)
+        return {"reply": reply}
     
-    # Сохраняем ответ в память
+    # ==========================
+    # 4. ПОИСК В ИНТЕРНЕТЕ
+    # ==========================
+    if intent['type'] == 'web':
+        print(f"🔍 Поиск: {intent['query']}")
+        search_result = await search_web(intent['query'])
+        if search_result:
+            reply = search_result
+        else:
+            reply = f"🔍 Ничего не нашёл по запросу '{intent['query']}'. Попробуй переформулировать."
+        update_user_memory(chat_id, "assistant", reply)
+        return {"reply": reply}
+    
+    # ==========================
+    # 5. ОБЫЧНЫЙ ДИАЛОГ
+    # ==========================
+    
+    # Если пользователь просит "ссылку" или "сайт" — ищем в истории
+    if "ссылк" in text.lower() or "сайт" in text.lower():
+        last_requests = []
+        for msg in reversed(history[-10:]):
+            if msg["role"] == "user":
+                if any(word in msg["content"].lower() for word in ["найди", "узнай", "где", "кто", "что такое", "клиника", "адрес", "телефон"]):
+                    last_requests.append(msg["content"])
+        
+        if last_requests:
+            search_query = last_requests[0]
+            print(f"🔍 Контекстный поиск: {search_query}")
+            search_result = await search_web(search_query)
+            if search_result:
+                reply = search_result
+                update_user_memory(chat_id, "assistant", reply)
+                return {"reply": reply}
+    
+    if "напомни" in text.lower() or "что мы обсуждали" in text.lower():
+        topics = context["topics"]
+        if topics:
+            topics_list = ", ".join(topics[:10])
+            reply = f"Мы обсуждали: {topics_list}. Хочешь вернуться к какой-то теме?"
+        else:
+            reply = "Мы пока ничего не обсуждали. Напиши что-нибудь, и я запомню."
+        update_user_memory(chat_id, "assistant", reply)
+        return {"reply": reply}
+    
+    # ==========================
+    # AI ДИАЛОГ
+    # ==========================
+    
+    history_text = ""
+    for msg in history[-15:]:
+        role = "Пользователь" if msg["role"] == "user" else "AURA"
+        history_text += f"{role}: {msg['content']}\n"
+    
+    system_prompt = f"""Ты — AURA, умный и эмпатичный помощник в Telegram.
+
+ТЫ ПОНИМАЕШЬ КОНТЕКСТ:
+- Ты видишь всю историю диалога
+- Отвечаешь коротко, 2-3 предложения
+- Всегда завершаешь мысль
+- Не выдумываешь факты
+
+СЕЙЧАС:
+- Город: {city}
+- Время: {time_str}
+- Дата: {date_str}
+
+ИСТОРИЯ:
+{history_text}
+
+ПОЛЬЗОВАТЕЛЬ: {text}
+
+ОТВЕТЬ КОРОТКО И ПО ДЕЛУ НА РУССКОМ."""
+    
+    messages = [{"role": "system", "content": system_prompt}]
+    reply = await get_ai_response(messages)
+    
+    # Если ответ слишком короткий — пробуем поиск
+    if len(reply) < 30:
+        search_result = await search_web(text)
+        if search_result:
+            reply = search_result
+    
     update_user_memory(chat_id, "assistant", reply)
     return {"reply": reply}
 
