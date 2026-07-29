@@ -4,10 +4,9 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from datetime import datetime, timedelta
+from datetime import datetime
 import os
 import requests
-import json
 import re
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -60,6 +59,10 @@ AGENT_PROMPT = """Ты — AURA, живой ИИ-помощник.
 - Задавай уточняющие вопросы
 - Будь кратким (2-5 предложений)
 
+ЕСЛИ ТЕБЯ СПРАШИВАЮТ О ТОМ, ЧЕГО ТЫ НЕ УМЕЕШЬ:
+- Честно скажи: "Эта функция пока в разработке, но я запомню твой вопрос!"
+- Не выдумывай и не галлюцинируй
+
 ТЫ НЕ ПРОСТО ОТВЕЧАЕШЬ — ТЫ ПОМНИШЬ.
 """
 
@@ -68,7 +71,6 @@ AGENT_PROMPT = """Ты — AURA, живой ИИ-помощник.
 # ==========================
 
 def save_message(user_id, role, content):
-    """Сохраняет сообщение в историю"""
     if not supabase:
         return
     try:
@@ -82,22 +84,6 @@ def save_message(user_id, role, content):
         print(f"❌ Ошибка сохранения: {e}")
 
 def get_recent_history(user_id, limit=15):
-    """Получает последние N сообщений"""
-    if not supabase:
-        return []
-    try:
-        response = supabase.table("history")\
-            .select("*")\
-            .eq("user_id", user_id)\
-            .order("created_at", desc=False)\
-            .limit(limit)\
-            .execute()
-        return response.data if response.data else []
-    except:
-        return []
-
-def get_entire_history(user_id, limit=1000):
-    """Получает ВСЮ историю пользователя"""
     if not supabase:
         return []
     try:
@@ -112,7 +98,6 @@ def get_entire_history(user_id, limit=1000):
         return []
 
 def search_in_history(user_id, query):
-    """Ищет в истории по ключевым словам"""
     if not supabase:
         return []
     try:
@@ -128,7 +113,6 @@ def search_in_history(user_id, query):
         return []
 
 def get_user_facts(user_id):
-    """Получает все факты о пользователе"""
     if not supabase:
         return {}
     try:
@@ -143,7 +127,6 @@ def get_user_facts(user_id):
         return {}
 
 def save_fact(user_id, key, value):
-    """Сохраняет факт о пользователе"""
     if not supabase:
         return
     try:
@@ -162,7 +145,6 @@ def save_fact(user_id, key, value):
         pass
 
 def get_all_topics(user_id):
-    """Получает все темы разговоров"""
     if not supabase:
         return []
     try:
@@ -177,7 +159,6 @@ def get_all_topics(user_id):
         return []
 
 def save_topic(user_id, topic):
-    """Сохраняет тему разговора"""
     if not supabase:
         return
     try:
@@ -247,31 +228,51 @@ def save_user(user_id, name=None, city=None):
 
 def extract_facts(text, user_id):
     """Извлекает факты из сообщения"""
-    # Имя
-    name_match = re.search(r"(?:меня зовут|зовут|я )(\w+)", text.lower())
-    if name_match:
-        name = name_match.group(1).capitalize()
-        save_fact(user_id, "name", name)
-        save_user(user_id, name=name)
+    text_lower = text.lower()
     
-    # Город
-    city_match = re.search(r"(?:в|из|живу в|город)\s+([А-Яа-яЁё\-]+)", text.lower())
-    if city_match:
-        city = city_match.group(1).capitalize()
-        save_fact(user_id, "city", city)
-        save_user(user_id, city=city)
+    # ИМЯ
+    name_patterns = [
+        r"(?:меня зовут|зовут|я |моё имя|имя)\s*([А-Яа-яЁё]{2,})",
+        r"([А-Яа-яЁё]{2,})\s*(?:меня зовут|зовут)"
+    ]
+    for pattern in name_patterns:
+        match = re.search(pattern, text_lower)
+        if match:
+            name = match.group(1).capitalize()
+            if name not in ["Привет", "Спасибо", "Пока", "Да", "Нет"]:
+                save_fact(user_id, "name", name)
+                save_user(user_id, name=name)
+                print(f"✅ Запомнил имя: {name}")
+                return
     
-    # Любит
-    if "нравится" in text.lower():
+    # ГОРОД
+    city_patterns = [
+        r"(?:в|из|живу в|город|населённый пункт)\s*([А-Яа-яЁё\-]{3,})",
+        r"([А-Яа-яЁё\-]{3,})\s*(?:город|посёлок|село|деревня)"
+    ]
+    for pattern in city_patterns:
+        match = re.search(pattern, text_lower)
+        if match:
+            city = match.group(1).capitalize()
+            # Синонимы
+            if "инской" in city.lower():
+                city = "Белово"
+            if "прокопьевск" in city.lower():
+                city = "Прокопьевск"
+            save_fact(user_id, "city", city)
+            save_user(user_id, city=city)
+            print(f"✅ Запомнил город: {city}")
+            return
+    
+    # ЛЮБИТ/НЕ ЛЮБИТ
+    if "нравится" in text_lower:
         save_fact(user_id, "likes", text)
-    
-    # Не любит
-    if "не нравится" in text.lower():
+    if "не нравится" in text_lower:
         save_fact(user_id, "dislikes", text)
     
-    # Темы
-    words = re.findall(r'\b[а-яА-ЯёЁ]{4,}\b', text.lower())
-    stop_words = ["привет", "здравствуй", "спасибо", "пока", "да", "нет", "хорошо", "плохо", "просто", "так", "ещё", "очень", "время", "погода"]
+    # ТЕМЫ
+    words = re.findall(r'\b[а-яА-ЯёЁ]{4,}\b', text_lower)
+    stop_words = ["привет", "здравствуй", "спасибо", "пока", "да", "нет", "хорошо", "плохо", "просто", "так", "ещё", "очень"]
     for word in words:
         if word not in stop_words and len(word) > 3:
             save_topic(user_id, word)
@@ -282,10 +283,8 @@ def extract_facts(text, user_id):
 
 def handle_memory_query(user_id, text):
     """Обрабатывает запросы типа 'напомни'"""
-    # Проверяем, есть ли запрос на поиск в истории
     memory_triggers = ["помнишь", "напомни", "что мы говорили", "о чём мы говорили", "когда мы обсуждали"]
     if any(trigger in text.lower() for trigger in memory_triggers):
-        # Извлекаем запрос
         query = text
         for trigger in memory_triggers:
             query = query.replace(trigger, "")
@@ -294,21 +293,40 @@ def handle_memory_query(user_id, text):
         if query:
             results = search_in_history(user_id, query)
             if results:
-                # Формируем ответ
                 found = []
                 for msg in results[:5]:
                     found.append(f"• {msg['role']}: {msg['content'][:200]}...")
                 return "\n".join(found)
             else:
-                return "Не нашёл ничего в истории по этому запросу."
+                return "📭 Не нашёл ничего в истории по этому запросу. Может, уточним?"
     return None
+
+# ==========================
+# ЗАГЛУШКИ
+# ==========================
+
+def handle_weather(city):
+    """Заглушка для погоды"""
+    return "🌤️ Погода — это круто! Я уже умею её показывать, но для этого нужен API-ключ. Как только добавлю — сразу скажу! А пока скажи, что ещё тебя интересует? 😊"
+
+def handle_image(text):
+    """Заглушка для картинок"""
+    return "🎨 Генерация картинок — это моя суперспособность в разработке! Скоро я смогу нарисовать что угодно по твоему запросу. А пока давай просто поговорим? 😊"
+
+def handle_search(text):
+    """Заглушка для поиска"""
+    return "🔍 Поиск в интернете — я умею, но пока без ключа Tavily. Как только добавлю — найду всё что угодно! А пока я могу поискать в нашей с тобой истории. Что хочешь вспомнить? 😊"
+
+def handle_voice():
+    """Заглушка для голоса"""
+    return "🎤 Голосовые сообщения я уже умею распознавать! Но пока в тестовом режиме. Скоро будет работать как часы! А пока напиши текстом — я всё запомню 😊"
 
 # ==========================
 # ОСНОВНАЯ ЛОГИКА
 # ==========================
 
 async def process_message(user_id, text):
-    """Обработка сообщения с памятью"""
+    """Обработка сообщения с памятью и заглушками"""
     
     # Сохраняем сообщение пользователя
     save_message(user_id, "user", text)
@@ -322,6 +340,37 @@ async def process_message(user_id, text):
         save_message(user_id, "assistant", memory_result)
         return memory_result
     
+    # ===== ЗАГЛУШКИ =====
+    text_lower = text.lower()
+    
+    # Погода
+    if "погод" in text_lower:
+        facts = get_user_facts(user_id)
+        city = facts.get("city", "твоём городе")
+        reply = handle_weather(city)
+        save_message(user_id, "assistant", reply)
+        return reply
+    
+    # Картинки
+    if any(word in text_lower for word in ["нарисуй", "картинку", "изображение", "сгенерируй"]):
+        reply = handle_image(text)
+        save_message(user_id, "assistant", reply)
+        return reply
+    
+    # Поиск
+    if any(word in text_lower for word in ["найди", "поищи", "узнай", "что такое", "где"]):
+        reply = handle_search(text)
+        save_message(user_id, "assistant", reply)
+        return reply
+    
+    # Голос
+    if "голос" in text_lower or "озвучь" in text_lower:
+        reply = handle_voice()
+        save_message(user_id, "assistant", reply)
+        return reply
+    
+    # ===== ОБЫЧНЫЙ ДИАЛОГ =====
+    
     # Получаем историю (последние 15 сообщений)
     recent = get_recent_history(user_id, limit=15)
     
@@ -334,32 +383,29 @@ async def process_message(user_id, text):
     # Формируем контекст
     context = []
     
-    # Добавляем факты
     if facts:
-        context.append("Известно о пользователе:")
+        context.append("📋 ИЗВЕСТНО О ПОЛЬЗОВАТЕЛЕ:")
         for key, value in facts.items():
             if key in ["name", "city"]:
                 context.append(f"- {key}: {value}")
     
-    # Добавляем темы
     if topics:
-        context.append(f"Темы разговоров: {', '.join(topics[:10])}")
+        context.append(f"📚 ТЕМЫ РАЗГОВОРОВ: {', '.join(topics[:10])}")
     
-    # Добавляем историю
-    context.append("История диалога:")
-    for msg in recent:
-        context.append(f"{msg['role']}: {msg['content'][:300]}")
+    context.append("💬 ПОСЛЕДНИЙ ДИАЛОГ:")
+    for msg in recent[-10:]:
+        role = "Пользователь" if msg["role"] == "user" else "AURA"
+        context.append(f"{role}: {msg['content'][:300]}")
     
     context_text = "\n".join(context)
     
     # Формируем запрос к DeepSeek
     messages = [
         {"role": "system", "content": AGENT_PROMPT},
-        {"role": "system", "content": f"Контекст:\n{context_text}"},
+        {"role": "system", "content": f"КОНТЕКСТ:\n{context_text}"},
         {"role": "user", "content": text}
     ]
     
-    # Ответ от DeepSeek
     try:
         response = deepseek.chat.completions.create(
             model="deepseek-v4-flash",
@@ -371,15 +417,14 @@ async def process_message(user_id, text):
         
         # Сохраняем ответ
         save_message(user_id, "assistant", reply)
-        
         return reply
     
     except Exception as e:
         print(f"❌ Ошибка DeepSeek: {e}")
-        return "😅 Упс, что-то пошло не так. Попробуй ещё раз."
+        return "😅 Упс, что-то пошло не так. Попробуй ещё раз!"
 
 # ==========================
-# FASTAPI ВЕБХУК
+# ВЕБХУК
 # ==========================
 
 app = FastAPI()
@@ -399,7 +444,7 @@ async def webhook(request: Request):
             
             if text.startswith("/start"):
                 save_user(user_id, message["from"]["first_name"])
-                reply = "👋 Привет! Я AURA. Я запоминаю ВСЁ, что ты говоришь. Можешь спросить меня о чём угодно — я помню нашу историю!"
+                reply = "👋 Привет! Я AURA. Я запоминаю ВСЁ, что ты говоришь. Можешь спросить меня о чём угодно — я помню нашу историю! 🤗"
             else:
                 reply = await process_message(user_id, text)
             
