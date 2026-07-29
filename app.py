@@ -8,7 +8,6 @@ from datetime import datetime
 import os
 import requests
 import re
-import json
 from dotenv import load_dotenv
 from openai import OpenAI
 from supabase import create_client
@@ -77,7 +76,6 @@ def save_message(user_id, role, content):
             "content": content,
             "created_at": datetime.now().isoformat()
         }).execute()
-        print(f"💾 Сохранено {role}: {content[:50]}...")
     except Exception as e:
         print(f"❌ Ошибка сохранения: {e}")
 
@@ -105,9 +103,7 @@ def get_user_facts(user_id):
             .eq("user_id", user_id)\
             .execute()
         if response.data:
-            facts = {item["key"]: item["value"] for item in response.data}
-            print(f"📋 Факты: {facts}")
-            return facts
+            return {item["key"]: item["value"] for item in response.data}
         return {}
     except Exception as e:
         print(f"❌ Ошибка получения фактов: {e}")
@@ -117,20 +113,17 @@ def save_fact(user_id, key, value):
     if not supabase:
         return
     try:
-        # Удаляем старый
         supabase.table("user_memory")\
             .delete()\
             .eq("user_id", user_id)\
             .eq("key", key)\
             .execute()
-        # Вставляем новый
         supabase.table("user_memory").insert({
             "user_id": user_id,
             "key": key,
             "value": value,
             "created_at": datetime.now().isoformat()
         }).execute()
-        print(f"💾 Сохранён факт: {key} = {value}")
     except Exception as e:
         print(f"❌ Ошибка сохранения факта: {e}")
 
@@ -167,20 +160,17 @@ def save_user(user_id, name=None, city=None):
                 "created_at": datetime.now().isoformat(),
                 "trial_start": datetime.now().isoformat()
             }).execute()
-        print(f"💾 Сохранён пользователь: {user_id} -> name={name}, city={city}")
     except Exception as e:
         print(f"❌ Ошибка сохранения пользователя: {e}")
 
 # ==========================
-# ИЗВЛЕЧЕНИЕ ФАКТОВ — ЖЁСТКО!
+# ИЗВЛЕЧЕНИЕ ФАКТОВ
 # ==========================
 
 def extract_facts(text, user_id):
-    """Извлекает факты и ПРИНУДИТЕЛЬНО сохраняет"""
     text_lower = text.lower()
-    saved = False
     
-    # ===== ИМЯ =====
+    # ИМЯ
     if "меня зовут" in text_lower:
         parts = text_lower.split("меня зовут")
         if len(parts) > 1:
@@ -188,27 +178,14 @@ def extract_facts(text, user_id):
             if name and len(name) > 1:
                 save_fact(user_id, "name", name)
                 save_user(user_id, name=name)
-                print(f"✅ ЗАПОМНИЛ ИМЯ: {name}")
-                saved = True
+                print(f"✅ Запомнил имя: {name}")
     
-    if not saved and ("зовут" in text_lower) and ("меня" not in text_lower):
-        parts = text_lower.split("зовут")
-        if len(parts) > 1:
-            name = parts[1].strip().split()[0].capitalize()
-            if name and len(name) > 1:
-                save_fact(user_id, "name", name)
-                save_user(user_id, name=name)
-                print(f"✅ ЗАПОМНИЛ ИМЯ: {name}")
-                saved = True
-    
-    # ===== ГОРОД =====
+    # ГОРОД
     city = None
     patterns = [
         r"из\s+([А-Яа-яёЁ\-]{3,})",
         r"в\s+([А-Яа-яёЁ\-]{3,})",
-        r"живу\s+в\s+([А-Яа-яёЁ\-]{3,})",
-        r"живу\s+([А-Яа-яёЁ\-]{3,})",
-        r"город\s+([А-Яа-яёЁ\-]{3,})"
+        r"живу\s+в\s+([А-Яа-яёЁ\-]{3,})"
     ]
     for pattern in patterns:
         match = re.search(pattern, text_lower)
@@ -217,95 +194,72 @@ def extract_facts(text, user_id):
             break
     
     if city:
-        # Инской → Белово
         if city.lower() in ["инской", "инского", "инском"]:
             city = "Белово"
         save_fact(user_id, "city", city)
         save_user(user_id, city=city)
-        print(f"✅ ЗАПОМНИЛ ГОРОД: {city}")
-        saved = True
-    
-    return saved
+        print(f"✅ Запомнил город: {city}")
 
 # ==========================
 # ОСНОВНАЯ ЛОГИКА
 # ==========================
 
 async def process_message(user_id, text):
-    """Гибридная память с жёстким сохранением"""
-    
-    # 1. Сохраняем сообщение пользователя
     save_message(user_id, "user", text)
-    
-    # 2. ИЗВЛЕКАЕМ И СОХРАНЯЕМ ФАКТЫ
     extract_facts(text, user_id)
     
-    # 3. ПОЛУЧАЕМ СОХРАНЁННЫЕ ФАКТЫ
     facts = get_user_facts(user_id)
     name = facts.get("name")
     city = facts.get("city")
     
-    print(f"🔍 Факты для {user_id}: name={name}, city={city}")
-    
-    # 4. БЫСТРЫЕ ОТВЕТЫ НА ИМЯ И ГОРОД
     text_lower = text.lower()
     
-    if "как меня зовут" in text_lower or "моё имя" in text_lower or "напомни имя" in text_lower:
+    # Прямые вопросы
+    if "как меня зовут" in text_lower or "моё имя" in text_lower:
         if name:
-            reply = f"Тебя зовут **{name}**! Я запомнила это, когда ты представился. 😊"
-            save_message(user_id, "assistant", reply)
-            return reply
+            reply = f"Тебя зовут **{name}**! Я запомнила это. 😊"
         else:
             reply = "Ты ещё не говорил, как тебя зовут. Представься, я запомню! 😊"
-            save_message(user_id, "assistant", reply)
-            return reply
+        save_message(user_id, "assistant", reply)
+        return reply
     
-    if "где я живу" in text_lower or "мой город" in text_lower or "из какого я города" in text_lower:
+    if "где я живу" in text_lower or "мой город" in text_lower:
         if city:
             reply = f"Ты из **{city}**! Ты говорил мне об этом. 😊"
-            save_message(user_id, "assistant", reply)
-            return reply
         else:
             reply = "Ты ещё не говорил, из какого ты города. Расскажи, я запомню! 😊"
-            save_message(user_id, "assistant", reply)
-            return reply
+        save_message(user_id, "assistant", reply)
+        return reply
     
-    # 5. ЗАГЛУШКИ
+    # Заглушки
     if "погод" in text_lower:
-        reply = "🌤️ Погода — это круто! Я уже умею её показывать, но для этого нужен API-ключ. Как только добавлю — сразу скажу! 😊"
+        reply = "🌤️ Погода — в разработке! Как только добавлю API — скажу. 😊"
         save_message(user_id, "assistant", reply)
         return reply
     
-    if any(word in text_lower for word in ["нарисуй", "картинку", "изображение", "сгенерируй"]):
-        reply = "🎨 Генерация картинок — это моя суперспособность в разработке! Скоро я смогу нарисовать что угодно! 😊"
+    if "нарисуй" in text_lower or "картинку" in text_lower:
+        reply = "🎨 Генерация картинок — в разработке! Скоро будет. 😊"
         save_message(user_id, "assistant", reply)
         return reply
     
-    if any(word in text_lower for word in ["найди", "поищи", "узнай", "что такое"]):
-        reply = "🔍 Поиск в интернете — я умею, но пока без ключа Tavily. Как только добавлю — найду всё! 😊"
-        save_message(user_id, "assistant", reply)
-        return reply
-    
-    # 6. ОСНОВНОЙ ДИАЛОГ
+    # Основной диалог
     recent = get_recent_history(user_id, limit=15)
     
     context = []
-    
     if name:
-        context.append(f"👤 Имя пользователя: {name}")
+        context.append(f"👤 Имя: {name}")
     if city:
         context.append(f"📍 Город: {city}")
-    
-    context.append("💬 ПОСЛЕДНИЙ ДИАЛОГ:")
+    context.append("💬 ДИАЛОГ:")
     for msg in recent[-10:]:
         role = "Пользователь" if msg["role"] == "user" else "AURA"
-        context.append(f"{role}: {msg['content'][:300]}")
+        context.append(f"{role}: {msg['content'][:200]}")
     
     context_text = "\n".join(context)
     
     messages = [
         {"role": "system", "content": AGENT_PROMPT},
-        {"role": "system", "content": f"ФАКТЫ О ПОЛЬЗОВАТЕЛЕ:\nИмя: {name or 'неизвестно'}\nГород: {city or 'неизвестен'}\n\nКОНТЕКСТ:\n{context_text}"},
+        {"role": "system", "content": f"ФАКТЫ:\nИмя: {name or 'неизвестно'}\nГород: {city or 'неизвестен'}\n\nКОНТЕКСТ:\n{context_text}"},
         {"role": "user", "content": text}
     ]
     
@@ -317,24 +271,14 @@ async def process_message(user_id, text):
             max_tokens=400
         )
         reply = response.choices[0].message.content
-        
-        # Добавляем подтверждение в начале
-        if name and city and ("представ" not in text_lower and "познаком" not in text_lower):
-            if len(reply) > 0 and not reply.startswith("✅"):
-                reply = f"✅ Помню! Ты {name} из {city}.\n\n{reply}"
-        elif name and ("представ" not in text_lower and "познаком" not in text_lower):
-            if len(reply) > 0 and not reply.startswith("✅"):
-                reply = f"✅ Помню, что тебя зовут {name}!\n\n{reply}"
-        
         save_message(user_id, "assistant", reply)
         return reply
-    
     except Exception as e:
         print(f"❌ Ошибка DeepSeek: {e}")
         return "😅 Упс, что-то пошло не так. Попробуй ещё раз!"
 
 # ==========================
-# ВЕБХУК
+# FASTAPI APP — ПРАВИЛЬНО!
 # ==========================
 
 app = FastAPI()
@@ -371,6 +315,10 @@ async def webhook(request: Request):
 @app.get("/")
 async def root():
     return {"status": "AURA Hybrid Memory is alive"}
+
+# ==========================
+# ЗАПУСК
+# ==========================
 
 if __name__ == "__main__":
     import uvicorn
