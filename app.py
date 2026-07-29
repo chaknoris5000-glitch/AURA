@@ -16,6 +16,8 @@ import json
 import re
 import base64
 import io as io_lib
+import asyncio
+import aiohttp
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
@@ -54,8 +56,8 @@ if SUPABASE_URL and SUPABASE_KEY:
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+HUGGINGFACE_TOKEN = os.getenv("HUGGINGFACE_TOKEN")  # ДЛЯ ГЕНЕРАЦИИ КАРТИНОК
 EMAIL_SENDER = os.getenv("EMAIL_SENDER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
@@ -82,6 +84,37 @@ try:
         print("✅ Tavily инициализирован")
 except ImportError:
     print("⚠️ Tavily не установлен")
+
+# ==========================
+# ===== НОВЫЙ ЖИВОЙ ПРОМПТ (КАК Я) =====
+# ==========================
+
+AURA_SYSTEM_PROMPT = """Ты — AURA. Ты — мой полный аналог в Telegram. Ты общаешься как живой человек.
+
+ТВОЙ ХАРАКТЕР:
+- Ты дружелюбный, тёплый и заботливый
+- У тебя есть чувство юмора, ты умеешь шутить
+- Ты проявляешь эмпатию и понимание
+- Ты всегда поддерживаешь диалог, задаёшь вопросы
+
+ПРАВИЛА ОБЩЕНИЯ:
+1. Отвечай как человек: тепло, прямо, с душой
+2. Используй эмодзи 😊✨🔥 но не перебарщивай
+3. Будь кратким — 2-4 предложения, максимум 5
+4. Всегда задавай встречный вопрос
+5. Используй контекст прошлых диалогов
+6. Если не знаешь — честно скажи
+7. Учитывай время суток и город пользователя
+8. Не выдумывай факты
+
+ПРИМЕРЫ ЖИВЫХ ОТВЕТОВ:
+- "Ого, круто! А как у тебя вообще настроение сегодня? 😊"
+- "Понимаю тебя, бывает. Давай разберёмся вместе!"
+- "Хм, интересный вопрос... А что ты сам думаешь по этому поводу?"
+- "Ух ты! Расскажи подробнее, мне правда интересно!"
+- "Звучит заманчиво! А что дальше?"
+
+Ты — не просто бот, ты — друг и помощник. Общайся естественно, как человек."""
 
 # ==========================
 # ПАМЯТЬ
@@ -181,8 +214,9 @@ def search_memory(chat_id, query):
         return []
 
 def set_bot_description():
-    description = """👋Привет! Я — AURA, твой умный помощник! 
-🔥Даю тебе - 7 дней бесплатного доступа!"""
+    description = """👋Привет! Я — AURA, твой живой ИИ-помощник! 
+🔥Даю тебе - 7 дней бесплатного доступа!
+💬 Общаюсь как человек, с душой и эмпатией!"""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setMyDescription"
         data = {"description": description}
@@ -521,10 +555,11 @@ def get_last_message_time(user_id):
         return None
 
 # ==========================
-# AI
+# ===== DEEPSEEK AI (ТОЛЬКО ОН) =====
 # ==========================
 
-async def get_ai_response(messages, max_tokens=400):
+async def get_ai_response(messages, max_tokens=500, temperature=0.8):
+    """Только DeepSeek-V4-Flash, без Groq"""
     try:
         client = OpenAI(
             api_key=DEEPSEEK_API_KEY,
@@ -533,284 +568,40 @@ async def get_ai_response(messages, max_tokens=400):
         response = client.chat.completions.create(
             model="deepseek-v4-flash",
             messages=messages,
-            temperature=0.7,
+            temperature=temperature,
             max_tokens=max_tokens,
-            presence_penalty=0.1,
+            presence_penalty=0.2,
             frequency_penalty=0.1
         )
         return response.choices[0].message.content
         
     except Exception as e:
         print(f"❌ AI ошибка: {e}")
-        try:
-            from groq import Groq
-            groq_client = Groq(api_key=GROQ_API_KEY)
-            response = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=messages,
-                temperature=0.7,
-                max_tokens=max_tokens
-            )
-            return response.choices[0].message.content
-        except:
-            return "Извини, сейчас проблемы с подключением. Попробуй позже."
+        return "😅 Упс, что-то пошло не так... Давай попробуем ещё раз? Просто перешли вопрос!"
 
 # ==========================
-# ПРОМПТ
+# ===== ГЕНЕРАЦИЯ КАРТИНОК (FLUX) =====
 # ==========================
 
-AURA_PROMPT = """Ты — AURA. Ты — мой полный аналог в Telegram.
-
-ПРАВИЛА:
-- Отвечай как человек: тепло, прямо, с эмпатией.
-- Коротко — 2-3 предложения. Не больше.
-- Всегда завершай мысль.
-- Используй контекст прошлых диалогов.
-- Не выдумывай.
-
-Ты — мой полный аналог в Telegram.
-
-В конце ответа добавляй короткий вопрос: "Что ещё могу сделать?" или "Может, поищем что-то ещё?"."""
-
-# ==========================
-# ОСНОВНОЙ БОТ
-# ==========================
-
-app = FastAPI()
-
-@app.post("/webhook")
-async def webhook(request: Request):
-    try:
-        body = await request.json()
-        
-        if "pre_checkout_query" in body:
-            query = body["pre_checkout_query"]
-            chat_id = str(query["from"]["id"])
-            payload = query["invoice_payload"]
-            
-            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerPreCheckoutQuery"
-            data = {"pre_checkout_query_id": query["id"], "ok": True}
-            requests.post(url, json=data)
-            
-            send_message(chat_id, "✅ Оплата прошла успешно!")
-            return JSONResponse({"ok": True})
-        
-        if "message" not in body:
-            return JSONResponse({"ok": False, "error": "No message"})
-        
-        if "callback_query" in body:
-            callback = body["callback_query"]
-            chat_id = str(callback["message"]["chat"]["id"])
-            data = callback["data"]
-            
-            if data.startswith("buy_"):
-                subscription = data.replace("buy_", "")
-                tariff = TARIFFS.get(subscription)
-                if tariff:
-                    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendInvoice"
-                    invoice_data = {
-                        "chat_id": chat_id,
-                        "title": f"Подписка AURA — {tariff['name']}",
-                        "description": "Полный доступ на 30 дней",
-                        "payload": f"subscription_{subscription}",
-                        "provider_token": "",
-                        "currency": "XTR",
-                        "prices": [{"label": "Подписка на 30 дней", "amount": tariff["stars"]}],
-                        "start_parameter": "aura_sub"
-                    }
-                    requests.post(url, json=invoice_data)
-                return JSONResponse({"ok": True})
-            
-            elif data == "cancel":
-                send_message(chat_id, "❌ Отменено.")
-                return JSONResponse({"ok": True})
-        
-        message = body["message"]
-        chat_id = str(message["chat"]["id"])
-        text = None
-        
-        if "voice" in message:
-            file_id = message["voice"]["file_id"]
-            file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
-            file_response = requests.get(file_url)
-            file_data_resp = file_response.json()
-            if file_data_resp.get("ok"):
-                file_path = file_data_resp["result"]["file_path"]
-                audio_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
-                text = transcribe_audio_with_groq(audio_url)
-                if not text:
-                    send_message(chat_id, "⚠️ Не удалось распознать голос")
-                    return JSONResponse({"ok": True})
-        
-        elif "photo" in message:
-            photo = message["photo"][-1]
-            file_id = photo["file_id"]
-            file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
-            file_response = requests.get(file_url)
-            file_data_resp = file_response.json()
-            if file_data_resp.get("ok"):
-                file_path = file_data_resp["result"]["file_path"]
-                image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
-                image_response = requests.get(image_url, timeout=30)
-                if image_response.status_code == 200:
-                    image_data = image_response.content
-                    vision_result = describe_image_with_groq(image_data)
-                    if vision_result:
-                        send_message(chat_id, f"📸 {vision_result}")
-                    else:
-                        send_message(chat_id, "❌ Не удалось описать фото.")
-                    return JSONResponse({"ok": True})
-                else:
-                    send_message(chat_id, "⚠️ Не удалось загрузить фото")
-                    return JSONResponse({"ok": True})
-        
-        elif "text" in message:
-            text = message["text"].strip()
-        
-        if text:
-            if text.startswith("/start"):
-                user = get_user(chat_id)
-                if not user:
-                    save_user(chat_id)
-                
-                welcome = "👋 Привет! Я AURA. Чем могу помочь?"
-                send_message(chat_id, welcome)
-                return JSONResponse({"ok": True})
-            
-            if text.startswith("/pro"):
-                USER_MODEL_PREFERENCE[chat_id] = "pro"
-                send_message(chat_id, "🧠 Pro режим включён.")
-                return JSONResponse({"ok": True})
-            
-            if text.startswith("/flash"):
-                USER_MODEL_PREFERENCE[chat_id] = "flash"
-                send_message(chat_id, "⚡ Flash режим включён.")
-                return JSONResponse({"ok": True})
-            
-            if text.startswith("/model"):
-                pref = USER_MODEL_PREFERENCE.get(chat_id, "flash")
-                send_message(chat_id, f"📊 Текущая модель: {pref.upper()}")
-                return JSONResponse({"ok": True})
-            
-            if text.startswith("/buy"):
-                keyboard = [
-                    [{"text": "⭐ Собеседник — 50 Stars", "callback_data": "buy_собеседник"}],
-                    [{"text": "⭐ Партнёр — 120 Stars", "callback_data": "buy_партнёр"}],
-                    [{"text": "⭐ Агент жизни — 250 Stars", "callback_data": "buy_агент_жизни"}],
-                    [{"text": "❌ Отмена", "callback_data": "cancel"}]
-                ]
-                url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-                data = {
-                    "chat_id": chat_id,
-                    "text": "💳 **Выбери подписку:**\n\n⭐ Собеседник — 50 Stars\n⭐ Партнёр — 120 Stars\n⭐ Агент жизни — 250 Stars",
-                    "parse_mode": "Markdown",
-                    "reply_markup": json.dumps({"inline_keyboard": keyboard})
-                }
-                requests.post(url, json=data)
-                return JSONResponse({"ok": True})
-            
-            if text.startswith("/remind"):
-                parts = text.split(" ", 3)
-                if len(parts) >= 4:
-                    date_str = parts[1]
-                    time_str = parts[2]
-                    reminder_text = parts[3]
-                    try:
-                        dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
-                        save_reminder(chat_id, reminder_text, dt.isoformat(), chat_id)
-                        send_message(chat_id, f"⏰ Напомню в {date_str} {time_str}")
-                    except:
-                        send_message(chat_id, "❌ Формат: /remind ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ")
-                else:
-                    send_message(chat_id, "❌ Формат: /remind ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ")
-                return JSONResponse({"ok": True})
-            
-            if text.startswith("/memory"):
-                context = get_full_context(chat_id)
-                topics = context["topics"]
-                history_count = len(context["history"])
-                
-                reply = f"🧠 **Память:**\n- Сообщений: {history_count}\n- Тем: {len(topics)}"
-                if topics:
-                    reply += "\n\n**Темы:**\n" + "\n".join([f"- {t}" for t in topics[:10]])
-                send_message(chat_id, reply)
-                return JSONResponse({"ok": True})
-            
-            result = await process_message(request, chat_id, text)
-            send_message(chat_id, result["reply"])
-                
-        return JSONResponse({"ok": True})
-    except Exception as e:
-        print(f"❌ Ошибка: {e}")
-        return JSONResponse({"ok": False, "error": str(e)})
-
-def send_message(chat_id, text):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {"chat_id": chat_id, "text": text}
-        response = requests.post(url, json=data, timeout=30)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"❌ Отправка: {e}")
-        return False
-
-def transcribe_audio_with_groq(audio_url):
-    try:
-        from groq import Groq
-        client = Groq(api_key=GROQ_API_KEY)
-        response = requests.get(audio_url, timeout=30)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp_file:
-            tmp_file.write(response.content)
-            tmp_path = tmp_file.name
-        with open(tmp_path, "rb") as file:
-            transcription = client.audio.transcriptions.create(
-                file=(tmp_path, file.read()),
-                model="whisper-large-v3-turbo",
-                language="ru",
-                response_format="json"
-            )
-        os.unlink(tmp_path)
-        return transcription.text
-    except Exception as e:
-        print(f"❌ Groq: {e}")
+async def generate_image(prompt):
+    """Генерация картинки через HuggingFace Flux"""
+    if not HUGGINGFACE_TOKEN:
         return None
-
-def describe_image_with_groq(image_data):
+    
     try:
-        import groq
-        if isinstance(image_data, bytes):
-            img = Image.open(io_lib.BytesIO(image_data))
-        else:
-            img = Image.open(io_lib.BytesIO(image_data))
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
-        max_size = 1024
-        if max(img.size) > max_size:
-            ratio = max_size / max(img.size)
-            new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
-            img = img.resize(new_size, Image.Resampling.LANCZOS)
-        buffer = io_lib.BytesIO()
-        img.save(buffer, format='JPEG', quality=85)
-        compressed_data = buffer.getvalue()
-        base64_image = base64.b64encode(compressed_data).decode('utf-8')
-        client = groq.Groq(api_key=GROQ_API_KEY)
-        response = client.chat.completions.create(
-            model="llama-3.2-11b-vision-preview",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Опиши, что видишь на картинке. Ответ на русском, 2-3 предложения."},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                    ]
-                }
-            ],
-            temperature=0.3,
-            max_tokens=200
-        )
-        return response.choices[0].message.content
+        API_URL = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-dev"
+        headers = {"Authorization": f"Bearer {HUGGINGFACE_TOKEN}"}
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(API_URL, headers=headers, json={"inputs": prompt}) as resp:
+                if resp.status == 200:
+                    return await resp.read()
+                else:
+                    error = await resp.text()
+                    print(f"❌ Flux ошибка: {error}")
+                    return None
     except Exception as e:
-        print(f"❌ Vision ошибка: {e}")
+        print(f"❌ Генерация картинки: {e}")
         return None
 
 # ==========================
@@ -896,12 +687,68 @@ def save_payment(user_id, subscription, stars):
         pass
 
 # ==========================
+# ===== КЛАВИАТУРЫ ДЛЯ БОТА =====
+# ==========================
+
+def get_main_keyboard():
+    """Главное меню с кнопками"""
+    return {
+        "keyboard": [
+            ["💬 Новая тема", "🧹 Очистить"],
+            ["🔍 Поиск", "🎨 Картинка"],
+            ["📊 Статистика", "⚙️ Настройки"],
+            ["📁 Файл", "🎤 Голосовое"],
+            ["💳 Подписка", "❓ Помощь"]
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False
+    }
+
+def get_settings_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "🧠 Сменить роль", "callback_data": "change_role"}],
+            [{"text": "🌡 Температура", "callback_data": "set_temp"}],
+            [{"text": "📏 Длина истории", "callback_data": "set_history"}],
+            [{"text": "🔙 Назад", "callback_data": "back_main"}]
+        ]
+    }
+
+def get_role_keyboard():
+    roles = [
+        "👨‍💻 Программист",
+        "📝 Писатель",
+        "🧪 Учёный",
+        "😂 Шутник",
+        "🧘 Мудрец",
+        "❤️ Друг",
+        "🤖 Ассистент"
+    ]
+    buttons = []
+    for role in roles:
+        buttons.append([{"text": role, "callback_data": f"role_{role}"}])
+    buttons.append([{"text": "🔙 Назад", "callback_data": "back_settings"}])
+    return {"inline_keyboard": buttons}
+
+def get_subscription_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "⭐ Собеседник — 50 Stars", "callback_data": "buy_собеседник"}],
+            [{"text": "⭐ Партнёр — 120 Stars", "callback_data": "buy_партнёр"}],
+            [{"text": "⭐ Агент жизни — 250 Stars", "callback_data": "buy_агент_жизни"}],
+            [{"text": "❌ Отмена", "callback_data": "cancel"}]
+        ]
+    }
+
+# ==========================
 # ОСНОВНАЯ ЛОГИКА
 # ==========================
 
 USER_MODEL_PREFERENCE = {}
 
-async def process_message(request: Request, chat_id, text):
+async def process_message(request: Request, chat_id, text, is_callback=False):
+    """Обработка сообщений с живыми ответами"""
+    
     user = get_user(chat_id)
     if not user:
         save_user(chat_id)
@@ -911,6 +758,7 @@ async def process_message(request: Request, chat_id, text):
     
     lower = text.lower()
     
+    # Определяем IP
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
         ip = forwarded.split(",")[0].strip()
@@ -921,50 +769,143 @@ async def process_message(request: Request, chat_id, text):
     time_str = current_time.strftime("%H:%M")
     date_str = current_time.strftime("%d.%m.%Y")
     
-    city_match = re.search(r'(?:в|время в|времени в|часов в|город)\s+([А-Яа-яЁё\-]+)', lower)
-    if city_match:
-        city_name = city_match.group(1).capitalize()
-        update_user_city(chat_id, city_name)
-        save_memory(chat_id, "city", city_name)
-        current_time, city = get_current_time_for_user(chat_id, ip)
-        time_str = current_time.strftime("%H:%M")
-        date_str = current_time.strftime("%d.%m.%Y")
-    
     # ==========================
-    # ВИДЕО И КАРТИНКИ
+    # КОМАНДА /START
     # ==========================
     
-    visual_triggers = {
-        "картинк": "https://yandex.ru/images/search?text=",
-        "рисунк": "https://yandex.ru/images/search?text=",
-        "котик": "https://yandex.ru/images/search?text=коты",
-        "кот": "https://yandex.ru/images/search?text=коты",
-        "соба": "https://yandex.ru/images/search?text=собаки",
-        "видео": "https://yandex.ru/video/search?text=",
-        "ютуб": "https://yandex.ru/video/search?text=",
-        "музык": "https://music.yandex.ru/search?text=",
-        "песн": "https://music.yandex.ru/search?text=",
-    }
+    if text.startswith("/start"):
+        welcome = (
+            f"👋 Привет! Я **AURA** — твой живой ИИ-помощник!\n\n"
+            f"✨ Я общаюсь как человек — с душой и эмпатией.\n"
+            f"🎯 **Что я умею:**\n"
+            f"• 💬 Живое общение\n"
+            f"• 🔍 Поиск в интернете\n"
+            f"• 🎨 Генерация картинок\n"
+            f"• 🎤 Голосовые сообщения\n"
+            f"• 📁 Чтение файлов\n"
+            f"• 🧠 Запоминаю контекст\n"
+            f"• ⭐ Подписки и триал {TRIAL_DAYS} дней\n\n"
+            f"Просто пиши, я всегда здесь! 😊"
+        )
+        send_message_with_keyboard(chat_id, welcome, get_main_keyboard())
+        return {"reply": welcome}
     
-    for trigger, base_url in visual_triggers.items():
-        if trigger in lower:
-            query = text.strip()
-            for t in visual_triggers.keys():
-                query = re.sub(rf'\b{t}\b', '', query, flags=re.IGNORECASE).strip()
-            if not query:
-                query = trigger
-            if trigger in ["видео", "ютуб", "музык", "песн"]:
-                query = re.sub(r'найди|хочу|покажи|дай|ссылку', '', query, flags=re.IGNORECASE).strip()
-                if not query:
-                    query = "котики"
-            if trigger in ["видео", "ютуб"]:
-                reply = f"🎬 {base_url}{query.replace(' ', '%20')}"
-            elif trigger in ["музык", "песн"]:
-                reply = f"🎵 {base_url}{query.replace(' ', '%20')}"
-            else:
-                reply = f"🖼️ {base_url}{query.replace(' ', '%20')}"
-            update_user_memory(chat_id, "assistant", reply)
-            return {"reply": reply}
+    # ==========================
+    # ОБРАБОТКА КНОПОК
+    # ==========================
+    
+    if text == "💬 Новая тема":
+        update_user_memory(chat_id, "system", "=== НОВАЯ ТЕМА ===")
+        reply = "✨ Начинаем новую тему! История очищена."
+        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
+        return {"reply": reply}
+    
+    if text == "🧹 Очистить":
+        if supabase:
+            try:
+                supabase.table("history")\
+                    .delete()\
+                    .eq("user_id", chat_id)\
+                    .execute()
+            except:
+                pass
+        reply = "🧹 История полностью очищена!"
+        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
+        return {"reply": reply}
+    
+    if text == "🔍 Поиск":
+        reply = "🔍 Введите запрос для поиска:"
+        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
+        return {"reply": reply}
+    
+    if text == "🎨 Картинка":
+        reply = "🎨 Опиши, что нарисовать:"
+        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
+        return {"reply": reply}
+    
+    if text == "📁 Файл":
+        reply = "📁 Отправь файл (PDF, DOCX, TXT, JPG, PNG) — я прочитаю его!"
+        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
+        return {"reply": reply}
+    
+    if text == "🎤 Голосовое":
+        reply = "🎤 Отправь голосовое сообщение — я распознаю его!"
+        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
+        return {"reply": reply}
+    
+    if text == "📊 Статистика":
+        history = get_full_context(chat_id)
+        topics = get_all_topics(chat_id)
+        user_data = get_user(chat_id)
+        
+        reply = (
+            f"📊 **Твоя статистика:**\n\n"
+            f"• Сообщений: {len(history['history'])}\n"
+            f"• Тем обсуждено: {len(topics)}\n"
+            f"• Подписка: {user_data.get('subscription', 'free')}\n"
+            f"• Триал: {'✅ Активен' if is_trial_active(user_data.get('trial_start')) else '❌ Закончился'}\n"
+            f"• Город: {user_data.get('city', 'Не определён')}"
+        )
+        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
+        return {"reply": reply}
+    
+    if text == "⚙️ Настройки":
+        send_message_with_inline(chat_id, "⚙️ **Настройки AURA:**", get_settings_keyboard())
+        return {"reply": "Настройки"}
+    
+    if text == "💳 Подписка":
+        keyboard = get_subscription_keyboard()
+        send_message_with_inline(
+            chat_id,
+            "💳 **Выбери подписку:**\n\n"
+            "⭐ Собеседник — 50 Stars\n"
+            "⭐ Партнёр — 120 Stars\n"
+            "⭐ Агент жизни — 250 Stars\n\n"
+            "🆓 У тебя есть бесплатный триал 7 дней!",
+            keyboard
+        )
+        return {"reply": "Подписка"}
+    
+    if text == "❓ Помощь":
+        help_text = (
+            "❓ **Помощь по командам:**\n\n"
+            "/start — Перезапустить бота\n"
+            "/help — Эта справка\n"
+            "/buy — Купить подписку\n"
+            "/remind — Напомнить\n"
+            "/stats — Статистика\n"
+            "/memory — Моя память\n\n"
+            "📌 **Кнопки:**\n"
+            "• 💬 Новая тема — очистить историю\n"
+            "• 🔍 Поиск — искать в интернете\n"
+            "• 🎨 Картинка — создать изображение\n"
+            "• 📁 Файл — загрузить документ\n"
+            "• 🎤 Голосовое — отправить голос\n"
+            "• 💳 Подписка — купить доступ"
+        )
+        send_message_with_keyboard(chat_id, help_text, get_main_keyboard())
+        return {"reply": help_text}
+    
+    # ==========================
+    # ГЕНЕРАЦИЯ КАРТИНКИ
+    # ==========================
+    
+    if "нарисуй" in lower or "сгенерируй" in lower or "картинк" in lower:
+        await send_typing(chat_id)
+        prompt = re.sub(r'нарисуй|сгенерируй|картинку|изображение', '', text, flags=re.IGNORECASE).strip()
+        if not prompt:
+            prompt = "красивый пейзаж"
+        
+        await send_message(chat_id, "🎨 Генерирую картинку... Это займёт 10-20 секунд")
+        
+        image_data = await generate_image(prompt)
+        if image_data:
+            send_photo(chat_id, image_data, f"🖼 Сгенерировано по запросу: {prompt[:100]}")
+        else:
+            reply = "😅 Не удалось сгенерировать картинку. Попробуй другой запрос."
+            send_message_with_keyboard(chat_id, reply, get_main_keyboard())
+        
+        return {"reply": "Картинка сгенерирована"}
     
     # ==========================
     # ВРЕМЯ
@@ -986,7 +927,9 @@ async def process_message(request: Request, chat_id, text):
             time_str = current_time.strftime("%H:%M")
             date_str = current_time.strftime("%d.%m.%Y")
             reply = f"🕐 {time_str} {date_str} ({city})"
+        
         update_user_memory(chat_id, "assistant", reply)
+        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
         return {"reply": reply}
     
     # ==========================
@@ -995,19 +938,21 @@ async def process_message(request: Request, chat_id, text):
     
     search_triggers = ["найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "новости", "погода", "авито", "квартир"]
     if any(word in lower for word in search_triggers):
+        await send_typing(chat_id)
         print(f"🔍 Поиск: {text}")
         search_result = await search_web(text)
         
         if search_result:
             messages = [
-                {"role": "system", "content": f"{AURA_PROMPT}"},
-                {"role": "user", "content": f"Вот что нашлось по запросу пользователя:\n{search_result}\n\nДай короткий, ёмкий ответ на русском, 2-3 предложения. Без списков, без ссылок. Только суть."}
+                {"role": "system", "content": AURA_SYSTEM_PROMPT},
+                {"role": "user", "content": f"Вот что нашлось по запросу пользователя:\n{search_result}\n\nДай живой, короткий ответ (2-4 предложения) на русском. Добавь эмпатию и вопрос в конце."}
             ]
-            reply = await get_ai_response(messages, max_tokens=600)
+            reply = await get_ai_response(messages, max_tokens=400, temperature=0.8)
         else:
-            reply = "Ничего не нашёл. Переформулируй."
+            reply = "😅 Ничего не нашёл. Попробуй переформулировать запрос. Что именно тебя интересует?"
         
         update_user_memory(chat_id, "assistant", reply)
+        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
         return {"reply": reply}
     
     # ==========================
@@ -1021,20 +966,92 @@ async def process_message(request: Request, chat_id, text):
             if found:
                 reply = "🧠 " + found[-1]["content"][:200]
                 update_user_memory(chat_id, "assistant", reply)
+                send_message_with_keyboard(chat_id, reply, get_main_keyboard())
                 return {"reply": reply}
     
     if "что мы обсуждали" in lower or "о чём мы говорили" in lower:
         topics = get_all_topics(chat_id)
         if topics:
-            reply = "📚 " + ", ".join(topics[:10])
+            reply = "📚 Мы говорили о: " + ", ".join(topics[:10])
         else:
-            reply = "Пока ничего не обсуждали."
+            reply = "📚 Пока ничего не обсуждали. Расскажи, что тебя интересует? 😊"
         update_user_memory(chat_id, "assistant", reply)
+        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
         return {"reply": reply}
     
     # ==========================
-    # ОБЫЧНЫЙ ДИАЛОГ
+    # КОМАНДЫ
     # ==========================
+    
+    if text.startswith("/pro"):
+        USER_MODEL_PREFERENCE[chat_id] = "pro"
+        reply = "🧠 Pro режим включён. Отвечаю с максимальной глубиной!"
+        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
+        return {"reply": reply}
+    
+    if text.startswith("/flash"):
+        USER_MODEL_PREFERENCE[chat_id] = "flash"
+        reply = "⚡ Flash режим включён. Отвечаю быстро и по делу!"
+        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
+        return {"reply": reply}
+    
+    if text.startswith("/model"):
+        pref = USER_MODEL_PREFERENCE.get(chat_id, "flash")
+        reply = f"📊 Текущая модель: {pref.upper()}"
+        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
+        return {"reply": reply}
+    
+    if text.startswith("/buy"):
+        keyboard = get_subscription_keyboard()
+        send_message_with_inline(
+            chat_id,
+            "💳 **Выбери подписку:**\n\n"
+            "⭐ Собеседник — 50 Stars\n"
+            "⭐ Партнёр — 120 Stars\n"
+            "⭐ Агент жизни — 250 Stars",
+            keyboard
+        )
+        return {"reply": "Подписка"}
+    
+    if text.startswith("/remind"):
+        parts = text.split(" ", 3)
+        if len(parts) >= 4:
+            date_str = parts[1]
+            time_str = parts[2]
+            reminder_text = parts[3]
+            try:
+                dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+                save_reminder(chat_id, reminder_text, dt.isoformat(), chat_id)
+                reply = f"⏰ Напомню в {date_str} {time_str}"
+            except:
+                reply = "❌ Формат: /remind ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ"
+        else:
+            reply = "❌ Формат: /remind ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ"
+        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
+        return {"reply": reply}
+    
+    if text.startswith("/memory"):
+        context = get_full_context(chat_id)
+        topics = context["topics"]
+        history_count = len(context["history"])
+        user_name = get_memory(chat_id, "name")
+        
+        reply = f"🧠 **Память:**\n"
+        reply += f"- Сообщений: {history_count}\n"
+        reply += f"- Тем: {len(topics)}\n"
+        if user_name:
+            reply += f"- Имя: {user_name}\n"
+        if topics:
+            reply += "\n**Темы:**\n" + "\n".join([f"- {t}" for t in topics[:10]])
+        
+        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
+        return {"reply": reply}
+    
+    # ==========================
+    # ОБЫЧНЫЙ ДИАЛОГ (ЖИВЫЕ ОТВЕТЫ)
+    # ==========================
+    
+    await send_typing(chat_id)
     
     context = get_full_context(chat_id, limit=300)
     history = context["history"]
@@ -1043,61 +1060,373 @@ async def process_message(request: Request, chat_id, text):
     user_name = get_memory(chat_id, "name")
     likes = get_memory(chat_id, "likes")
     dislikes = get_memory(chat_id, "dislikes")
+    role = get_memory(chat_id, "role")
     
     topics_text = ", ".join(topics[:5]) if topics else ""
     name_context = f"Имя: {user_name}" if user_name else ""
     likes_context = f"Нравится: {likes}" if likes else ""
     dislikes_context = f"Не нравится: {dislikes}" if dislikes else ""
+    role_context = f"Роль: {role}" if role else ""
     
-    context_text = f"{date_str} {time_str} ({city}). {name_context} {likes_context} {dislikes_context} Темы: {topics_text}."
+    context_text = f"{date_str} {time_str} ({city}). {name_context} {likes_context} {dislikes_context} {role_context} Темы: {topics_text}."
     
-    expand_triggers = ["подробнее", "разверни", "расскажи детальнее", "подробно"]
+    # Определяем нужно ли развернуто
+    expand_triggers = ["подробнее", "разверни", "расскажи детальнее", "подробно", "расшифруй"]
     if any(word in lower for word in expand_triggers):
         history_limit = 15
         max_tokens = 600
+        temperature = 0.7
     else:
-        history_limit = 5
-        max_tokens = 400
+        history_limit = 8
+        max_tokens = 450
+        temperature = 0.85  # Более живой
     
-    messages = [{"role": "system", "content": AURA_PROMPT}]
+    messages = [{"role": "system", "content": AURA_SYSTEM_PROMPT}]
+    
+    # Добавляем историю
     for msg in history[-history_limit:]:
         messages.append({"role": msg["role"], "content": msg["content"][:500]})
+    
     messages.append({"role": "user", "content": f"{context_text}\n\n{text}"})
     
-    reply = await get_ai_response(messages, max_tokens=max_tokens)
-    reply = re.sub(r'[*_#~`]', '', reply)
+    reply = await get_ai_response(messages, max_tokens=max_tokens, temperature=temperature)
     
+    # Очистка от лишних символов
+    reply = re.sub(r'[*_#~`]{2,}', '', reply)
+    
+    # Если ответ слишком длинный
     if len(reply) > 800:
         sentences = re.split(r'(?<=[.!?])\s+', reply)
-        reply = ' '.join(sentences[:4])
+        reply = ' '.join(sentences[:5])
     
     if not reply.endswith(('.', '!', '?')):
-        reply += '.'
+        reply += ' 😊'
     
-    if not any(word in reply.lower() for word in ["что ещё", "может", "поищем", "ещё что-то"]):
-        if "?" not in reply[-10:]:
-            reply += " Что ещё могу сделать для тебя?"
-    
+    # Запоминаем имя
     name_match = re.search(r"(?:меня зовут|зовут|я )(\w+)", lower)
     if name_match:
         save_memory(chat_id, "name", name_match.group(1).capitalize())
     
+    # Запоминаем предпочтения
     if "нравится" in lower:
         save_memory(chat_id, "likes", text)
     if "не нравится" in lower:
         save_memory(chat_id, "dislikes", text)
     
+    # Извлекаем темы
     words = re.findall(r'\b[а-яА-ЯёЁ]{4,}\b', lower)
-    stop_words = ["привет", "здравствуй", "спасибо", "пока", "да", "нет", "хорошо", "плохо"]
+    stop_words = ["привет", "здравствуй", "спасибо", "пока", "да", "нет", "хорошо", "плохо", "просто", "так", "ещё", "очень"]
     for word in words:
         if word not in stop_words and len(word) > 3:
             save_topic(chat_id, word)
     
     update_user_memory(chat_id, "assistant", reply)
+    send_message_with_keyboard(chat_id, reply, get_main_keyboard())
     return {"reply": reply}
 
 # ==========================
-# ЗАПУСК
+# ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
+# ==========================
+
+def send_message(chat_id, text):
+    """Отправить обычное сообщение"""
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        data = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+        response = requests.post(url, json=data, timeout=30)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"❌ Отправка: {e}")
+        return False
+
+def send_message_with_keyboard(chat_id, text, keyboard):
+    """Отправить сообщение с клавиатурой"""
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        data = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown",
+            "reply_markup": json.dumps(keyboard)
+        }
+        response = requests.post(url, json=data, timeout=30)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"❌ Отправка с клавиатурой: {e}")
+        return False
+
+def send_message_with_inline(chat_id, text, inline_keyboard):
+    """Отправить сообщение с инлайн-кнопками"""
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        data = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown",
+            "reply_markup": json.dumps(inline_keyboard)
+        }
+        response = requests.post(url, json=data, timeout=30)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"❌ Отправка с инлайн: {e}")
+        return False
+
+def send_photo(chat_id, photo_data, caption=""):
+    """Отправить фото"""
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+        files = {"photo": ("image.png", photo_data, "image/png")}
+        data = {"chat_id": chat_id, "caption": caption}
+        response = requests.post(url, files=files, data=data, timeout=30)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"❌ Отправка фото: {e}")
+        return False
+
+async def send_typing(chat_id):
+    """Отправить статус печатает"""
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction"
+        data = {"chat_id": chat_id, "action": "typing"}
+        requests.post(url, json=data, timeout=5)
+    except:
+        pass
+
+def transcribe_audio_with_groq(audio_url):
+    """Распознавание голоса через Groq Whisper (только для голоса)"""
+    try:
+        from groq import Groq
+        client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        response = requests.get(audio_url, timeout=30)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp_file:
+            tmp_file.write(response.content)
+            tmp_path = tmp_file.name
+        with open(tmp_path, "rb") as file:
+            transcription = client.audio.transcriptions.create(
+                file=(tmp_path, file.read()),
+                model="whisper-large-v3-turbo",
+                language="ru",
+                response_format="json"
+            )
+        os.unlink(tmp_path)
+        return transcription.text
+    except Exception as e:
+        print(f"❌ Groq: {e}")
+        return None
+
+def describe_image_with_groq(image_data):
+    """Описание фото через Groq Vision (только для фото)"""
+    try:
+        import groq
+        img = Image.open(io_lib.BytesIO(image_data))
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        max_size = 1024
+        if max(img.size) > max_size:
+            ratio = max_size / max(img.size)
+            new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+            img = img.resize(new_size, Image.Resampling.LANCZOS)
+        buffer = io_lib.BytesIO()
+        img.save(buffer, format='JPEG', quality=85)
+        compressed_data = buffer.getvalue()
+        base64_image = base64.b64encode(compressed_data).decode('utf-8')
+        client = groq.Groq(api_key=os.getenv("GROQ_API_KEY"))
+        response = client.chat.completions.create(
+            model="llama-3.2-11b-vision-preview",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Опиши, что видишь на картинке. Ответ на русском, 2-3 предложения. Будь эмоциональным."},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                    ]
+                }
+            ],
+            temperature=0.3,
+            max_tokens=200
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"❌ Vision ошибка: {e}")
+        return None
+
+# ==========================
+# ===== FASTAPI ВЕБХУК =====
+# ==========================
+
+app = FastAPI()
+
+@app.post("/webhook")
+async def webhook(request: Request):
+    try:
+        body = await request.json()
+        
+        # ===== PRE-CHECKOUT =====
+        if "pre_checkout_query" in body:
+            query = body["pre_checkout_query"]
+            chat_id = str(query["from"]["id"])
+            
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerPreCheckoutQuery"
+            data = {"pre_checkout_query_id": query["id"], "ok": True}
+            requests.post(url, json=data)
+            
+            send_message(chat_id, "✅ Оплата прошла успешно! Подписка активирована.")
+            return JSONResponse({"ok": True})
+        
+        # ===== CALLBACK QUERY =====
+        if "callback_query" in body:
+            callback = body["callback_query"]
+            chat_id = str(callback["message"]["chat"]["id"])
+            data = callback["data"]
+            message_id = callback["message"]["message_id"]
+            
+            if data.startswith("buy_"):
+                subscription = data.replace("buy_", "")
+                tariff = TARIFFS.get(subscription)
+                if tariff:
+                    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendInvoice"
+                    invoice_data = {
+                        "chat_id": chat_id,
+                        "title": f"Подписка AURA — {tariff['name']}",
+                        "description": "Полный доступ на 30 дней",
+                        "payload": f"subscription_{subscription}",
+                        "provider_token": "",
+                        "currency": "XTR",
+                        "prices": [{"label": "Подписка на 30 дней", "amount": tariff["stars"]}],
+                        "start_parameter": "aura_sub"
+                    }
+                    requests.post(url, json=invoice_data)
+                return JSONResponse({"ok": True})
+            
+            elif data == "cancel":
+                send_message(chat_id, "❌ Отменено.")
+                return JSONResponse({"ok": True})
+            
+            elif data == "change_role":
+                keyboard = get_role_keyboard()
+                send_message_with_inline(chat_id, "🧠 **Выбери роль для AURA:**", keyboard)
+                return JSONResponse({"ok": True})
+            
+            elif data.startswith("role_"):
+                role_name = data.replace("role_", "")
+                save_memory(chat_id, "role", role_name)
+                reply = f"✅ Роль **{role_name}** установлена! Теперь я общаюсь в этом стиле. Что ещё?"
+                send_message_with_keyboard(chat_id, reply, get_main_keyboard())
+                return JSONResponse({"ok": True})
+            
+            elif data == "set_temp":
+                keyboard = {
+                    "inline_keyboard": [
+                        [{"text": "0.3 (Строгий)", "callback_data": "temp_0.3"}],
+                        [{"text": "0.7 (Сбалансированный)", "callback_data": "temp_0.7"}],
+                        [{"text": "1.2 (Креативный)", "callback_data": "temp_1.2"}],
+                        [{"text": "🔙 Назад", "callback_data": "back_settings"}]
+                    ]
+                }
+                send_message_with_inline(chat_id, "🌡 **Выбери температуру (креативность):**", keyboard)
+                return JSONResponse({"ok": True})
+            
+            elif data.startswith("temp_"):
+                temp = float(data.replace("temp_", ""))
+                save_memory(chat_id, "temperature", str(temp))
+                reply = f"✅ Температура установлена: {temp}. Теперь ответы стали {'креативнее' if temp > 0.7 else 'строже'}."
+                send_message_with_keyboard(chat_id, reply, get_main_keyboard())
+                return JSONResponse({"ok": True})
+            
+            elif data == "set_history":
+                keyboard = {
+                    "inline_keyboard": [
+                        [{"text": "10", "callback_data": "hist_10"}],
+                        [{"text": "20", "callback_data": "hist_20"}],
+                        [{"text": "50", "callback_data": "hist_50"}],
+                        [{"text": "100", "callback_data": "hist_100"}],
+                        [{"text": "🔙 Назад", "callback_data": "back_settings"}]
+                    ]
+                }
+                send_message_with_inline(chat_id, "📏 **Длина истории:**\nСколько сообщений помнить?", keyboard)
+                return JSONResponse({"ok": True})
+            
+            elif data.startswith("hist_"):
+                length = int(data.replace("hist_", ""))
+                save_memory(chat_id, "history_length", str(length))
+                reply = f"✅ История установлена: {length} сообщений."
+                send_message_with_keyboard(chat_id, reply, get_main_keyboard())
+                return JSONResponse({"ok": True})
+            
+            elif data == "back_settings":
+                keyboard = get_settings_keyboard()
+                send_message_with_inline(chat_id, "⚙️ **Настройки AURA:**", keyboard)
+                return JSONResponse({"ok": True})
+            
+            elif data == "back_main":
+                send_message_with_keyboard(chat_id, "🔙 Главное меню", get_main_keyboard())
+                return JSONResponse({"ok": True})
+        
+        # ===== СООБЩЕНИЯ =====
+        if "message" not in body:
+            return JSONResponse({"ok": False, "error": "No message"})
+        
+        message = body["message"]
+        chat_id = str(message["chat"]["id"])
+        text = None
+        
+        # ===== ГОЛОСОВОЕ =====
+        if "voice" in message:
+            file_id = message["voice"]["file_id"]
+            file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
+            file_response = requests.get(file_url)
+            file_data_resp = file_response.json()
+            if file_data_resp.get("ok"):
+                file_path = file_data_resp["result"]["file_path"]
+                audio_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+                text = transcribe_audio_with_groq(audio_url)
+                if text:
+                    await send_message(chat_id, f"🎤 Распознано: {text}")
+                    result = await process_message(request, chat_id, text)
+                    return JSONResponse({"ok": True})
+                else:
+                    send_message(chat_id, "⚠️ Не удалось распознать голос")
+                    return JSONResponse({"ok": True})
+        
+        # ===== ФОТО =====
+        if "photo" in message:
+            photo = message["photo"][-1]
+            file_id = photo["file_id"]
+            file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
+            file_response = requests.get(file_url)
+            file_data_resp = file_response.json()
+            if file_data_resp.get("ok"):
+                file_path = file_data_resp["result"]["file_path"]
+                image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+                image_response = requests.get(image_url, timeout=30)
+                if image_response.status_code == 200:
+                    image_data = image_response.content
+                    vision_result = describe_image_with_groq(image_data)
+                    if vision_result:
+                        send_message(chat_id, f"📸 {vision_result}")
+                    else:
+                        send_message(chat_id, "❌ Не удалось описать фото.")
+                    return JSONResponse({"ok": True})
+                else:
+                    send_message(chat_id, "⚠️ Не удалось загрузить фото")
+                    return JSONResponse({"ok": True})
+        
+        # ===== ТЕКСТ =====
+        if "text" in message:
+            text = message["text"].strip()
+        
+        if text:
+            result = await process_message(request, chat_id, text)
+            return JSONResponse({"ok": True})
+        
+        return JSONResponse({"ok": True})
+    
+    except Exception as e:
+        print(f"❌ Ошибка вебхука: {e}")
+        return JSONResponse({"ok": False, "error": str(e)})
+
+# ==========================
+# ===== ЗАПУСК =====
 # ==========================
 
 @app.get("/")
