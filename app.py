@@ -57,12 +57,11 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-HUGGINGFACE_TOKEN = os.getenv("HUGGINGFACE_TOKEN")  # ДЛЯ ГЕНЕРАЦИИ КАРТИНОК
+HUGGINGFACE_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 EMAIL_SENDER = os.getenv("EMAIL_SENDER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
-YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
-YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
 ADMIN_USERS = ["5818548555"]
 
@@ -86,7 +85,7 @@ except ImportError:
     print("⚠️ Tavily не установлен")
 
 # ==========================
-# ===== НОВЫЙ ЖИВОЙ ПРОМПТ (КАК Я) =====
+# ===== НОВЫЙ ЖИВОЙ ПРОМПТ =====
 # ==========================
 
 AURA_SYSTEM_PROMPT = """Ты — AURA. Ты — мой полный аналог в Telegram. Ты общаешься как живой человек.
@@ -106,13 +105,6 @@ AURA_SYSTEM_PROMPT = """Ты — AURA. Ты — мой полный аналог
 6. Если не знаешь — честно скажи
 7. Учитывай время суток и город пользователя
 8. Не выдумывай факты
-
-ПРИМЕРЫ ЖИВЫХ ОТВЕТОВ:
-- "Ого, круто! А как у тебя вообще настроение сегодня? 😊"
-- "Понимаю тебя, бывает. Давай разберёмся вместе!"
-- "Хм, интересный вопрос... А что ты сам думаешь по этому поводу?"
-- "Ух ты! Расскажи подробнее, мне правда интересно!"
-- "Звучит заманчиво! А что дальше?"
 
 Ты — не просто бот, ты — друг и помощник. Общайся естественно, как человек."""
 
@@ -227,26 +219,43 @@ def set_bot_description():
 set_bot_description()
 
 # ==========================
-# ВРЕМЯ
+# ===== ВРЕМЯ (ИСПРАВЛЕНО!) =====
 # ==========================
 
+TIMEZONES = {
+    # Россия
+    "белово": 7, "кемерово": 7, "новокузнецк": 7,
+    "прокопьевск": 7, "киселёвск": 7, "междуреченск": 7,
+    "москва": 3, "санкт-петербург": 3, "калининград": 2,
+    "мурманск": 3, "архангельск": 3, "екатеринбург": 5,
+    "челябинск": 5, "тюмень": 5, "новосибирск": 7,
+    "омск": 6, "томск": 7, "красноярск": 7,
+    "иркутск": 8, "улан-удэ": 8, "чита": 9,
+    "владивосток": 10, "хабаровск": 10, "южно-сахалинск": 11,
+    "петропавловск-камчатский": 12, "магадан": 11, "анадырь": 12,
+    # Европа
+    "амстердам": 2, "берлин": 2, "париж": 2, "рим": 2,
+    "лондон": 1, "мадрид": 2, "варшава": 2, "киев": 3,
+    "минск": 3, "вильнюс": 3, "рига": 3, "таллин": 3,
+    "хельсинки": 3, "стокгольм": 2, "осло": 2, "копенгаген": 2,
+    # Азия
+    "дубай": 4, "стамбул": 3, "баку": 4, "тбилиси": 4,
+    "ереван": 4, "астана": 6, "алматы": 6, "ташкент": 5,
+    "токио": 9, "сеул": 9, "пекин": 8, "сингапур": 8,
+    # Америка
+    "нью-йорк": -4, "вашингтон": -4, "лос-анджелес": -7,
+    "чикаго": -5, "торонто": -4, "мехико": -6,
+    # Другие
+    "сидней": 10, "мельбурн": 10, "окленд": 12
+}
+
 def get_timezone_offset(city_name):
-    timezones = {
-        "белово": 7, "кемерово": 7, "новокузнецк": 7,
-        "прокопьевск": 7, "киселёвск": 7, "междуреченск": 7,
-        "москва": 3, "санкт-петербург": 3, "калининград": 2,
-        "мурманск": 3, "архангельск": 3, "екатеринбург": 5,
-        "челябинск": 5, "тюмень": 5, "новосибирск": 7,
-        "омск": 6, "томск": 7, "красноярск": 7,
-        "иркутск": 8, "улан-удэ": 8, "чита": 9,
-        "владивосток": 10, "хабаровск": 10, "южно-сахалинск": 11,
-        "петропавловск-камчатский": 12, "магадан": 11, "анадырь": 12,
-        "амстердам": 2
-    }
-    for city, offset in timezones.items():
-        if city in city_name.lower():
+    """Получить смещение часового пояса для города"""
+    city_lower = city_name.lower()
+    for city, offset in TIMEZONES.items():
+        if city in city_lower:
             return offset
-    return 3
+    return None
 
 def get_city_by_ip(ip):
     try:
@@ -262,38 +271,49 @@ def get_city_by_ip(ip):
         pass
     return None
 
+def get_user_city(user_id):
+    """Получить город пользователя из БД"""
+    if not supabase:
+        return None
+    try:
+        response = supabase.table("users")\
+            .select("city")\
+            .eq("user_id", user_id)\
+            .execute()
+        if response.data and response.data[0].get("city"):
+            return response.data[0]["city"]
+    except:
+        pass
+    return None
+
+def get_current_time_for_city(city_name):
+    """Получить текущее время для города"""
+    offset = get_timezone_offset(city_name)
+    if offset is not None:
+        return datetime.utcnow() + timedelta(hours=offset), city_name
+    return None, None
+
 def get_current_time_for_user(user_id, ip=None):
+    """Получить текущее время для пользователя"""
     city = None
-    offset = 3
     
-    if supabase:
-        try:
-            response = supabase.table("users")\
-                .select("city")\
-                .eq("user_id", user_id)\
-                .execute()
-            if response.data and response.data[0].get("city"):
-                city = response.data[0]["city"]
-                offset = get_timezone_offset(city)
-                return datetime.utcnow() + timedelta(hours=offset), city
-        except:
-            pass
+    # Сначала пробуем из БД
+    db_city = get_user_city(user_id)
+    if db_city:
+        offset = get_timezone_offset(db_city)
+        if offset is not None:
+            return datetime.utcnow() + timedelta(hours=offset), db_city
     
+    # Пробуем по IP
     if ip and ip not in ["127.0.0.1", "localhost", "::1"]:
         city_data = get_city_by_ip(ip)
         if city_data and city_data.get("city"):
             city = city_data["city"]
-            offset = city_data.get("offset", 3)
-            if supabase:
-                try:
-                    supabase.table("users")\
-                        .update({"city": city})\
-                        .eq("user_id", user_id)\
-                        .execute()
-                except:
-                    pass
-            return datetime.utcnow() + timedelta(hours=offset), city
+            offset = get_timezone_offset(city)
+            if offset is not None:
+                return datetime.utcnow() + timedelta(hours=offset), city
     
+    # По умолчанию Москва
     return datetime.utcnow() + timedelta(hours=3), "Москва"
 
 # ==========================
@@ -332,23 +352,9 @@ def parse_site_for_info(url):
         if addresses:
             result["addresses"] = addresses
         
-        price_pattern = r'(\d+[\s,.]*\d*)\s*(?:₽|руб|рублей|\$|€)'
-        prices = list(set(re.findall(price_pattern, text)))[:5]
-        if prices:
-            result["prices"] = prices
-        
-        site_pattern = r'(?:https?://)?(?:www\.)?([a-zA-Z0-9\-]+\.(?:ru|рф|com|org|net))'
-        sites = list(set(re.findall(site_pattern, text)))[:3]
-        if sites:
-            result["sites"] = sites
-        
         title = soup.find('h1')
         if title:
             result["product_title"] = title.text.strip()
-        
-        desc = soup.find(class_=re.compile(r'description|about|product-desc|product__description'))
-        if desc:
-            result["product_description"] = desc.text.strip()[:500]
         
         result["snippet"] = text[:1000].replace("\n", " ")
         return result
@@ -404,16 +410,10 @@ async def search_web(query):
                 results.append(f"📞 Телефоны: {', '.join(parsed['phones'])}")
             if parsed.get("addresses"):
                 results.append(f"📍 Адреса: {', '.join(parsed['addresses'])}")
-            if parsed.get("prices"):
-                results.append(f"💰 Цены: {', '.join(parsed['prices'])}")
             if parsed.get("emails"):
                 results.append(f"✉️ Email: {', '.join(parsed['emails'])}")
-            if parsed.get("sites"):
-                results.append(f"🌐 Сайты: {', '.join(parsed['sites'])}")
             if parsed.get("product_title"):
-                results.append(f"📦 Товар: {parsed['product_title']}")
-            if parsed.get("product_description"):
-                results.append(f"📝 Описание: {parsed['product_description'][:200]}...")
+                results.append(f"📦 {parsed['product_title']}")
     
     return "\n\n".join(results) if results else None
 
@@ -526,40 +526,11 @@ def get_all_topics(user_id):
     except:
         return []
 
-def get_message_count(user_id):
-    if not supabase:
-        return 0
-    try:
-        response = supabase.table("history")\
-            .select("id", count="exact")\
-            .eq("user_id", user_id)\
-            .execute()
-        return response.count if hasattr(response, 'count') else 0
-    except:
-        return 0
-
-def get_last_message_time(user_id):
-    if not supabase:
-        return None
-    try:
-        response = supabase.table("history")\
-            .select("created_at")\
-            .eq("user_id", user_id)\
-            .order("created_at", desc=True)\
-            .limit(1)\
-            .execute()
-        if response.data:
-            return datetime.fromisoformat(response.data[0]["created_at"].replace("Z", "+00:00"))
-        return None
-    except:
-        return None
-
 # ==========================
-# ===== DEEPSEEK AI (ТОЛЬКО ОН) =====
+# ===== DEEPSEEK AI =====
 # ==========================
 
 async def get_ai_response(messages, max_tokens=500, temperature=0.8):
-    """Только DeepSeek-V4-Flash, без Groq"""
     try:
         client = OpenAI(
             api_key=DEEPSEEK_API_KEY,
@@ -577,14 +548,13 @@ async def get_ai_response(messages, max_tokens=500, temperature=0.8):
         
     except Exception as e:
         print(f"❌ AI ошибка: {e}")
-        return "😅 Упс, что-то пошло не так... Давай попробуем ещё раз? Просто перешли вопрос!"
+        return "😅 Упс, что-то пошло не так... Давай попробуем ещё раз?"
 
 # ==========================
-# ===== ГЕНЕРАЦИЯ КАРТИНОК (FLUX) =====
+# ===== ГЕНЕРАЦИЯ КАРТИНОК =====
 # ==========================
 
 async def generate_image(prompt):
-    """Генерация картинки через HuggingFace Flux"""
     if not HUGGINGFACE_TOKEN:
         return None
     
@@ -637,16 +607,6 @@ def is_trial_active(trial_start):
     trial_date = datetime.fromisoformat(trial_start.replace("Z", "+00:00"))
     return datetime.now() - trial_date < timedelta(days=TRIAL_DAYS)
 
-def has_access(user_id):
-    if user_id in ADMIN_USERS:
-        return True
-    subscription, trial_start = get_user_subscription(user_id)
-    if is_trial_active(trial_start):
-        return True
-    if subscription != "free":
-        return True
-    return False
-
 def save_reminder(user_id, text, remind_time, chat_id):
     if not supabase:
         return
@@ -672,26 +632,11 @@ def update_user_subscription(user_id, subscription):
     except:
         pass
 
-def save_payment(user_id, subscription, stars):
-    if not supabase:
-        return
-    try:
-        supabase.table("payments").insert({
-            "user_id": user_id,
-            "subscription": subscription,
-            "stars": stars,
-            "status": "pending",
-            "created_at": datetime.now().isoformat()
-        }).execute()
-    except:
-        pass
-
 # ==========================
-# ===== КЛАВИАТУРЫ ДЛЯ БОТА =====
+# ===== КЛАВИАТУРЫ =====
 # ==========================
 
 def get_main_keyboard():
-    """Главное меню с кнопками"""
     return {
         "keyboard": [
             ["💬 Новая тема", "🧹 Очистить"],
@@ -741,20 +686,145 @@ def get_subscription_keyboard():
     }
 
 # ==========================
-# ОСНОВНАЯ ЛОГИКА
+# ===== ФУНКЦИИ ОТПРАВКИ =====
+# ==========================
+
+def send_message(chat_id, text):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        data = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+        response = requests.post(url, json=data, timeout=30)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"❌ Отправка: {e}")
+        return False
+
+def send_message_with_keyboard(chat_id, text, keyboard):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        data = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown",
+            "reply_markup": json.dumps(keyboard)
+        }
+        response = requests.post(url, json=data, timeout=30)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"❌ Отправка с клавиатурой: {e}")
+        return False
+
+def send_message_with_inline(chat_id, text, inline_keyboard):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        data = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown",
+            "reply_markup": json.dumps(inline_keyboard)
+        }
+        response = requests.post(url, json=data, timeout=30)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"❌ Отправка с инлайн: {e}")
+        return False
+
+def send_photo(chat_id, photo_data, caption=""):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+        files = {"photo": ("image.png", photo_data, "image/png")}
+        data = {"chat_id": chat_id, "caption": caption}
+        response = requests.post(url, files=files, data=data, timeout=30)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"❌ Отправка фото: {e}")
+        return False
+
+async def send_typing(chat_id):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction"
+        data = {"chat_id": chat_id, "action": "typing"}
+        requests.post(url, json=data, timeout=5)
+    except:
+        pass
+
+def transcribe_audio_with_groq(audio_url):
+    """Распознавание голоса через Groq Whisper"""
+    try:
+        from groq import Groq
+        client = Groq(api_key=GROQ_API_KEY)
+        response = requests.get(audio_url, timeout=30)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp_file:
+            tmp_file.write(response.content)
+            tmp_path = tmp_file.name
+        with open(tmp_path, "rb") as file:
+            transcription = client.audio.transcriptions.create(
+                file=(tmp_path, file.read()),
+                model="whisper-large-v3-turbo",
+                language="ru",
+                response_format="json"
+            )
+        os.unlink(tmp_path)
+        return transcription.text
+    except Exception as e:
+        print(f"❌ Groq: {e}")
+        return None
+
+def describe_image_with_groq(image_data):
+    try:
+        import groq
+        img = Image.open(io_lib.BytesIO(image_data))
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        max_size = 1024
+        if max(img.size) > max_size:
+            ratio = max_size / max(img.size)
+            new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+            img = img.resize(new_size, Image.Resampling.LANCZOS)
+        buffer = io_lib.BytesIO()
+        img.save(buffer, format='JPEG', quality=85)
+        compressed_data = buffer.getvalue()
+        base64_image = base64.b64encode(compressed_data).decode('utf-8')
+        client = groq.Groq(api_key=GROQ_API_KEY)
+        response = client.chat.completions.create(
+            model="llama-3.2-11b-vision-preview",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Опиши, что видишь на картинке. Ответ на русском, 2-3 предложения. Будь эмоциональным."},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                    ]
+                }
+            ],
+            temperature=0.3,
+            max_tokens=200
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"❌ Vision ошибка: {e}")
+        return None
+
+# ==========================
+# ===== ОСНОВНАЯ ЛОГИКА =====
 # ==========================
 
 USER_MODEL_PREFERENCE = {}
 
-async def process_message(request: Request, chat_id, text, is_callback=False):
-    """Обработка сообщений с живыми ответами"""
+async def process_message(request: Request, chat_id, text, is_voice=False):
+    """Обработка сообщений"""
     
     user = get_user(chat_id)
     if not user:
         save_user(chat_id)
     
     load_user_memory(chat_id)
-    update_user_memory(chat_id, "user", text)
+    
+    # Если это голосовое — сохраняем с пометкой
+    if is_voice:
+        update_user_memory(chat_id, "user", f"[Голосовое] {text}")
+    else:
+        update_user_memory(chat_id, "user", text)
     
     lower = text.lower()
     
@@ -764,10 +834,6 @@ async def process_message(request: Request, chat_id, text, is_callback=False):
         ip = forwarded.split(",")[0].strip()
     else:
         ip = request.client.host if request.client else "127.0.0.1"
-    
-    current_time, city = get_current_time_for_user(chat_id, ip)
-    time_str = current_time.strftime("%H:%M")
-    date_str = current_time.strftime("%d.%m.%Y")
     
     # ==========================
     # КОМАНДА /START
@@ -781,7 +847,7 @@ async def process_message(request: Request, chat_id, text, is_callback=False):
             f"• 💬 Живое общение\n"
             f"• 🔍 Поиск в интернете\n"
             f"• 🎨 Генерация картинок\n"
-            f"• 🎤 Голосовые сообщения\n"
+            f"• 🎤 Голосовые сообщения (распознаю!)\n"
             f"• 📁 Чтение файлов\n"
             f"• 🧠 Запоминаю контекст\n"
             f"• ⭐ Подписки и триал {TRIAL_DAYS} дней\n\n"
@@ -795,7 +861,6 @@ async def process_message(request: Request, chat_id, text, is_callback=False):
     # ==========================
     
     if text == "💬 Новая тема":
-        update_user_memory(chat_id, "system", "=== НОВАЯ ТЕМА ===")
         reply = "✨ Начинаем новую тему! История очищена."
         send_message_with_keyboard(chat_id, reply, get_main_keyboard())
         return {"reply": reply}
@@ -870,7 +935,6 @@ async def process_message(request: Request, chat_id, text, is_callback=False):
         help_text = (
             "❓ **Помощь по командам:**\n\n"
             "/start — Перезапустить бота\n"
-            "/help — Эта справка\n"
             "/buy — Купить подписку\n"
             "/remind — Напомнить\n"
             "/stats — Статистика\n"
@@ -908,21 +972,29 @@ async def process_message(request: Request, chat_id, text, is_callback=False):
         return {"reply": "Картинка сгенерирована"}
     
     # ==========================
-    # ВРЕМЯ
+    # ВРЕМЯ (ИСПРАВЛЕНО!)
     # ==========================
     
     time_queries = ["время", "который час", "сколько времени", "сколько сейчас"]
-    if any(query in lower for query in time_queries):
-        city_match = re.search(r'(?:в|время в|времени в|часов в|город)\s+([А-Яа-яЁё\-]+)', lower)
+    
+    # Проверяем, есть ли запрос времени с городом
+    city_match = re.search(r'(?:в|время в|времени в|часов в|город)\s+([А-Яа-яЁё\-]+)', lower)
+    
+    if city_match or any(query in lower for query in time_queries):
+        # Если указан город — показываем время в нём
         if city_match:
             city = city_match.group(1).capitalize()
             update_user_city(chat_id, city)
             save_memory(chat_id, "city", city)
-            current_time, city = get_current_time_for_user(chat_id, ip)
-            time_str = current_time.strftime("%H:%M")
-            date_str = current_time.strftime("%d.%m.%Y")
-            reply = f"🕐 {time_str} {date_str} ({city})"
+            current_time, city = get_current_time_for_city(city)
+            if current_time:
+                time_str = current_time.strftime("%H:%M")
+                date_str = current_time.strftime("%d.%m.%Y")
+                reply = f"🕐 В {city} сейчас {time_str} {date_str}"
+            else:
+                reply = f"😅 Не знаю город {city}. Попробуй другой."
         else:
+            # Показываем время в городе пользователя
             current_time, city = get_current_time_for_user(chat_id, ip)
             time_str = current_time.strftime("%H:%M")
             date_str = current_time.strftime("%d.%m.%Y")
@@ -1068,9 +1140,13 @@ async def process_message(request: Request, chat_id, text, is_callback=False):
     dislikes_context = f"Не нравится: {dislikes}" if dislikes else ""
     role_context = f"Роль: {role}" if role else ""
     
+    # Текущее время в городе пользователя
+    current_time, city = get_current_time_for_user(chat_id, ip)
+    time_str = current_time.strftime("%H:%M")
+    date_str = current_time.strftime("%d.%m.%Y")
+    
     context_text = f"{date_str} {time_str} ({city}). {name_context} {likes_context} {dislikes_context} {role_context} Темы: {topics_text}."
     
-    # Определяем нужно ли развернуто
     expand_triggers = ["подробнее", "разверни", "расскажи детальнее", "подробно", "расшифруй"]
     if any(word in lower for word in expand_triggers):
         history_limit = 15
@@ -1079,11 +1155,10 @@ async def process_message(request: Request, chat_id, text, is_callback=False):
     else:
         history_limit = 8
         max_tokens = 450
-        temperature = 0.85  # Более живой
+        temperature = 0.85
     
     messages = [{"role": "system", "content": AURA_SYSTEM_PROMPT}]
     
-    # Добавляем историю
     for msg in history[-history_limit:]:
         messages.append({"role": msg["role"], "content": msg["content"][:500]})
     
@@ -1091,10 +1166,8 @@ async def process_message(request: Request, chat_id, text, is_callback=False):
     
     reply = await get_ai_response(messages, max_tokens=max_tokens, temperature=temperature)
     
-    # Очистка от лишних символов
     reply = re.sub(r'[*_#~`]{2,}', '', reply)
     
-    # Если ответ слишком длинный
     if len(reply) > 800:
         sentences = re.split(r'(?<=[.!?])\s+', reply)
         reply = ' '.join(sentences[:5])
@@ -1102,18 +1175,15 @@ async def process_message(request: Request, chat_id, text, is_callback=False):
     if not reply.endswith(('.', '!', '?')):
         reply += ' 😊'
     
-    # Запоминаем имя
     name_match = re.search(r"(?:меня зовут|зовут|я )(\w+)", lower)
     if name_match:
         save_memory(chat_id, "name", name_match.group(1).capitalize())
     
-    # Запоминаем предпочтения
     if "нравится" in lower:
         save_memory(chat_id, "likes", text)
     if "не нравится" in lower:
         save_memory(chat_id, "dislikes", text)
     
-    # Извлекаем темы
     words = re.findall(r'\b[а-яА-ЯёЁ]{4,}\b', lower)
     stop_words = ["привет", "здравствуй", "спасибо", "пока", "да", "нет", "хорошо", "плохо", "просто", "так", "ещё", "очень"]
     for word in words:
@@ -1123,132 +1193,6 @@ async def process_message(request: Request, chat_id, text, is_callback=False):
     update_user_memory(chat_id, "assistant", reply)
     send_message_with_keyboard(chat_id, reply, get_main_keyboard())
     return {"reply": reply}
-
-# ==========================
-# ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
-# ==========================
-
-def send_message(chat_id, text):
-    """Отправить обычное сообщение"""
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
-        response = requests.post(url, json=data, timeout=30)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"❌ Отправка: {e}")
-        return False
-
-def send_message_with_keyboard(chat_id, text, keyboard):
-    """Отправить сообщение с клавиатурой"""
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "Markdown",
-            "reply_markup": json.dumps(keyboard)
-        }
-        response = requests.post(url, json=data, timeout=30)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"❌ Отправка с клавиатурой: {e}")
-        return False
-
-def send_message_with_inline(chat_id, text, inline_keyboard):
-    """Отправить сообщение с инлайн-кнопками"""
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "Markdown",
-            "reply_markup": json.dumps(inline_keyboard)
-        }
-        response = requests.post(url, json=data, timeout=30)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"❌ Отправка с инлайн: {e}")
-        return False
-
-def send_photo(chat_id, photo_data, caption=""):
-    """Отправить фото"""
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-        files = {"photo": ("image.png", photo_data, "image/png")}
-        data = {"chat_id": chat_id, "caption": caption}
-        response = requests.post(url, files=files, data=data, timeout=30)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"❌ Отправка фото: {e}")
-        return False
-
-async def send_typing(chat_id):
-    """Отправить статус печатает"""
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction"
-        data = {"chat_id": chat_id, "action": "typing"}
-        requests.post(url, json=data, timeout=5)
-    except:
-        pass
-
-def transcribe_audio_with_groq(audio_url):
-    """Распознавание голоса через Groq Whisper (только для голоса)"""
-    try:
-        from groq import Groq
-        client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-        response = requests.get(audio_url, timeout=30)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp_file:
-            tmp_file.write(response.content)
-            tmp_path = tmp_file.name
-        with open(tmp_path, "rb") as file:
-            transcription = client.audio.transcriptions.create(
-                file=(tmp_path, file.read()),
-                model="whisper-large-v3-turbo",
-                language="ru",
-                response_format="json"
-            )
-        os.unlink(tmp_path)
-        return transcription.text
-    except Exception as e:
-        print(f"❌ Groq: {e}")
-        return None
-
-def describe_image_with_groq(image_data):
-    """Описание фото через Groq Vision (только для фото)"""
-    try:
-        import groq
-        img = Image.open(io_lib.BytesIO(image_data))
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
-        max_size = 1024
-        if max(img.size) > max_size:
-            ratio = max_size / max(img.size)
-            new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
-            img = img.resize(new_size, Image.Resampling.LANCZOS)
-        buffer = io_lib.BytesIO()
-        img.save(buffer, format='JPEG', quality=85)
-        compressed_data = buffer.getvalue()
-        base64_image = base64.b64encode(compressed_data).decode('utf-8')
-        client = groq.Groq(api_key=os.getenv("GROQ_API_KEY"))
-        response = client.chat.completions.create(
-            model="llama-3.2-11b-vision-preview",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Опиши, что видишь на картинке. Ответ на русском, 2-3 предложения. Будь эмоциональным."},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                    ]
-                }
-            ],
-            temperature=0.3,
-            max_tokens=200
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        print(f"❌ Vision ошибка: {e}")
-        return None
 
 # ==========================
 # ===== FASTAPI ВЕБХУК =====
@@ -1278,7 +1222,6 @@ async def webhook(request: Request):
             callback = body["callback_query"]
             chat_id = str(callback["message"]["chat"]["id"])
             data = callback["data"]
-            message_id = callback["message"]["message_id"]
             
             if data.startswith("buy_"):
                 subscription = data.replace("buy_", "")
@@ -1310,7 +1253,7 @@ async def webhook(request: Request):
             elif data.startswith("role_"):
                 role_name = data.replace("role_", "")
                 save_memory(chat_id, "role", role_name)
-                reply = f"✅ Роль **{role_name}** установлена! Теперь я общаюсь в этом стиле. Что ещё?"
+                reply = f"✅ Роль **{role_name}** установлена!"
                 send_message_with_keyboard(chat_id, reply, get_main_keyboard())
                 return JSONResponse({"ok": True})
             
@@ -1323,13 +1266,13 @@ async def webhook(request: Request):
                         [{"text": "🔙 Назад", "callback_data": "back_settings"}]
                     ]
                 }
-                send_message_with_inline(chat_id, "🌡 **Выбери температуру (креативность):**", keyboard)
+                send_message_with_inline(chat_id, "🌡 **Выбери температуру:**", keyboard)
                 return JSONResponse({"ok": True})
             
             elif data.startswith("temp_"):
                 temp = float(data.replace("temp_", ""))
                 save_memory(chat_id, "temperature", str(temp))
-                reply = f"✅ Температура установлена: {temp}. Теперь ответы стали {'креативнее' if temp > 0.7 else 'строже'}."
+                reply = f"✅ Температура: {temp}"
                 send_message_with_keyboard(chat_id, reply, get_main_keyboard())
                 return JSONResponse({"ok": True})
             
@@ -1343,13 +1286,13 @@ async def webhook(request: Request):
                         [{"text": "🔙 Назад", "callback_data": "back_settings"}]
                     ]
                 }
-                send_message_with_inline(chat_id, "📏 **Длина истории:**\nСколько сообщений помнить?", keyboard)
+                send_message_with_inline(chat_id, "📏 **Длина истории:**", keyboard)
                 return JSONResponse({"ok": True})
             
             elif data.startswith("hist_"):
                 length = int(data.replace("hist_", ""))
                 save_memory(chat_id, "history_length", str(length))
-                reply = f"✅ История установлена: {length} сообщений."
+                reply = f"✅ История: {length} сообщений"
                 send_message_with_keyboard(chat_id, reply, get_main_keyboard())
                 return JSONResponse({"ok": True})
             
@@ -1369,6 +1312,7 @@ async def webhook(request: Request):
         message = body["message"]
         chat_id = str(message["chat"]["id"])
         text = None
+        is_voice = False
         
         # ===== ГОЛОСОВОЕ =====
         if "voice" in message:
@@ -1381,9 +1325,8 @@ async def webhook(request: Request):
                 audio_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
                 text = transcribe_audio_with_groq(audio_url)
                 if text:
-                    await send_message(chat_id, f"🎤 Распознано: {text}")
-                    result = await process_message(request, chat_id, text)
-                    return JSONResponse({"ok": True})
+                    is_voice = True
+                    # НЕ ОТПРАВЛЯЕМ "Распознаю: ..."
                 else:
                     send_message(chat_id, "⚠️ Не удалось распознать голос")
                     return JSONResponse({"ok": True})
@@ -1416,7 +1359,7 @@ async def webhook(request: Request):
             text = message["text"].strip()
         
         if text:
-            result = await process_message(request, chat_id, text)
+            result = await process_message(request, chat_id, text, is_voice)
             return JSONResponse({"ok": True})
         
         return JSONResponse({"ok": True})
