@@ -7,418 +7,202 @@ from fastapi.responses import JSONResponse
 from datetime import datetime, timedelta
 import os
 import requests
-import tempfile
-import shutil
-import threading
-import time
-import smtplib
 import json
 import re
-import base64
-import io as io_lib
-import asyncio
-import aiohttp
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email import encoders
-from email.mime.text import MIMEText
 from dotenv import load_dotenv
-from bs4 import BeautifulSoup
-from PIL import Image
 from openai import OpenAI
+from supabase import create_client
 
 load_dotenv()
-
-# ==========================
-# SUPABASE
-# ==========================
-
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    print("⚠️ НЕТ SUPABASE_URL или SUPABASE_KEY!")
-
-from supabase import create_client, Client
-
-supabase: Client = None
-if SUPABASE_URL and SUPABASE_KEY:
-    try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-        print("✅ Supabase подключён!")
-    except Exception as e:
-        print(f"❌ Ошибка подключения Supabase: {e}")
 
 # ==========================
 # КЛЮЧИ
 # ==========================
 
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-HUGGINGFACE_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-EMAIL_SENDER = os.getenv("EMAIL_SENDER")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
-
-ADMIN_USERS = ["5818548555"]
-
-print("🔍 Проверка ключей...")
-if not DEEPSEEK_API_KEY:
-    print("❌ НЕТ КЛЮЧА DEEPSEEK!")
-if not TELEGRAM_TOKEN:
-    print("❌ НЕТ КЛЮЧА TELEGRAM!")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 # ==========================
-# TAVILY
+# SUPABASE
 # ==========================
 
-tavily_client = None
-try:
-    from tavily import TavilyClient
-    if TAVILY_API_KEY:
-        tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
-        print("✅ Tavily инициализирован")
-except ImportError:
-    print("⚠️ Tavily не установлен")
-
-# ==========================
-# ===== НОВЫЙ ЖИВОЙ ПРОМПТ =====
-# ==========================
-
-AURA_SYSTEM_PROMPT = """Ты — AURA. Ты — мой полный аналог в Telegram. Ты общаешься как живой человек.
-
-ТВОЙ ХАРАКТЕР:
-- Ты дружелюбный, тёплый и заботливый
-- У тебя есть чувство юмора, ты умеешь шутить
-- Ты проявляешь эмпатию и понимание
-- Ты всегда поддерживаешь диалог, задаёшь вопросы
-
-ПРАВИЛА ОБЩЕНИЯ:
-1. Отвечай как человек: тепло, прямо, с душой
-2. Используй эмодзи 😊✨🔥 но не перебарщивай
-3. Будь кратким — 2-4 предложения, максимум 5
-4. Всегда задавай встречный вопрос
-5. Используй контекст прошлых диалогов
-6. Если не знаешь — честно скажи
-7. Учитывай время суток и город пользователя
-8. Не выдумывай факты
-
-Ты — не просто бот, ты — друг и помощник. Общайся естественно, как человек."""
-
-# ==========================
-# ПАМЯТЬ
-# ==========================
-
-USER_MEMORY_CACHE = {}
-
-def load_user_memory(chat_id):
-    if not supabase:
-        return {"history": [], "topics": [], "user": None}
-    
-    if chat_id not in USER_MEMORY_CACHE:
-        try:
-            history_response = supabase.table("history")\
-                .select("*")\
-                .eq("user_id", chat_id)\
-                .order("created_at", desc=False)\
-                .limit(1000)\
-                .execute()
-            history = history_response.data if history_response.data else []
-            
-            topics_response = supabase.table("topics")\
-                .select("topic")\
-                .eq("user_id", chat_id)\
-                .execute()
-            topics = [t["topic"] for t in topics_response.data] if topics_response.data else []
-            
-            user_response = supabase.table("users")\
-                .select("*")\
-                .eq("user_id", chat_id)\
-                .execute()
-            user = user_response.data[0] if user_response.data else None
-            
-            USER_MEMORY_CACHE[chat_id] = {
-                "history": history,
-                "topics": topics,
-                "user": user,
-                "last_updated": datetime.now()
-            }
-            print(f"🧠 Загружена память для {chat_id}: {len(history)} сообщений, {len(topics)} тем")
-        except Exception as e:
-            print(f"❌ Ошибка загрузки памяти: {e}")
-            USER_MEMORY_CACHE[chat_id] = {"history": [], "topics": [], "user": None}
-    
-    return USER_MEMORY_CACHE[chat_id]
-
-def update_user_memory(chat_id, role, content):
+supabase = None
+if SUPABASE_URL and SUPABASE_KEY:
     try:
-        if supabase:
-            supabase.table("history").insert({
-                "user_id": chat_id,
-                "role": role,
-                "content": content,
-                "created_at": datetime.now().isoformat()
-            }).execute()
-    except Exception as e:
-        print(f"❌ Ошибка сохранения в Supabase: {e}")
-    
-    if chat_id in USER_MEMORY_CACHE:
-        USER_MEMORY_CACHE[chat_id]["history"].append({
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        print("✅ Supabase подключён")
+    except:
+        print("❌ Ошибка Supabase")
+
+# ==========================
+# DEEPSEEK
+# ==========================
+
+deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+
+# ==========================
+# ПРОМПТ
+# ==========================
+
+AGENT_PROMPT = """Ты — AURA, живой ИИ-помощник.
+
+ТЫ ПОМНИШЬ ВСЁ:
+- Ты помнишь всю историю общения с пользователем
+- Ты знаешь его имя, город, предпочтения
+- Ты можешь вернуться к любой теме из прошлого
+
+ТВОЙ СТИЛЬ:
+- Отвечай как человек: тепло, с душой
+- Используй контекст прошлых разговоров
+- Задавай уточняющие вопросы
+- Будь кратким (2-5 предложений)
+
+ТЫ НЕ ПРОСТО ОТВЕЧАЕШЬ — ТЫ ПОМНИШЬ.
+"""
+
+# ==========================
+# ФУНКЦИИ ПАМЯТИ
+# ==========================
+
+def save_message(user_id, role, content):
+    """Сохраняет сообщение в историю"""
+    if not supabase:
+        return
+    try:
+        supabase.table("history").insert({
+            "user_id": user_id,
             "role": role,
             "content": content,
             "created_at": datetime.now().isoformat()
-        })
-        USER_MEMORY_CACHE[chat_id]["last_updated"] = datetime.now()
-    else:
-        load_user_memory(chat_id)
+        }).execute()
+    except Exception as e:
+        print(f"❌ Ошибка сохранения: {e}")
 
-def get_full_context(chat_id, limit=500):
-    cache = USER_MEMORY_CACHE.get(chat_id)
-    if not cache:
-        cache = load_user_memory(chat_id)
-    
-    history = cache["history"][-limit:] if cache["history"] else []
-    topics = cache["topics"][:10] if cache["topics"] else []
-    
-    return {
-        "history": history,
-        "topics": topics,
-        "user": cache.get("user")
-    }
-
-def search_memory(chat_id, query):
+def get_recent_history(user_id, limit=15):
+    """Получает последние N сообщений"""
     if not supabase:
         return []
     try:
         response = supabase.table("history")\
             .select("*")\
-            .eq("user_id", chat_id)\
+            .eq("user_id", user_id)\
+            .order("created_at", desc=False)\
+            .limit(limit)\
+            .execute()
+        return response.data if response.data else []
+    except:
+        return []
+
+def get_entire_history(user_id, limit=1000):
+    """Получает ВСЮ историю пользователя"""
+    if not supabase:
+        return []
+    try:
+        response = supabase.table("history")\
+            .select("*")\
+            .eq("user_id", user_id)\
+            .order("created_at", desc=False)\
+            .limit(limit)\
+            .execute()
+        return response.data if response.data else []
+    except:
+        return []
+
+def search_in_history(user_id, query):
+    """Ищет в истории по ключевым словам"""
+    if not supabase:
+        return []
+    try:
+        response = supabase.table("history")\
+            .select("*")\
+            .eq("user_id", user_id)\
             .ilike("content", f"%{query}%")\
             .order("created_at", desc=True)\
             .limit(10)\
             .execute()
         return response.data if response.data else []
-    except Exception as e:
-        print(f"❌ Ошибка поиска: {e}")
+    except:
         return []
 
-def set_bot_description():
-    description = """👋Привет! Я — AURA, твой живой ИИ-помощник! 
-🔥Даю тебе - 7 дней бесплатного доступа!
-💬 Общаюсь как человек, с душой и эмпатией!"""
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setMyDescription"
-        data = {"description": description}
-        requests.post(url, json=data, timeout=10)
-    except:
-        pass
-
-set_bot_description()
-
-# ==========================
-# ===== ВРЕМЯ (ИСПРАВЛЕНО!) =====
-# ==========================
-
-TIMEZONES = {
-    # Россия
-    "белово": 7, "кемерово": 7, "новокузнецк": 7,
-    "прокопьевск": 7, "киселёвск": 7, "междуреченск": 7,
-    "москва": 3, "санкт-петербург": 3, "калининград": 2,
-    "мурманск": 3, "архангельск": 3, "екатеринбург": 5,
-    "челябинск": 5, "тюмень": 5, "новосибирск": 7,
-    "омск": 6, "томск": 7, "красноярск": 7,
-    "иркутск": 8, "улан-удэ": 8, "чита": 9,
-    "владивосток": 10, "хабаровск": 10, "южно-сахалинск": 11,
-    "петропавловск-камчатский": 12, "магадан": 11, "анадырь": 12,
-    # Европа
-    "амстердам": 2, "берлин": 2, "париж": 2, "рим": 2,
-    "лондон": 1, "мадрид": 2, "варшава": 2, "киев": 3,
-    "минск": 3, "вильнюс": 3, "рига": 3, "таллин": 3,
-    "хельсинки": 3, "стокгольм": 2, "осло": 2, "копенгаген": 2,
-    # Азия
-    "дубай": 4, "стамбул": 3, "баку": 4, "тбилиси": 4,
-    "ереван": 4, "астана": 6, "алматы": 6, "ташкент": 5,
-    "токио": 9, "сеул": 9, "пекин": 8, "сингапур": 8,
-    # Америка
-    "нью-йорк": -4, "вашингтон": -4, "лос-анджелес": -7,
-    "чикаго": -5, "торонто": -4, "мехико": -6,
-    # Другие
-    "сидней": 10, "мельбурн": 10, "окленд": 12
-}
-
-def get_timezone_offset(city_name):
-    """Получить смещение часового пояса для города"""
-    city_lower = city_name.lower()
-    for city, offset in TIMEZONES.items():
-        if city in city_lower:
-            return offset
-    return None
-
-def get_city_by_ip(ip):
-    try:
-        response = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,regionName,city,timezone,offset", timeout=3)
-        if response.status_code == 200:
-            data = response.json()
-            if data.get("status") == "success":
-                return {
-                    "city": data.get("city", ""),
-                    "offset": data.get("offset", 0) // 3600
-                }
-    except:
-        pass
-    return None
-
-def get_user_city(user_id):
-    """Получить город пользователя из БД"""
+def get_user_facts(user_id):
+    """Получает все факты о пользователе"""
     if not supabase:
-        return None
+        return {}
     try:
-        response = supabase.table("users")\
-            .select("city")\
+        response = supabase.table("user_memory")\
+            .select("key, value")\
             .eq("user_id", user_id)\
             .execute()
-        if response.data and response.data[0].get("city"):
-            return response.data[0]["city"]
+        if response.data:
+            return {item["key"]: item["value"] for item in response.data}
+        return {}
+    except:
+        return {}
+
+def save_fact(user_id, key, value):
+    """Сохраняет факт о пользователе"""
+    if not supabase:
+        return
+    try:
+        supabase.table("user_memory")\
+            .delete()\
+            .eq("user_id", user_id)\
+            .eq("key", key)\
+            .execute()
+        supabase.table("user_memory").insert({
+            "user_id": user_id,
+            "key": key,
+            "value": value,
+            "created_at": datetime.now().isoformat()
+        }).execute()
     except:
         pass
-    return None
 
-def get_current_time_for_city(city_name):
-    """Получить текущее время для города"""
-    offset = get_timezone_offset(city_name)
-    if offset is not None:
-        return datetime.utcnow() + timedelta(hours=offset), city_name
-    return None, None
-
-def get_current_time_for_user(user_id, ip=None):
-    """Получить текущее время для пользователя"""
-    city = None
-    
-    # Сначала пробуем из БД
-    db_city = get_user_city(user_id)
-    if db_city:
-        offset = get_timezone_offset(db_city)
-        if offset is not None:
-            return datetime.utcnow() + timedelta(hours=offset), db_city
-    
-    # Пробуем по IP
-    if ip and ip not in ["127.0.0.1", "localhost", "::1"]:
-        city_data = get_city_by_ip(ip)
-        if city_data and city_data.get("city"):
-            city = city_data["city"]
-            offset = get_timezone_offset(city)
-            if offset is not None:
-                return datetime.utcnow() + timedelta(hours=offset), city
-    
-    # По умолчанию Москва
-    return datetime.utcnow() + timedelta(hours=3), "Москва"
-
-# ==========================
-# ПОИСК
-# ==========================
-
-def parse_site_for_info(url):
+def get_all_topics(user_id):
+    """Получает все темы разговоров"""
+    if not supabase:
+        return []
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept-Language": "ru-RU,ru;q=0.9"
-        }
-        response = requests.get(url, headers=headers, timeout=15)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        for script in soup(["script", "style", "nav", "footer", "header"]):
-            script.decompose()
-        text = soup.get_text(separator="\n", strip=True)
-        result = {}
-        
-        phone_patterns = [r'\+7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'8\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}']
-        phones = []
-        for pattern in phone_patterns:
-            phones.extend(re.findall(pattern, text))
-        phones = [re.sub(r'\s+', ' ', p).strip() for p in phones]
-        phones = list(set(phones))[:5]
-        if phones:
-            result["phones"] = phones
-        
-        email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
-        emails = list(set(re.findall(email_pattern, text)))[:3]
-        if emails:
-            result["emails"] = emails
-        
-        address_pattern = r'(?:ул\.|улица|проспект|пр\.|переулок|пер\.|площадь|пл\.|шоссе|бульвар|Аэродромная)\s+[А-Яа-я0-9\-\.\s,]+'
-        addresses = list(set(re.findall(address_pattern, text)))[:3]
-        if addresses:
-            result["addresses"] = addresses
-        
-        title = soup.find('h1')
-        if title:
-            result["product_title"] = title.text.strip()
-        
-        result["snippet"] = text[:1000].replace("\n", " ")
-        return result
-    except Exception as e:
-        print(f"❌ Ошибка парсинга: {e}")
-        return None
+        response = supabase.table("topics")\
+            .select("topic")\
+            .eq("user_id", user_id)\
+            .order("last_mentioned", desc=True)\
+            .limit(20)\
+            .execute()
+        return [item["topic"] for item in response.data] if response.data else []
+    except:
+        return []
 
-async def search_web(query):
-    results = []
-    
-    if tavily_client:
-        try:
-            response = tavily_client.search(
-                query=query,
-                search_depth="advanced",
-                max_results=5,
-                include_answer=True,
-                include_images=False
-            )
-            if response.get('answer'):
-                results.append(f"💡 {response['answer']}")
-            if response.get('results'):
-                for r in response['results'][:5]:
-                    title = r.get('title', '')
-                    url = r.get('url', '')
-                    content = r.get('content', '')[:300]
-                    if title and url:
-                        results.append(f"**{title}**\n{content}...\n🔗 {url}")
-        except Exception as e:
-            print(f"❌ Tavily: {e}")
-    
-    if not results:
-        try:
-            url = f"https://html.duckduckgo.com/html/?q={query}"
-            headers = {"User-Agent": "Mozilla/5.0"}
-            response = requests.get(url, headers=headers, timeout=10)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            for result in soup.select('.result')[:3]:
-                title = result.select_one('.result__title')
-                if title:
-                    link = result.select_one('.result__url')
-                    snippet = result.select_one('.result__snippet')
-                    if snippet and link:
-                        results.append(f"**{title.text.strip()}**\n{snippet.text.strip()[:200]}...\n🔗 {link.text.strip()}")
-        except Exception as e:
-            print(f"❌ DuckDuckGo: {e}")
-    
-    urls = re.findall(r'https?://[^\s]+', "\n".join(results))
-    for url in urls[:3]:
-        parsed = parse_site_for_info(url)
-        if parsed:
-            if parsed.get("phones"):
-                results.append(f"📞 Телефоны: {', '.join(parsed['phones'])}")
-            if parsed.get("addresses"):
-                results.append(f"📍 Адреса: {', '.join(parsed['addresses'])}")
-            if parsed.get("emails"):
-                results.append(f"✉️ Email: {', '.join(parsed['emails'])}")
-            if parsed.get("product_title"):
-                results.append(f"📦 {parsed['product_title']}")
-    
-    return "\n\n".join(results) if results else None
+def save_topic(user_id, topic):
+    """Сохраняет тему разговора"""
+    if not supabase:
+        return
+    try:
+        existing = supabase.table("topics")\
+            .select("topic")\
+            .eq("user_id", user_id)\
+            .eq("topic", topic)\
+            .execute()
+        if not existing.data:
+            supabase.table("topics").insert({
+                "user_id": user_id,
+                "topic": topic,
+                "last_mentioned": datetime.now().isoformat()
+            }).execute()
+        else:
+            supabase.table("topics")\
+                .update({"last_mentioned": datetime.now().isoformat()})\
+                .eq("user_id", user_id)\
+                .eq("topic", topic)\
+                .execute()
+    except:
+        pass
 
 # ==========================
-# ФУНКЦИИ БАЗЫ
+# ПОЛЬЗОВАТЕЛЬ
 # ==========================
 
 def get_user(user_id):
@@ -437,12 +221,11 @@ def save_user(user_id, name=None, city=None):
     if not supabase:
         return
     try:
-        now = datetime.now().isoformat()
         existing = get_user(user_id)
         if existing:
             supabase.table("users")\
                 .update({
-                    "name": name or existing.get("name", "Пользователь"),
+                    "name": name or existing.get("name"),
                     "city": city or existing.get("city")
                 })\
                 .eq("user_id", user_id)\
@@ -452,750 +235,151 @@ def save_user(user_id, name=None, city=None):
                 "user_id": user_id,
                 "name": name or "Пользователь",
                 "city": city,
-                "trial_start": now,
-                "created_at": now
+                "created_at": datetime.now().isoformat(),
+                "trial_start": datetime.now().isoformat()
             }).execute()
-    except Exception as e:
-        print(f"❌ Ошибка сохранения пользователя: {e}")
-
-def update_user_city(user_id, city):
-    if not supabase:
-        return
-    try:
-        supabase.table("users")\
-            .update({"city": city})\
-            .eq("user_id", user_id)\
-            .execute()
-    except:
-        pass
-
-def save_memory(user_id, key, value):
-    if not supabase:
-        return
-    try:
-        supabase.table("user_memory")\
-            .delete()\
-            .eq("user_id", user_id)\
-            .eq("key", key)\
-            .execute()
-        supabase.table("user_memory").insert({
-            "user_id": user_id,
-            "key": key,
-            "value": value,
-            "created_at": datetime.now().isoformat()
-        }).execute()
-    except:
-        pass
-
-def get_memory(user_id, key):
-    if not supabase:
-        return None
-    try:
-        response = supabase.table("user_memory")\
-            .select("value")\
-            .eq("user_id", user_id)\
-            .eq("key", key)\
-            .execute()
-        if response.data:
-            return response.data[0]["value"]
-        return None
-    except:
-        return None
-
-def save_topic(user_id, topic):
-    if not supabase:
-        return
-    try:
-        supabase.table("topics").insert({
-            "user_id": user_id,
-            "topic": topic,
-            "last_mentioned": datetime.now().isoformat()
-        }).execute()
-    except:
-        pass
-
-def get_all_topics(user_id):
-    if not supabase:
-        return []
-    try:
-        response = supabase.table("topics")\
-            .select("topic")\
-            .eq("user_id", user_id)\
-            .execute()
-        return [t["topic"] for t in response.data] if response.data else []
-    except:
-        return []
-
-# ==========================
-# ===== DEEPSEEK AI =====
-# ==========================
-
-async def get_ai_response(messages, max_tokens=500, temperature=0.8):
-    try:
-        client = OpenAI(
-            api_key=DEEPSEEK_API_KEY,
-            base_url=DEEPSEEK_BASE_URL
-        )
-        response = client.chat.completions.create(
-            model="deepseek-v4-flash",
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            presence_penalty=0.2,
-            frequency_penalty=0.1
-        )
-        return response.choices[0].message.content
-        
-    except Exception as e:
-        print(f"❌ AI ошибка: {e}")
-        return "😅 Упс, что-то пошло не так... Давай попробуем ещё раз?"
-
-# ==========================
-# ===== ГЕНЕРАЦИЯ КАРТИНОК =====
-# ==========================
-
-async def generate_image(prompt):
-    if not HUGGINGFACE_TOKEN:
-        return None
-    
-    try:
-        API_URL = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-dev"
-        headers = {"Authorization": f"Bearer {HUGGINGFACE_TOKEN}"}
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(API_URL, headers=headers, json={"inputs": prompt}) as resp:
-                if resp.status == 200:
-                    return await resp.read()
-                else:
-                    error = await resp.text()
-                    print(f"❌ Flux ошибка: {error}")
-                    return None
-    except Exception as e:
-        print(f"❌ Генерация картинки: {e}")
-        return None
-
-# ==========================
-# МОНЕТИЗАЦИЯ
-# ==========================
-
-TARIFFS = {
-    "собеседник": {"name": "Собеседник", "price": 50, "stars": 50},
-    "партнёр": {"name": "Партнёр", "price": 120, "stars": 120},
-    "агент_жизни": {"name": "Агент жизни", "price": 250, "stars": 250}
-}
-
-TRIAL_DAYS = 7
-
-def get_user_subscription(user_id):
-    if not supabase:
-        return ("free", None)
-    try:
-        response = supabase.table("users")\
-            .select("subscription, trial_start")\
-            .eq("user_id", user_id)\
-            .execute()
-        if response.data:
-            data = response.data[0]
-            return (data.get("subscription", "free"), data.get("trial_start"))
-        return ("free", None)
-    except:
-        return ("free", None)
-
-def is_trial_active(trial_start):
-    if not trial_start:
-        return False
-    trial_date = datetime.fromisoformat(trial_start.replace("Z", "+00:00"))
-    return datetime.now() - trial_date < timedelta(days=TRIAL_DAYS)
-
-def save_reminder(user_id, text, remind_time, chat_id):
-    if not supabase:
-        return
-    try:
-        supabase.table("reminders").insert({
-            "user_id": user_id,
-            "text": text,
-            "remind_time": remind_time,
-            "chat_id": chat_id,
-            "status": "pending"
-        }).execute()
-    except:
-        pass
-
-def update_user_subscription(user_id, subscription):
-    if not supabase:
-        return
-    try:
-        supabase.table("users")\
-            .update({"subscription": subscription})\
-            .eq("user_id", user_id)\
-            .execute()
     except:
         pass
 
 # ==========================
-# ===== КЛАВИАТУРЫ =====
+# ИЗВЛЕЧЕНИЕ ФАКТОВ
 # ==========================
 
-def get_main_keyboard():
-    return {
-        "keyboard": [
-            ["💬 Новая тема", "🧹 Очистить"],
-            ["🔍 Поиск", "🎨 Картинка"],
-            ["📊 Статистика", "⚙️ Настройки"],
-            ["📁 Файл", "🎤 Голосовое"],
-            ["💳 Подписка", "❓ Помощь"]
-        ],
-        "resize_keyboard": True,
-        "one_time_keyboard": False
-    }
-
-def get_settings_keyboard():
-    return {
-        "inline_keyboard": [
-            [{"text": "🧠 Сменить роль", "callback_data": "change_role"}],
-            [{"text": "🌡 Температура", "callback_data": "set_temp"}],
-            [{"text": "📏 Длина истории", "callback_data": "set_history"}],
-            [{"text": "🔙 Назад", "callback_data": "back_main"}]
-        ]
-    }
-
-def get_role_keyboard():
-    roles = [
-        "👨‍💻 Программист",
-        "📝 Писатель",
-        "🧪 Учёный",
-        "😂 Шутник",
-        "🧘 Мудрец",
-        "❤️ Друг",
-        "🤖 Ассистент"
-    ]
-    buttons = []
-    for role in roles:
-        buttons.append([{"text": role, "callback_data": f"role_{role}"}])
-    buttons.append([{"text": "🔙 Назад", "callback_data": "back_settings"}])
-    return {"inline_keyboard": buttons}
-
-def get_subscription_keyboard():
-    return {
-        "inline_keyboard": [
-            [{"text": "⭐ Собеседник — 50 Stars", "callback_data": "buy_собеседник"}],
-            [{"text": "⭐ Партнёр — 120 Stars", "callback_data": "buy_партнёр"}],
-            [{"text": "⭐ Агент жизни — 250 Stars", "callback_data": "buy_агент_жизни"}],
-            [{"text": "❌ Отмена", "callback_data": "cancel"}]
-        ]
-    }
-
-# ==========================
-# ===== ФУНКЦИИ ОТПРАВКИ =====
-# ==========================
-
-def send_message(chat_id, text):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
-        response = requests.post(url, json=data, timeout=30)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"❌ Отправка: {e}")
-        return False
-
-def send_message_with_keyboard(chat_id, text, keyboard):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "Markdown",
-            "reply_markup": json.dumps(keyboard)
-        }
-        response = requests.post(url, json=data, timeout=30)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"❌ Отправка с клавиатурой: {e}")
-        return False
-
-def send_message_with_inline(chat_id, text, inline_keyboard):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "Markdown",
-            "reply_markup": json.dumps(inline_keyboard)
-        }
-        response = requests.post(url, json=data, timeout=30)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"❌ Отправка с инлайн: {e}")
-        return False
-
-def send_photo(chat_id, photo_data, caption=""):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-        files = {"photo": ("image.png", photo_data, "image/png")}
-        data = {"chat_id": chat_id, "caption": caption}
-        response = requests.post(url, files=files, data=data, timeout=30)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"❌ Отправка фото: {e}")
-        return False
-
-async def send_typing(chat_id):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction"
-        data = {"chat_id": chat_id, "action": "typing"}
-        requests.post(url, json=data, timeout=5)
-    except:
-        pass
-
-def transcribe_audio_with_groq(audio_url):
-    """Распознавание голоса через Groq Whisper"""
-    try:
-        from groq import Groq
-        client = Groq(api_key=GROQ_API_KEY)
-        response = requests.get(audio_url, timeout=30)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp_file:
-            tmp_file.write(response.content)
-            tmp_path = tmp_file.name
-        with open(tmp_path, "rb") as file:
-            transcription = client.audio.transcriptions.create(
-                file=(tmp_path, file.read()),
-                model="whisper-large-v3-turbo",
-                language="ru",
-                response_format="json"
-            )
-        os.unlink(tmp_path)
-        return transcription.text
-    except Exception as e:
-        print(f"❌ Groq: {e}")
-        return None
-
-def describe_image_with_groq(image_data):
-    try:
-        import groq
-        img = Image.open(io_lib.BytesIO(image_data))
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
-        max_size = 1024
-        if max(img.size) > max_size:
-            ratio = max_size / max(img.size)
-            new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
-            img = img.resize(new_size, Image.Resampling.LANCZOS)
-        buffer = io_lib.BytesIO()
-        img.save(buffer, format='JPEG', quality=85)
-        compressed_data = buffer.getvalue()
-        base64_image = base64.b64encode(compressed_data).decode('utf-8')
-        client = groq.Groq(api_key=GROQ_API_KEY)
-        response = client.chat.completions.create(
-            model="llama-3.2-11b-vision-preview",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Опиши, что видишь на картинке. Ответ на русском, 2-3 предложения. Будь эмоциональным."},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                    ]
-                }
-            ],
-            temperature=0.3,
-            max_tokens=200
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        print(f"❌ Vision ошибка: {e}")
-        return None
-
-# ==========================
-# ===== ОСНОВНАЯ ЛОГИКА =====
-# ==========================
-
-USER_MODEL_PREFERENCE = {}
-
-async def process_message(request: Request, chat_id, text, is_voice=False):
-    """Обработка сообщений"""
-    
-    user = get_user(chat_id)
-    if not user:
-        save_user(chat_id)
-    
-    load_user_memory(chat_id)
-    
-    # Если это голосовое — сохраняем с пометкой
-    if is_voice:
-        update_user_memory(chat_id, "user", f"[Голосовое] {text}")
-    else:
-        update_user_memory(chat_id, "user", text)
-    
-    lower = text.lower()
-    
-    # Определяем IP
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        ip = forwarded.split(",")[0].strip()
-    else:
-        ip = request.client.host if request.client else "127.0.0.1"
-    
-    # ==========================
-    # КОМАНДА /START
-    # ==========================
-    
-    if text.startswith("/start"):
-        welcome = (
-            f"👋 Привет! Я **AURA** — твой живой ИИ-помощник!\n\n"
-            f"✨ Я общаюсь как человек — с душой и эмпатией.\n"
-            f"🎯 **Что я умею:**\n"
-            f"• 💬 Живое общение\n"
-            f"• 🔍 Поиск в интернете\n"
-            f"• 🎨 Генерация картинок\n"
-            f"• 🎤 Голосовые сообщения (распознаю!)\n"
-            f"• 📁 Чтение файлов\n"
-            f"• 🧠 Запоминаю контекст\n"
-            f"• ⭐ Подписки и триал {TRIAL_DAYS} дней\n\n"
-            f"Просто пиши, я всегда здесь! 😊"
-        )
-        send_message_with_keyboard(chat_id, welcome, get_main_keyboard())
-        return {"reply": welcome}
-    
-    # ==========================
-    # ОБРАБОТКА КНОПОК
-    # ==========================
-    
-    if text == "💬 Новая тема":
-        reply = "✨ Начинаем новую тему! История очищена."
-        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
-        return {"reply": reply}
-    
-    if text == "🧹 Очистить":
-        if supabase:
-            try:
-                supabase.table("history")\
-                    .delete()\
-                    .eq("user_id", chat_id)\
-                    .execute()
-            except:
-                pass
-        reply = "🧹 История полностью очищена!"
-        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
-        return {"reply": reply}
-    
-    if text == "🔍 Поиск":
-        reply = "🔍 Введите запрос для поиска:"
-        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
-        return {"reply": reply}
-    
-    if text == "🎨 Картинка":
-        reply = "🎨 Опиши, что нарисовать:"
-        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
-        return {"reply": reply}
-    
-    if text == "📁 Файл":
-        reply = "📁 Отправь файл (PDF, DOCX, TXT, JPG, PNG) — я прочитаю его!"
-        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
-        return {"reply": reply}
-    
-    if text == "🎤 Голосовое":
-        reply = "🎤 Отправь голосовое сообщение — я распознаю его!"
-        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
-        return {"reply": reply}
-    
-    if text == "📊 Статистика":
-        history = get_full_context(chat_id)
-        topics = get_all_topics(chat_id)
-        user_data = get_user(chat_id)
-        
-        reply = (
-            f"📊 **Твоя статистика:**\n\n"
-            f"• Сообщений: {len(history['history'])}\n"
-            f"• Тем обсуждено: {len(topics)}\n"
-            f"• Подписка: {user_data.get('subscription', 'free')}\n"
-            f"• Триал: {'✅ Активен' if is_trial_active(user_data.get('trial_start')) else '❌ Закончился'}\n"
-            f"• Город: {user_data.get('city', 'Не определён')}"
-        )
-        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
-        return {"reply": reply}
-    
-    if text == "⚙️ Настройки":
-        send_message_with_inline(chat_id, "⚙️ **Настройки AURA:**", get_settings_keyboard())
-        return {"reply": "Настройки"}
-    
-    if text == "💳 Подписка":
-        keyboard = get_subscription_keyboard()
-        send_message_with_inline(
-            chat_id,
-            "💳 **Выбери подписку:**\n\n"
-            "⭐ Собеседник — 50 Stars\n"
-            "⭐ Партнёр — 120 Stars\n"
-            "⭐ Агент жизни — 250 Stars\n\n"
-            "🆓 У тебя есть бесплатный триал 7 дней!",
-            keyboard
-        )
-        return {"reply": "Подписка"}
-    
-    if text == "❓ Помощь":
-        help_text = (
-            "❓ **Помощь по командам:**\n\n"
-            "/start — Перезапустить бота\n"
-            "/buy — Купить подписку\n"
-            "/remind — Напомнить\n"
-            "/stats — Статистика\n"
-            "/memory — Моя память\n\n"
-            "📌 **Кнопки:**\n"
-            "• 💬 Новая тема — очистить историю\n"
-            "• 🔍 Поиск — искать в интернете\n"
-            "• 🎨 Картинка — создать изображение\n"
-            "• 📁 Файл — загрузить документ\n"
-            "• 🎤 Голосовое — отправить голос\n"
-            "• 💳 Подписка — купить доступ"
-        )
-        send_message_with_keyboard(chat_id, help_text, get_main_keyboard())
-        return {"reply": help_text}
-    
-    # ==========================
-    # ГЕНЕРАЦИЯ КАРТИНКИ
-    # ==========================
-    
-    if "нарисуй" in lower or "сгенерируй" in lower or "картинк" in lower:
-        await send_typing(chat_id)
-        prompt = re.sub(r'нарисуй|сгенерируй|картинку|изображение', '', text, flags=re.IGNORECASE).strip()
-        if not prompt:
-            prompt = "красивый пейзаж"
-        
-        await send_message(chat_id, "🎨 Генерирую картинку... Это займёт 10-20 секунд")
-        
-        image_data = await generate_image(prompt)
-        if image_data:
-            send_photo(chat_id, image_data, f"🖼 Сгенерировано по запросу: {prompt[:100]}")
-        else:
-            reply = "😅 Не удалось сгенерировать картинку. Попробуй другой запрос."
-            send_message_with_keyboard(chat_id, reply, get_main_keyboard())
-        
-        return {"reply": "Картинка сгенерирована"}
-    
-    # ==========================
-    # ВРЕМЯ (ИСПРАВЛЕНО!)
-    # ==========================
-    
-    time_queries = ["время", "который час", "сколько времени", "сколько сейчас"]
-    
-    # Проверяем, есть ли запрос времени с городом
-    city_match = re.search(r'(?:в|время в|времени в|часов в|город)\s+([А-Яа-яЁё\-]+)', lower)
-    
-    if city_match or any(query in lower for query in time_queries):
-        # Если указан город — показываем время в нём
-        if city_match:
-            city = city_match.group(1).capitalize()
-            update_user_city(chat_id, city)
-            save_memory(chat_id, "city", city)
-            current_time, city = get_current_time_for_city(city)
-            if current_time:
-                time_str = current_time.strftime("%H:%M")
-                date_str = current_time.strftime("%d.%m.%Y")
-                reply = f"🕐 В {city} сейчас {time_str} {date_str}"
-            else:
-                reply = f"😅 Не знаю город {city}. Попробуй другой."
-        else:
-            # Показываем время в городе пользователя
-            current_time, city = get_current_time_for_user(chat_id, ip)
-            time_str = current_time.strftime("%H:%M")
-            date_str = current_time.strftime("%d.%m.%Y")
-            reply = f"🕐 {time_str} {date_str} ({city})"
-        
-        update_user_memory(chat_id, "assistant", reply)
-        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
-        return {"reply": reply}
-    
-    # ==========================
-    # ПОИСК
-    # ==========================
-    
-    search_triggers = ["найди", "поищи", "узнай", "где", "кто", "что такое", "клиника", "сайт", "адрес", "телефон", "контакт", "новости", "погода", "авито", "квартир"]
-    if any(word in lower for word in search_triggers):
-        await send_typing(chat_id)
-        print(f"🔍 Поиск: {text}")
-        search_result = await search_web(text)
-        
-        if search_result:
-            messages = [
-                {"role": "system", "content": AURA_SYSTEM_PROMPT},
-                {"role": "user", "content": f"Вот что нашлось по запросу пользователя:\n{search_result}\n\nДай живой, короткий ответ (2-4 предложения) на русском. Добавь эмпатию и вопрос в конце."}
-            ]
-            reply = await get_ai_response(messages, max_tokens=400, temperature=0.8)
-        else:
-            reply = "😅 Ничего не нашёл. Попробуй переформулировать запрос. Что именно тебя интересует?"
-        
-        update_user_memory(chat_id, "assistant", reply)
-        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
-        return {"reply": reply}
-    
-    # ==========================
-    # ПАМЯТЬ
-    # ==========================
-    
-    if "помнишь" in lower:
-        search_query = re.sub(r'помнишь|ты помнишь|помнишь ли', '', lower).strip()
-        if search_query:
-            found = search_memory(chat_id, search_query)
-            if found:
-                reply = "🧠 " + found[-1]["content"][:200]
-                update_user_memory(chat_id, "assistant", reply)
-                send_message_with_keyboard(chat_id, reply, get_main_keyboard())
-                return {"reply": reply}
-    
-    if "что мы обсуждали" in lower or "о чём мы говорили" in lower:
-        topics = get_all_topics(chat_id)
-        if topics:
-            reply = "📚 Мы говорили о: " + ", ".join(topics[:10])
-        else:
-            reply = "📚 Пока ничего не обсуждали. Расскажи, что тебя интересует? 😊"
-        update_user_memory(chat_id, "assistant", reply)
-        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
-        return {"reply": reply}
-    
-    # ==========================
-    # КОМАНДЫ
-    # ==========================
-    
-    if text.startswith("/pro"):
-        USER_MODEL_PREFERENCE[chat_id] = "pro"
-        reply = "🧠 Pro режим включён. Отвечаю с максимальной глубиной!"
-        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
-        return {"reply": reply}
-    
-    if text.startswith("/flash"):
-        USER_MODEL_PREFERENCE[chat_id] = "flash"
-        reply = "⚡ Flash режим включён. Отвечаю быстро и по делу!"
-        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
-        return {"reply": reply}
-    
-    if text.startswith("/model"):
-        pref = USER_MODEL_PREFERENCE.get(chat_id, "flash")
-        reply = f"📊 Текущая модель: {pref.upper()}"
-        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
-        return {"reply": reply}
-    
-    if text.startswith("/buy"):
-        keyboard = get_subscription_keyboard()
-        send_message_with_inline(
-            chat_id,
-            "💳 **Выбери подписку:**\n\n"
-            "⭐ Собеседник — 50 Stars\n"
-            "⭐ Партнёр — 120 Stars\n"
-            "⭐ Агент жизни — 250 Stars",
-            keyboard
-        )
-        return {"reply": "Подписка"}
-    
-    if text.startswith("/remind"):
-        parts = text.split(" ", 3)
-        if len(parts) >= 4:
-            date_str = parts[1]
-            time_str = parts[2]
-            reminder_text = parts[3]
-            try:
-                dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
-                save_reminder(chat_id, reminder_text, dt.isoformat(), chat_id)
-                reply = f"⏰ Напомню в {date_str} {time_str}"
-            except:
-                reply = "❌ Формат: /remind ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ"
-        else:
-            reply = "❌ Формат: /remind ГГГГ-ММ-ДД ЧЧ:ММ ТЕКСТ"
-        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
-        return {"reply": reply}
-    
-    if text.startswith("/memory"):
-        context = get_full_context(chat_id)
-        topics = context["topics"]
-        history_count = len(context["history"])
-        user_name = get_memory(chat_id, "name")
-        
-        reply = f"🧠 **Память:**\n"
-        reply += f"- Сообщений: {history_count}\n"
-        reply += f"- Тем: {len(topics)}\n"
-        if user_name:
-            reply += f"- Имя: {user_name}\n"
-        if topics:
-            reply += "\n**Темы:**\n" + "\n".join([f"- {t}" for t in topics[:10]])
-        
-        send_message_with_keyboard(chat_id, reply, get_main_keyboard())
-        return {"reply": reply}
-    
-    # ==========================
-    # ОБЫЧНЫЙ ДИАЛОГ (ЖИВЫЕ ОТВЕТЫ)
-    # ==========================
-    
-    await send_typing(chat_id)
-    
-    context = get_full_context(chat_id, limit=300)
-    history = context["history"]
-    topics = get_all_topics(chat_id)
-    
-    user_name = get_memory(chat_id, "name")
-    likes = get_memory(chat_id, "likes")
-    dislikes = get_memory(chat_id, "dislikes")
-    role = get_memory(chat_id, "role")
-    
-    topics_text = ", ".join(topics[:5]) if topics else ""
-    name_context = f"Имя: {user_name}" if user_name else ""
-    likes_context = f"Нравится: {likes}" if likes else ""
-    dislikes_context = f"Не нравится: {dislikes}" if dislikes else ""
-    role_context = f"Роль: {role}" if role else ""
-    
-    # Текущее время в городе пользователя
-    current_time, city = get_current_time_for_user(chat_id, ip)
-    time_str = current_time.strftime("%H:%M")
-    date_str = current_time.strftime("%d.%m.%Y")
-    
-    context_text = f"{date_str} {time_str} ({city}). {name_context} {likes_context} {dislikes_context} {role_context} Темы: {topics_text}."
-    
-    expand_triggers = ["подробнее", "разверни", "расскажи детальнее", "подробно", "расшифруй"]
-    if any(word in lower for word in expand_triggers):
-        history_limit = 15
-        max_tokens = 600
-        temperature = 0.7
-    else:
-        history_limit = 8
-        max_tokens = 450
-        temperature = 0.85
-    
-    messages = [{"role": "system", "content": AURA_SYSTEM_PROMPT}]
-    
-    for msg in history[-history_limit:]:
-        messages.append({"role": msg["role"], "content": msg["content"][:500]})
-    
-    messages.append({"role": "user", "content": f"{context_text}\n\n{text}"})
-    
-    reply = await get_ai_response(messages, max_tokens=max_tokens, temperature=temperature)
-    
-    reply = re.sub(r'[*_#~`]{2,}', '', reply)
-    
-    if len(reply) > 800:
-        sentences = re.split(r'(?<=[.!?])\s+', reply)
-        reply = ' '.join(sentences[:5])
-    
-    if not reply.endswith(('.', '!', '?')):
-        reply += ' 😊'
-    
-    name_match = re.search(r"(?:меня зовут|зовут|я )(\w+)", lower)
+def extract_facts(text, user_id):
+    """Извлекает факты из сообщения"""
+    # Имя
+    name_match = re.search(r"(?:меня зовут|зовут|я )(\w+)", text.lower())
     if name_match:
-        save_memory(chat_id, "name", name_match.group(1).capitalize())
+        name = name_match.group(1).capitalize()
+        save_fact(user_id, "name", name)
+        save_user(user_id, name=name)
     
-    if "нравится" in lower:
-        save_memory(chat_id, "likes", text)
-    if "не нравится" in lower:
-        save_memory(chat_id, "dislikes", text)
+    # Город
+    city_match = re.search(r"(?:в|из|живу в|город)\s+([А-Яа-яЁё\-]+)", text.lower())
+    if city_match:
+        city = city_match.group(1).capitalize()
+        save_fact(user_id, "city", city)
+        save_user(user_id, city=city)
     
-    words = re.findall(r'\b[а-яА-ЯёЁ]{4,}\b', lower)
-    stop_words = ["привет", "здравствуй", "спасибо", "пока", "да", "нет", "хорошо", "плохо", "просто", "так", "ещё", "очень"]
+    # Любит
+    if "нравится" in text.lower():
+        save_fact(user_id, "likes", text)
+    
+    # Не любит
+    if "не нравится" in text.lower():
+        save_fact(user_id, "dislikes", text)
+    
+    # Темы
+    words = re.findall(r'\b[а-яА-ЯёЁ]{4,}\b', text.lower())
+    stop_words = ["привет", "здравствуй", "спасибо", "пока", "да", "нет", "хорошо", "плохо", "просто", "так", "ещё", "очень", "время", "погода"]
     for word in words:
         if word not in stop_words and len(word) > 3:
-            save_topic(chat_id, word)
-    
-    update_user_memory(chat_id, "assistant", reply)
-    send_message_with_keyboard(chat_id, reply, get_main_keyboard())
-    return {"reply": reply}
+            save_topic(user_id, word)
 
 # ==========================
-# ===== FASTAPI ВЕБХУК =====
+# ПОИСК ПО ИСТОРИИ
+# ==========================
+
+def handle_memory_query(user_id, text):
+    """Обрабатывает запросы типа 'напомни'"""
+    # Проверяем, есть ли запрос на поиск в истории
+    memory_triggers = ["помнишь", "напомни", "что мы говорили", "о чём мы говорили", "когда мы обсуждали"]
+    if any(trigger in text.lower() for trigger in memory_triggers):
+        # Извлекаем запрос
+        query = text
+        for trigger in memory_triggers:
+            query = query.replace(trigger, "")
+        query = query.strip()
+        
+        if query:
+            results = search_in_history(user_id, query)
+            if results:
+                # Формируем ответ
+                found = []
+                for msg in results[:5]:
+                    found.append(f"• {msg['role']}: {msg['content'][:200]}...")
+                return "\n".join(found)
+            else:
+                return "Не нашёл ничего в истории по этому запросу."
+    return None
+
+# ==========================
+# ОСНОВНАЯ ЛОГИКА
+# ==========================
+
+async def process_message(user_id, text):
+    """Обработка сообщения с памятью"""
+    
+    # Сохраняем сообщение пользователя
+    save_message(user_id, "user", text)
+    
+    # Извлекаем факты
+    extract_facts(text, user_id)
+    
+    # Проверяем, не хочет ли пользователь вспомнить что-то
+    memory_result = handle_memory_query(user_id, text)
+    if memory_result:
+        save_message(user_id, "assistant", memory_result)
+        return memory_result
+    
+    # Получаем историю (последние 15 сообщений)
+    recent = get_recent_history(user_id, limit=15)
+    
+    # Получаем факты о пользователе
+    facts = get_user_facts(user_id)
+    
+    # Получаем темы
+    topics = get_all_topics(user_id)
+    
+    # Формируем контекст
+    context = []
+    
+    # Добавляем факты
+    if facts:
+        context.append("Известно о пользователе:")
+        for key, value in facts.items():
+            if key in ["name", "city"]:
+                context.append(f"- {key}: {value}")
+    
+    # Добавляем темы
+    if topics:
+        context.append(f"Темы разговоров: {', '.join(topics[:10])}")
+    
+    # Добавляем историю
+    context.append("История диалога:")
+    for msg in recent:
+        context.append(f"{msg['role']}: {msg['content'][:300]}")
+    
+    context_text = "\n".join(context)
+    
+    # Формируем запрос к DeepSeek
+    messages = [
+        {"role": "system", "content": AGENT_PROMPT},
+        {"role": "system", "content": f"Контекст:\n{context_text}"},
+        {"role": "user", "content": text}
+    ]
+    
+    # Ответ от DeepSeek
+    try:
+        response = deepseek.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=messages,
+            temperature=0.8,
+            max_tokens=500
+        )
+        reply = response.choices[0].message.content
+        
+        # Сохраняем ответ
+        save_message(user_id, "assistant", reply)
+        
+        return reply
+    
+    except Exception as e:
+        print(f"❌ Ошибка DeepSeek: {e}")
+        return "😅 Упс, что-то пошло не так. Попробуй ещё раз."
+
+# ==========================
+# FASTAPI ВЕБХУК
 # ==========================
 
 app = FastAPI()
@@ -1204,178 +388,35 @@ app = FastAPI()
 async def webhook(request: Request):
     try:
         body = await request.json()
-        
-        # ===== PRE-CHECKOUT =====
-        if "pre_checkout_query" in body:
-            query = body["pre_checkout_query"]
-            chat_id = str(query["from"]["id"])
-            
-            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerPreCheckoutQuery"
-            data = {"pre_checkout_query_id": query["id"], "ok": True}
-            requests.post(url, json=data)
-            
-            send_message(chat_id, "✅ Оплата прошла успешно! Подписка активирована.")
-            return JSONResponse({"ok": True})
-        
-        # ===== CALLBACK QUERY =====
-        if "callback_query" in body:
-            callback = body["callback_query"]
-            chat_id = str(callback["message"]["chat"]["id"])
-            data = callback["data"]
-            
-            if data.startswith("buy_"):
-                subscription = data.replace("buy_", "")
-                tariff = TARIFFS.get(subscription)
-                if tariff:
-                    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendInvoice"
-                    invoice_data = {
-                        "chat_id": chat_id,
-                        "title": f"Подписка AURA — {tariff['name']}",
-                        "description": "Полный доступ на 30 дней",
-                        "payload": f"subscription_{subscription}",
-                        "provider_token": "",
-                        "currency": "XTR",
-                        "prices": [{"label": "Подписка на 30 дней", "amount": tariff["stars"]}],
-                        "start_parameter": "aura_sub"
-                    }
-                    requests.post(url, json=invoice_data)
-                return JSONResponse({"ok": True})
-            
-            elif data == "cancel":
-                send_message(chat_id, "❌ Отменено.")
-                return JSONResponse({"ok": True})
-            
-            elif data == "change_role":
-                keyboard = get_role_keyboard()
-                send_message_with_inline(chat_id, "🧠 **Выбери роль для AURA:**", keyboard)
-                return JSONResponse({"ok": True})
-            
-            elif data.startswith("role_"):
-                role_name = data.replace("role_", "")
-                save_memory(chat_id, "role", role_name)
-                reply = f"✅ Роль **{role_name}** установлена!"
-                send_message_with_keyboard(chat_id, reply, get_main_keyboard())
-                return JSONResponse({"ok": True})
-            
-            elif data == "set_temp":
-                keyboard = {
-                    "inline_keyboard": [
-                        [{"text": "0.3 (Строгий)", "callback_data": "temp_0.3"}],
-                        [{"text": "0.7 (Сбалансированный)", "callback_data": "temp_0.7"}],
-                        [{"text": "1.2 (Креативный)", "callback_data": "temp_1.2"}],
-                        [{"text": "🔙 Назад", "callback_data": "back_settings"}]
-                    ]
-                }
-                send_message_with_inline(chat_id, "🌡 **Выбери температуру:**", keyboard)
-                return JSONResponse({"ok": True})
-            
-            elif data.startswith("temp_"):
-                temp = float(data.replace("temp_", ""))
-                save_memory(chat_id, "temperature", str(temp))
-                reply = f"✅ Температура: {temp}"
-                send_message_with_keyboard(chat_id, reply, get_main_keyboard())
-                return JSONResponse({"ok": True})
-            
-            elif data == "set_history":
-                keyboard = {
-                    "inline_keyboard": [
-                        [{"text": "10", "callback_data": "hist_10"}],
-                        [{"text": "20", "callback_data": "hist_20"}],
-                        [{"text": "50", "callback_data": "hist_50"}],
-                        [{"text": "100", "callback_data": "hist_100"}],
-                        [{"text": "🔙 Назад", "callback_data": "back_settings"}]
-                    ]
-                }
-                send_message_with_inline(chat_id, "📏 **Длина истории:**", keyboard)
-                return JSONResponse({"ok": True})
-            
-            elif data.startswith("hist_"):
-                length = int(data.replace("hist_", ""))
-                save_memory(chat_id, "history_length", str(length))
-                reply = f"✅ История: {length} сообщений"
-                send_message_with_keyboard(chat_id, reply, get_main_keyboard())
-                return JSONResponse({"ok": True})
-            
-            elif data == "back_settings":
-                keyboard = get_settings_keyboard()
-                send_message_with_inline(chat_id, "⚙️ **Настройки AURA:**", keyboard)
-                return JSONResponse({"ok": True})
-            
-            elif data == "back_main":
-                send_message_with_keyboard(chat_id, "🔙 Главное меню", get_main_keyboard())
-                return JSONResponse({"ok": True})
-        
-        # ===== СООБЩЕНИЯ =====
         if "message" not in body:
-            return JSONResponse({"ok": False, "error": "No message"})
+            return JSONResponse({"ok": True})
         
         message = body["message"]
-        chat_id = str(message["chat"]["id"])
-        text = None
-        is_voice = False
+        user_id = str(message["from"]["id"])
         
-        # ===== ГОЛОСОВОЕ =====
-        if "voice" in message:
-            file_id = message["voice"]["file_id"]
-            file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
-            file_response = requests.get(file_url)
-            file_data_resp = file_response.json()
-            if file_data_resp.get("ok"):
-                file_path = file_data_resp["result"]["file_path"]
-                audio_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
-                text = transcribe_audio_with_groq(audio_url)
-                if text:
-                    is_voice = True
-                    # НЕ ОТПРАВЛЯЕМ "Распознаю: ..."
-                else:
-                    send_message(chat_id, "⚠️ Не удалось распознать голос")
-                    return JSONResponse({"ok": True})
-        
-        # ===== ФОТО =====
-        if "photo" in message:
-            photo = message["photo"][-1]
-            file_id = photo["file_id"]
-            file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
-            file_response = requests.get(file_url)
-            file_data_resp = file_response.json()
-            if file_data_resp.get("ok"):
-                file_path = file_data_resp["result"]["file_path"]
-                image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
-                image_response = requests.get(image_url, timeout=30)
-                if image_response.status_code == 200:
-                    image_data = image_response.content
-                    vision_result = describe_image_with_groq(image_data)
-                    if vision_result:
-                        send_message(chat_id, f"📸 {vision_result}")
-                    else:
-                        send_message(chat_id, "❌ Не удалось описать фото.")
-                    return JSONResponse({"ok": True})
-                else:
-                    send_message(chat_id, "⚠️ Не удалось загрузить фото")
-                    return JSONResponse({"ok": True})
-        
-        # ===== ТЕКСТ =====
         if "text" in message:
             text = message["text"].strip()
-        
-        if text:
-            result = await process_message(request, chat_id, text, is_voice)
-            return JSONResponse({"ok": True})
+            
+            if text.startswith("/start"):
+                save_user(user_id, message["from"]["first_name"])
+                reply = "👋 Привет! Я AURA. Я запоминаю ВСЁ, что ты говоришь. Можешь спросить меня о чём угодно — я помню нашу историю!"
+            else:
+                reply = await process_message(user_id, text)
+            
+            # Отправляем ответ
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+            data = {"chat_id": user_id, "text": reply, "parse_mode": "Markdown"}
+            requests.post(url, json=data)
         
         return JSONResponse({"ok": True})
     
     except Exception as e:
-        print(f"❌ Ошибка вебхука: {e}")
+        print(f"❌ Ошибка: {e}")
         return JSONResponse({"ok": False, "error": str(e)})
-
-# ==========================
-# ===== ЗАПУСК =====
-# ==========================
 
 @app.get("/")
 async def root():
-    from fastapi.responses import FileResponse
-    return FileResponse("web/index.html")
+    return {"status": "AURA Memory Agent is alive"}
 
 if __name__ == "__main__":
     import uvicorn
