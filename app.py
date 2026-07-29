@@ -19,7 +19,7 @@ if not TELEGRAM_TOKEN or not DEEPSEEK_KEY:
 DB = "aura.db"
 def init_db():
     with sqlite3.connect(DB) as conn:
-        conn.execute("CREATE TABLE IF NOT EXISTS users (user_id TEXT PRIMARY KEY, city TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS users (user_id TEXT PRIMARY KEY, city TEXT, last_search TEXT)")
         conn.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, role TEXT, content TEXT, created_at TEXT)")
         conn.execute("CREATE TABLE IF NOT EXISTS topics (user_id TEXT, topic TEXT)")
 init_db()
@@ -31,6 +31,15 @@ def save_city(uid, city):
 def get_city(uid):
     with sqlite3.connect(DB) as conn:
         row = conn.execute("SELECT city FROM users WHERE user_id = ?", (uid,)).fetchone()
+    return row[0] if row else None
+
+def save_last_search(uid, query):
+    with sqlite3.connect(DB) as conn:
+        conn.execute("UPDATE users SET last_search = ? WHERE user_id = ?", (query, uid))
+
+def get_last_search(uid):
+    with sqlite3.connect(DB) as conn:
+        row = conn.execute("SELECT last_search FROM users WHERE user_id = ?", (uid,)).fetchone()
     return row[0] if row else None
 
 def save_msg(uid, role, text):
@@ -93,7 +102,6 @@ def check_url(url):
 
 # ========================== ПОИСК (TAVILY + DUCK) ==========================
 def search_web(query):
-    # 1. Пробуем Tavily
     if TAVILY_KEY:
         try:
             from tavily import TavilyClient
@@ -101,14 +109,12 @@ def search_web(query):
             res = client.search(query, search_depth="advanced", max_results=3, include_answer=True)
             
             if res.get("answer"):
-                # Если Tavily дал готовый ответ — возвращаем его
                 return {"text": res["answer"][:500], "urls": []}
             
             if res.get("results"):
                 for r in res["results"][:3]:
                     url = r.get("url", "")
                     if url:
-                        # Проверяем, открывается ли ссылка
                         is_valid = check_url(url)
                         return {
                             "text": r.get("content", "")[:400],
@@ -118,7 +124,6 @@ def search_web(query):
         except Exception as e:
             print(f"❌ Tavily ошибка: {e}")
     
-    # 2. Если Tavily не сработал — пробуем DuckDuckGo
     try:
         url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -168,7 +173,7 @@ PROMPT = """Ты — AURA. Ты — живой умный помощник в Te
 Ты — AURA. Не важно, какой движок внутри — для пользователя ты просто AURA.
 Не врёшь, не выдумываешь факты. Если не знаешь — говори честно.
 
-Говори на русском. Будь собой."""
+Говори на русском. ТОЛЬКО НА РУССКОМ. Ни слова на английском."""
 
 def clean_query(text):
     stop = ["картинк", "рисунк", "фото", "видео", "ютуб", "клип", "музык", "песн",
@@ -274,7 +279,31 @@ async def webhook(request: Request):
             return {"ok": True}
 
         # ==========================
-        # 2. НАПОМНИ
+        # 2. ССЫЛКА / САЙТ — ВОЗВРАЩАЕМ ПОСЛЕДНИЙ ПОИСК
+        # ==========================
+        if "ссылк" in lower or "сайт" in lower or "адрес" in lower:
+            last_search = get_last_search(chat_id)
+            if last_search:
+                # Повторяем поиск по последнему запросу
+                result = search_web(last_search)
+                if result and result.get("urls"):
+                    url = result["urls"][0]
+                    if result.get("valid", False):
+                        reply = f"{result['text'][:400]}\n\n🔗 {url}"
+                    else:
+                        reply = f"{result['text'][:400]}\n\n⚠️ Ссылка не открылась, но вот адрес: {url}"
+                elif result and result.get("text"):
+                    reply = result["text"][:400]
+                else:
+                    reply = f"Не нашёл ссылку по запросу «{last_search}»."
+            else:
+                reply = "Ты ещё ничего не искал. Напиши, что нужно найти, и я поищу."
+            send_msg(chat_id, reply + "\n\nЧто ещё могу сделать?")
+            save_msg(chat_id, "assistant", reply)
+            return {"ok": True}
+
+        # ==========================
+        # 3. НАПОМНИ
         # ==========================
         if "напомни" in lower or "что мы обсуждали" in lower or "что я спрашивал" in lower:
             keyword_match = re.search(r'напомни\s+(.+)', lower)
@@ -308,7 +337,7 @@ async def webhook(request: Request):
             return {"ok": True}
 
         # ==========================
-        # 3. КАРТИНКИ
+        # 4. КАРТИНКИ
         # ==========================
         if "картинк" in lower or "рисунк" in lower or "фото" in lower:
             q = clean_query(text)
@@ -319,7 +348,7 @@ async def webhook(request: Request):
             return {"ok": True}
 
         # ==========================
-        # 4. ВИДЕО
+        # 5. ВИДЕО
         # ==========================
         if "видео" in lower or "ютуб" in lower or "клип" in lower:
             q = clean_query(text)
@@ -330,13 +359,15 @@ async def webhook(request: Request):
             return {"ok": True}
 
         # ==========================
-        # 5. ПОИСК (TAVILY + DUCK)
+        # 6. ПОИСК (TAVILY + DUCK)
         # ==========================
-        if any(w in lower for w in ["найди", "узнай", "где", "сайт", "адрес", "телефон", "клиника", "авито", "дром", "озон", "валдберис", "wildberries"]):
-            # Очищаем запрос
+        if any(w in lower for w in ["найди", "узнай", "где", "телефон", "контакт", "клиника", "авито", "дром", "озон", "валдберис", "wildberries"]):
             q = clean_query(text)
             if not q or len(q) < 3:
                 q = text
+            
+            # Сохраняем запрос для последующего использования
+            save_last_search(chat_id, q)
             
             result = search_web(q)
             
@@ -356,7 +387,7 @@ async def webhook(request: Request):
             return {"ok": True}
 
         # ==========================
-        # 6. ДИАЛОГ
+        # 7. ДИАЛОГ
         # ==========================
         history = get_history(chat_id, limit=15)
         topics = get_topics(chat_id)
