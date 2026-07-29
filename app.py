@@ -10,7 +10,7 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DEEPSEEK_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
-TAVILY_KEY = os.getenv("TAVILY_API_KEY")
+OPENSERP_URL = os.getenv("OPENSERP_URL", "http://localhost:7000")  # можно поменять на адрес на Render
 GROQ_KEY = os.getenv("GROQ_API_KEY")
 
 if not TELEGRAM_TOKEN or not DEEPSEEK_KEY:
@@ -44,7 +44,6 @@ def get_history(uid, limit=15):
     return [{"role": r[0], "content": r[1]} for r in rows[::-1]]
 
 def search_in_history(uid, keyword):
-    """Ищет в истории сообщения по ключевому слову"""
     with sqlite3.connect(DB) as conn:
         rows = conn.execute(
             "SELECT role, content, created_at FROM history WHERE user_id = ? AND content LIKE ? ORDER BY created_at DESC LIMIT 10",
@@ -53,7 +52,6 @@ def search_in_history(uid, keyword):
     return rows
 
 def get_today_history(uid):
-    """Возвращает историю за сегодня"""
     today = datetime.now().date().isoformat()
     with sqlite3.connect(DB) as conn:
         rows = conn.execute(
@@ -85,48 +83,51 @@ def get_real_time(city):
         pass
     return None
 
-# ========================== ПРОВЕРКА ССЫЛОК ==========================
-def check_url(url):
+# ========================== ПОИСК ЧЕРЕЗ OPENSERP ==========================
+def search_openserv(query, search_type="web"):
+    """
+    search_type: web, images, video
+    """
     try:
-        r = requests.head(url, timeout=5, allow_redirects=True)
-        return r.status_code in [200, 301, 302]
-    except:
-        return False
-
-# ========================== ПОИСК (TAVILY + DUCK) ==========================
-def search_web(query):
-    if TAVILY_KEY:
-        try:
-            from tavily import TavilyClient
-            client = TavilyClient(api_key=TAVILY_KEY)
-            res = client.search(query, search_depth="advanced", max_results=3, include_answer=True)
-            if res.get("answer"):
-                return {"text": res["answer"][:500], "urls": []}
-            if res.get("results"):
-                for r in res["results"][:3]:
-                    if check_url(r["url"]):
-                        return {"text": r["content"][:400], "urls": [r["url"]]}
-        except:
-            pass
-    try:
-        url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        resp = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        for result in soup.select(".result")[:3]:
-            title = result.select_one(".result__title")
-            snippet = result.select_one(".result__snippet")
-            link = result.select_one(".result__url")
-            if title and snippet and link:
-                link_text = html.unescape(link.text.strip())
-                if check_url(link_text):
-                    return {
-                        "text": f"{html.unescape(title.text.strip())}\n{html.unescape(snippet.text.strip())}",
-                        "urls": [link_text]
-                    }
-    except:
-        pass
-    return None
+        params = {
+            "text": query,
+            "engine": "yandex",
+            "gl": "ru",
+            "hl": "ru"
+        }
+        
+        # Для картинок и видео меняем движок
+        if search_type == "images":
+            params["engine"] = "yandex_images"
+        elif search_type == "video":
+            params["engine"] = "yandex_video"
+        
+        resp = requests.get(f"{OPENSERP_URL}/search", params=params, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            results = data.get("results", [])
+            
+            # Формируем ответ
+            if results:
+                text_results = []
+                urls = []
+                for r in results[:3]:
+                    title = r.get("title", "")
+                    snippet = r.get("snippet", "")
+                    url = r.get("url", "")
+                    if title and url:
+                        text_results.append(f"{title}\n{snippet[:200]}...")
+                        urls.append(url)
+                
+                return {
+                    "text": "\n\n".join(text_results),
+                    "urls": urls
+                }
+        
+        return None
+    except Exception as e:
+        print(f"❌ OpenSERP ошибка: {e}")
+        return None
 
 # ========================== AI ==========================
 client = OpenAI(api_key=DEEPSEEK_KEY, base_url=DEEPSEEK_URL)
@@ -155,12 +156,24 @@ PROMPT = """Ты — AURA. Ты — живой умный помощник в Te
 
 Говори на русском. Будь собой."""
 
-def rewrite_query(user_text):
-    messages = [
-        {"role": "system", "content": "Перепиши запрос пользователя для поиска: оставь только ключевые слова, убери стоп-слова. Ответь одной фразой на русском."},
-        {"role": "user", "content": user_text}
-    ]
-    return ask_ai(messages, max_tokens=60)
+def clean_query(text):
+    stop = ["картинк", "рисунк", "фото", "видео", "ютуб", "клип", "музык", "песн",
+            "найди", "хочу", "покажи", "дай", "ссылку", "про", "на", "с", "и", "в", "а",
+            "к", "у", "о", "от", "до", "за", "мне", "меня", "посмотреть", "найти", "пожалуйста"]
+    for w in stop:
+        text = text.replace(f" {w} ", " ")
+        text = text.replace(f"{w} ", " ")
+        text = text.replace(f" {w}", " ")
+    text = re.sub(r'\s+', ' ', text).strip()
+    if not text or len(text) < 3:
+        if "котик" in text or "кот" in text:
+            return "котики"
+        elif "закат" in text:
+            return "закаты"
+        elif "соба" in text:
+            return "собаки"
+        return "красивые картинки"
+    return text
 
 def analyze_intent(text):
     messages = [
@@ -247,10 +260,9 @@ async def webhook(request: Request):
             return {"ok": True}
 
         # ==========================
-        # 2. НАПОМНИ / ЧТО МЫ ОБСУЖДАЛИ
+        # 2. НАПОМНИ
         # ==========================
         if "напомни" in lower or "что мы обсуждали" in lower or "что я спрашивал" in lower:
-            # Проверяем, есть ли ключевое слово
             keyword_match = re.search(r'напомни\s+(.+)', lower)
             if keyword_match:
                 keyword = keyword_match.group(1).strip()
@@ -264,12 +276,10 @@ async def webhook(request: Request):
                 else:
                     reply = f"🔍 Ничего не нашёл по запросу «{keyword}» в истории."
             else:
-                # Показываем последние темы
                 topics = get_topics(chat_id)
                 if topics:
                     reply = f"📚 Мы обсуждали: {', '.join(topics[:10])}"
                 else:
-                    # Показываем последние 5 сообщений
                     today_history = get_today_history(chat_id)
                     if today_history:
                         reply = "📝 Вот что мы обсуждали сегодня:\n\n"
@@ -278,54 +288,50 @@ async def webhook(request: Request):
                             role_label = "Ты" if role == "user" else "Я"
                             reply += f"[{time_str}] {role_label}: {content[:100]}...\n"
                     else:
-                        reply = "Мы пока ничего не обсуждали сегодня. Напиши что-нибудь, и я запомню."
+                        reply = "Мы пока ничего не обсуждали сегодня."
             send_msg(chat_id, reply)
             save_msg(chat_id, "assistant", reply)
             return {"ok": True}
 
         # ==========================
-        # 3. АНАЛИЗ НАМЕРЕНИЯ
+        # 3. КАРТИНКИ (через OpenSERP)
         # ==========================
-        intent = analyze_intent(text) or "chat"
-
-        # ==========================
-        # 4. КАРТИНКИ
-        # ==========================
-        if "image" in intent or "картинк" in lower or "рисунк" in lower or "фото" in lower:
-            rewritten = rewrite_query(text) or text
-            q = re.sub(r'[^а-яА-Яa-zA-Z0-9 ]', '', rewritten).strip()
-            if not q:
-                q = "красивые картинки"
-            link = f"https://yandex.ru/images/search?text={q.replace(' ', '%20')}"
-            reply = f"🖼️ Картинки по запросу «{q}»:\n{link}\n\nЧто ещё могу сделать?"
-            send_msg(chat_id, reply)
+        if "картинк" in lower or "рисунк" in lower or "фото" in lower:
+            q = clean_query(text)
+            result = search_openserv(q, search_type="images")
+            if result and result.get("urls"):
+                reply = f"🖼️ Картинки по запросу «{q}»:\n🔗 {result['urls'][0]}"
+            else:
+                link = f"https://yandex.ru/images/search?text={q.replace(' ', '%20')}"
+                reply = f"🖼️ Картинки по запросу «{q}»:\n{link}"
+            send_msg(chat_id, reply + "\n\nЧто ещё могу сделать?")
             save_msg(chat_id, "assistant", reply)
             return {"ok": True}
 
         # ==========================
-        # 5. ВИДЕО
+        # 4. ВИДЕО (через OpenSERP)
         # ==========================
-        if "video" in intent or "видео" in lower or "ютуб" in lower or "клип" in lower:
-            rewritten = rewrite_query(text) or text
-            q = re.sub(r'[^а-яА-Яa-zA-Z0-9 ]', '', rewritten).strip()
-            if not q:
-                q = "смешные видео"
-            link = f"https://yandex.ru/video/search?text={q.replace(' ', '%20')}"
-            reply = f"🎬 Видео по запросу «{q}»:\n{link}\n\nЧто ещё могу сделать?"
-            send_msg(chat_id, reply)
+        if "видео" in lower or "ютуб" in lower or "клип" in lower:
+            q = clean_query(text)
+            result = search_openserv(q, search_type="video")
+            if result and result.get("urls"):
+                reply = f"🎬 Видео по запросу «{q}»:\n🔗 {result['urls'][0]}"
+            else:
+                link = f"https://yandex.ru/video/search?text={q.replace(' ', '%20')}"
+                reply = f"🎬 Видео по запросу «{q}»:\n{link}"
+            send_msg(chat_id, reply + "\n\nЧто ещё могу сделать?")
             save_msg(chat_id, "assistant", reply)
             return {"ok": True}
 
         # ==========================
-        # 6. ПОИСК
+        # 5. ПОИСК (через OpenSERP)
         # ==========================
-        if "search" in intent or any(w in lower for w in ["найди", "узнай", "где", "сайт", "адрес", "телефон", "клиника", "авито", "дром", "озон"]):
-            rewritten = rewrite_query(text) or text
-            result = search_web(rewritten)
+        if any(w in lower for w in ["найди", "узнай", "где", "сайт", "адрес", "телефон", "клиника", "авито", "дром", "озон", "валдберис", "wildberries"]):
+            result = search_openserv(text, search_type="web")
             if result and result.get("urls"):
                 reply = f"{result['text'][:400]}\n\n🔗 {result['urls'][0]}"
             elif result and result.get("text"):
-                reply = result["text"][:400] + "\n\n⚠️ Ссылку проверить не удалось."
+                reply = result["text"][:400]
             else:
                 reply = "Не нашёл. Попробуй переформулировать."
             send_msg(chat_id, reply + "\n\nЧто ещё могу сделать?")
@@ -333,7 +339,7 @@ async def webhook(request: Request):
             return {"ok": True}
 
         # ==========================
-        # 7. ДИАЛОГ (С ПАМЯТЬЮ 15 СООБЩЕНИЙ)
+        # 6. ДИАЛОГ
         # ==========================
         history = get_history(chat_id, limit=15)
         topics = get_topics(chat_id)
