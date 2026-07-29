@@ -92,61 +92,130 @@ def get_real_time(city):
         pass
     return None
 
-# ========================== ПРОВЕРКА ССЫЛОК ==========================
-def check_url(url):
-    try:
-        r = requests.head(url, timeout=5, allow_redirects=True)
-        return r.status_code in [200, 301, 302]
-    except:
-        return False
+# ========================== ПОИСК (TAVILY + DUCKDUCKGO + ПАРСИНГ) ==========================
 
-# ========================== ПОИСК (TAVILY + DUCK) ==========================
+def parse_site_for_info(url):
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept-Language": "ru-RU,ru;q=0.9"
+        }
+        response = requests.get(url, headers=headers, timeout=15)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        for script in soup(["script", "style", "nav", "footer", "header"]):
+            script.decompose()
+        text = soup.get_text(separator="\n", strip=True)
+        result = {}
+        
+        phone_patterns = [r'\+7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'8\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}', r'7\s*\(?\d{3}\)?\s*\d{3}\s*\d{2}\s*\d{2}']
+        phones = []
+        for pattern in phone_patterns:
+            phones.extend(re.findall(pattern, text))
+        phones = [re.sub(r'\s+', ' ', p).strip() for p in phones]
+        phones = list(set(phones))[:5]
+        if phones:
+            result["phones"] = phones
+        
+        email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+        emails = list(set(re.findall(email_pattern, text)))[:3]
+        if emails:
+            result["emails"] = emails
+        
+        address_pattern = r'(?:ул\.|улица|проспект|пр\.|переулок|пер\.|площадь|пл\.|шоссе|бульвар|Аэродромная)\s+[А-Яа-я0-9\-\.\s,]+'
+        addresses = list(set(re.findall(address_pattern, text)))[:3]
+        if addresses:
+            result["addresses"] = addresses
+        
+        price_pattern = r'(\d+[\s,.]*\d*)\s*(?:₽|руб|рублей|\$|€)'
+        prices = list(set(re.findall(price_pattern, text)))[:5]
+        if prices:
+            result["prices"] = prices
+        
+        site_pattern = r'(?:https?://)?(?:www\.)?([a-zA-Z0-9\-]+\.(?:ru|рф|com|org|net))'
+        sites = list(set(re.findall(site_pattern, text)))[:3]
+        if sites:
+            result["sites"] = sites
+        
+        title = soup.find('h1')
+        if title:
+            result["product_title"] = title.text.strip()
+        
+        desc = soup.find(class_=re.compile(r'description|about|product-desc|product__description'))
+        if desc:
+            result["product_description"] = desc.text.strip()[:500]
+        
+        result["snippet"] = text[:1000].replace("\n", " ")
+        return result
+    except Exception as e:
+        print(f"❌ Ошибка парсинга: {e}")
+        return None
+
 def search_web(query):
+    """ГЛУБОКИЙ ПОИСК: Tavily + DuckDuckGo + парсинг"""
+    results = []
+    
+    # 1. Tavily (основной)
     if TAVILY_KEY:
         try:
             from tavily import TavilyClient
             client = TavilyClient(api_key=TAVILY_KEY)
-            res = client.search(query, search_depth="advanced", max_results=3, include_answer=True)
-            
-            if res.get("answer"):
-                return {"text": res["answer"][:500], "urls": []}
-            
-            if res.get("results"):
-                for r in res["results"][:3]:
-                    url = r.get("url", "")
-                    if url:
-                        is_valid = check_url(url)
-                        return {
-                            "text": r.get("content", "")[:400],
-                            "urls": [url],
-                            "valid": is_valid
-                        }
+            response = client.search(
+                query=query,
+                search_depth="advanced",
+                max_results=5,
+                include_answer=True,
+                include_images=False
+            )
+            if response.get('answer'):
+                results.append(f"💡 {response['answer']}")
+            if response.get('results'):
+                for r in response['results'][:5]:
+                    title = r.get('title', '')
+                    url = r.get('url', '')
+                    content = r.get('content', '')[:300]
+                    if title and url:
+                        results.append(f"**{title}**\n{content}...\n🔗 {url}")
         except Exception as e:
-            print(f"❌ Tavily ошибка: {e}")
+            print(f"❌ Tavily: {e}")
     
-    try:
-        url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        resp = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        
-        for result in soup.select(".result")[:3]:
-            title = result.select_one(".result__title")
-            snippet = result.select_one(".result__snippet")
-            link = result.select_one(".result__url")
-            if title and snippet and link:
-                link_text = html.unescape(link.text.strip())
-                if link_text:
-                    is_valid = check_url(link_text)
-                    return {
-                        "text": f"{html.unescape(title.text.strip())}\n{html.unescape(snippet.text.strip())}",
-                        "urls": [link_text],
-                        "valid": is_valid
-                    }
-    except Exception as e:
-        print(f"❌ DuckDuckGo ошибка: {e}")
+    # 2. DuckDuckGo (если Tavily не дал результатов)
+    if not results:
+        try:
+            url = f"https://html.duckduckgo.com/html/?q={query}"
+            headers = {"User-Agent": "Mozilla/5.0"}
+            response = requests.get(url, headers=headers, timeout=10)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            for result in soup.select('.result')[:3]:
+                title = result.select_one('.result__title')
+                if title:
+                    link = result.select_one('.result__url')
+                    snippet = result.select_one('.result__snippet')
+                    if snippet and link:
+                        results.append(f"**{title.text.strip()}**\n{snippet.text.strip()[:200]}...\n🔗 {link.text.strip()}")
+        except Exception as e:
+            print(f"❌ DuckDuckGo: {e}")
     
-    return None
+    # 3. Парсинг найденных ссылок
+    urls = re.findall(r'https?://[^\s]+', "\n".join(results))
+    for url in urls[:3]:
+        parsed = parse_site_for_info(url)
+        if parsed:
+            if parsed.get("phones"):
+                results.append(f"📞 Телефоны: {', '.join(parsed['phones'])}")
+            if parsed.get("addresses"):
+                results.append(f"📍 Адреса: {', '.join(parsed['addresses'])}")
+            if parsed.get("prices"):
+                results.append(f"💰 Цены: {', '.join(parsed['prices'])}")
+            if parsed.get("emails"):
+                results.append(f"✉️ Email: {', '.join(parsed['emails'])}")
+            if parsed.get("sites"):
+                results.append(f"🌐 Сайты: {', '.join(parsed['sites'])}")
+            if parsed.get("product_title"):
+                results.append(f"📦 Товар: {parsed['product_title']}")
+            if parsed.get("product_description"):
+                results.append(f"📝 Описание: {parsed['product_description'][:200]}...")
+    
+    return "\n\n".join(results) if results else None
 
 # ========================== AI ==========================
 client = OpenAI(api_key=DEEPSEEK_KEY, base_url=DEEPSEEK_URL)
@@ -279,21 +348,14 @@ async def webhook(request: Request):
             return {"ok": True}
 
         # ==========================
-        # 2. ССЫЛКА / САЙТ — ВОЗВРАЩАЕМ ПОСЛЕДНИЙ ПОИСК
+        # 2. ССЫЛКА / САЙТ
         # ==========================
         if "ссылк" in lower or "сайт" in lower or "адрес" in lower:
             last_search = get_last_search(chat_id)
             if last_search:
-                # Повторяем поиск по последнему запросу
                 result = search_web(last_search)
-                if result and result.get("urls"):
-                    url = result["urls"][0]
-                    if result.get("valid", False):
-                        reply = f"{result['text'][:400]}\n\n🔗 {url}"
-                    else:
-                        reply = f"{result['text'][:400]}\n\n⚠️ Ссылка не открылась, но вот адрес: {url}"
-                elif result and result.get("text"):
-                    reply = result["text"][:400]
+                if result:
+                    reply = result
                 else:
                     reply = f"Не нашёл ссылку по запросу «{last_search}»."
             else:
@@ -359,26 +421,19 @@ async def webhook(request: Request):
             return {"ok": True}
 
         # ==========================
-        # 6. ПОИСК (TAVILY + DUCK)
+        # 6. ПОИСК (ОСНОВНОЙ)
         # ==========================
         if any(w in lower for w in ["найди", "узнай", "где", "телефон", "контакт", "клиника", "авито", "дром", "озон", "валдберис", "wildberries"]):
             q = clean_query(text)
             if not q or len(q) < 3:
                 q = text
             
-            # Сохраняем запрос для последующего использования
             save_last_search(chat_id, q)
             
-            result = search_web(q)
+            search_result = search_web(q)
             
-            if result and result.get("urls"):
-                url = result["urls"][0]
-                if result.get("valid", False):
-                    reply = f"{result['text'][:400]}\n\n🔗 {url}"
-                else:
-                    reply = f"{result['text'][:400]}\n\n⚠️ Ссылка не открылась, но вот адрес: {url}"
-            elif result and result.get("text"):
-                reply = result["text"][:400]
+            if search_result:
+                reply = search_result
             else:
                 reply = "Не нашёл. Попробуй переформулировать."
             
