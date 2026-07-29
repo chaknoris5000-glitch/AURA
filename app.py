@@ -16,7 +16,6 @@ GROQ_KEY = os.getenv("GROQ_API_KEY")
 if not TELEGRAM_TOKEN or not DEEPSEEK_KEY:
     raise Exception("❌ НЕТ ТОКЕНОВ")
 
-# ========================== TAVILY ==========================
 tavily_client = None
 if TAVILY_KEY:
     try:
@@ -102,10 +101,8 @@ def get_real_time(city):
         pass
     return None
 
-# ========================== ГЛУБОКИЙ ПАРСИНГ ==========================
-
+# ========================== ПАРСИНГ ==========================
 def parse_site_for_info(url):
-    """Парсит сайт: телефоны, адреса, цены, описания"""
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -113,10 +110,8 @@ def parse_site_for_info(url):
         }
         response = requests.get(url, headers=headers, timeout=15)
         soup = BeautifulSoup(response.text, 'html.parser')
-        
         for script in soup(["script", "style", "nav", "footer", "header"]):
             script.decompose()
-        
         text = soup.get_text(separator="\n", strip=True)
         result = {}
         
@@ -162,19 +157,15 @@ def parse_site_for_info(url):
             result["product_description"] = desc.text.strip()[:500]
         
         result["snippet"] = text[:1000].replace("\n", " ")
-        
         return result
     except Exception as e:
         print(f"❌ Ошибка парсинга: {e}")
         return None
 
-# ========================== ОСНОВНАЯ ФУНКЦИЯ ПОИСКА ==========================
-
+# ========================== ПОИСК ==========================
 async def search_web(query):
-    """Глубокий поиск через Tavily + DuckDuckGo + парсинг"""
     results = []
     
-    # 1. TAVILY
     if tavily_client:
         try:
             response = tavily_client.search(
@@ -196,7 +187,6 @@ async def search_web(query):
         except Exception as e:
             print(f"❌ Tavily: {e}")
     
-    # 2. DUCKDUCKGO
     if not results:
         try:
             url = f"https://html.duckduckgo.com/html/?q={query}"
@@ -213,7 +203,6 @@ async def search_web(query):
         except Exception as e:
             print(f"❌ DuckDuckGo: {e}")
     
-    # 3. ПАРСИНГ НАЙДЕННЫХ САЙТОВ
     urls = re.findall(r'https?://[^\s]+', "\n".join(results))
     for url in urls[:3]:
         parsed = parse_site_for_info(url)
@@ -265,28 +254,23 @@ PROMPT = """Ты — AURA. Ты — живой умный помощник в Te
 def clean_query(text):
     stop = ["картинк", "рисунк", "фото", "видео", "ютуб", "клип", "музык", "песн",
             "найди", "хочу", "покажи", "дай", "ссылку", "про", "на", "с", "и", "в", "а",
-            "к", "у", "о", "от", "до", "за", "мне", "меня", "посмотреть", "найти", "пожалуйста"]
-    for w in stop:
-        text = text.replace(f" {w} ", " ")
-        text = text.replace(f"{w} ", " ")
-        text = text.replace(f" {w}", " ")
-    text = re.sub(r'\s+', ' ', text).strip()
-    if not text or len(text) < 3:
-        if "котик" in text or "кот" in text:
+            "к", "у", "о", "от", "до", "за", "мне", "меня", "посмотреть", "найти"]
+    words = text.split()
+    cleaned = []
+    for word in words:
+        word_lower = word.lower()
+        if word_lower not in stop:
+            cleaned.append(word)
+    result = " ".join(cleaned).strip()
+    if not result or len(result) < 3:
+        if "котик" in text.lower() or "кот" in text.lower():
             return "котики"
-        elif "закат" in text:
+        elif "закат" in text.lower():
             return "закаты"
-        elif "соба" in text:
+        elif "соба" in text.lower():
             return "собаки"
         return "красивые картинки"
-    return text
-
-def analyze_intent(text):
-    messages = [
-        {"role": "system", "content": "Определи намерение. Ответь: search, image, video, time, chat, remind."},
-        {"role": "user", "content": text}
-    ]
-    return ask_ai(messages, max_tokens=20)
+    return result
 
 # ========================== ГОЛОС ==========================
 def transcribe_audio(file_url):
@@ -428,7 +412,7 @@ async def webhook(request: Request):
             save_msg(chat_id, "assistant", reply)
             return {"ok": True}
 
-        # ===== ПОИСК (ОСНОВНОЙ) =====
+        # ===== ПОИСК =====
         if any(w in lower for w in ["найди", "узнай", "где", "телефон", "контакт", "клиника", "авито", "дром", "озон", "валдберис", "wildberries"]):
             q = clean_query(text)
             if not q or len(q) < 3:
