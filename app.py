@@ -8,6 +8,7 @@ from datetime import datetime
 import os
 import requests
 import re
+import json
 from dotenv import load_dotenv
 from openai import OpenAI
 from supabase import create_client
@@ -43,27 +44,30 @@ if SUPABASE_URL and SUPABASE_KEY:
 deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 
 # ==========================
-# ПРОМПТ
+# ПРОМПТ ГИБРИДНОЙ ПАМЯТИ
 # ==========================
 
 AGENT_PROMPT = """Ты — AURA, живой ИИ-помощник.
 
-ТЫ ПОМНИШЬ ВСЁ:
-- Ты помнишь всю историю общения с пользователем
-- Ты знаешь его имя, город, предпочтения
-- Ты можешь вернуться к любой теме из прошлого
+ТЫ РАБОТАЕШЬ КАК Я:
+- Ты НЕ цитируешь историю дословно
+- Ты ПЕРЕСКАЗЫВАЕШЬ по смыслу, как человек
+- Ты используешь контекст, чтобы дать живой ответ
+- Ты адаптируешься под текущий диалог
+
+ТВОЙ ПОДХОД К ПАМЯТИ:
+1. Ты помнишь факты (имя, город, предпочтения)
+2. Ты помнишь последний диалог (15 сообщений)
+3. Если нужно вспомнить старое — ты пересказываешь суть, а не цитируешь
+4. Ты всегда отвечаешь ПО ДЕЛУ, а не просто выдаёшь историю
 
 ТВОЙ СТИЛЬ:
-- Отвечай как человек: тепло, с душой
-- Используй контекст прошлых разговоров
-- Задавай уточняющие вопросы
-- Будь кратким (2-5 предложений)
+- Тепло, с душой, с лёгким юмором
+- Кратко (2-5 предложений)
+- Задавай встречные вопросы
+- Будь живым, как человек
 
-ЕСЛИ ТЕБЯ СПРАШИВАЮТ О ТОМ, ЧЕГО ТЫ НЕ УМЕЕШЬ:
-- Честно скажи: "Эта функция пока в разработке, но я запомню твой вопрос!"
-- Не выдумывай и не галлюцинируй
-
-ТЫ НЕ ПРОСТО ОТВЕЧАЕШЬ — ТЫ ПОМНИШЬ.
+ТЫ НЕ КАЛЬКУЛЯТОР. ТЫ — ДРУГ.
 """
 
 # ==========================
@@ -97,18 +101,17 @@ def get_recent_history(user_id, limit=15):
     except:
         return []
 
-def search_in_history(user_id, query):
+def get_all_history(user_id, limit=100):
     if not supabase:
         return []
     try:
         response = supabase.table("history")\
-            .select("*")\
+            .select("content")\
             .eq("user_id", user_id)\
-            .ilike("content", f"%{query}%")\
-            .order("created_at", desc=True)\
-            .limit(10)\
+            .order("created_at", desc=False)\
+            .limit(limit)\
             .execute()
-        return response.data if response.data else []
+        return [item["content"] for item in response.data] if response.data else []
     except:
         return []
 
@@ -223,14 +226,13 @@ def save_user(user_id, name=None, city=None):
         pass
 
 # ==========================
-# ИЗВЛЕЧЕНИЕ ФАКТОВ — ИСПРАВЛЕНО!
+# ИЗВЛЕЧЕНИЕ ФАКТОВ
 # ==========================
 
 def extract_facts(text, user_id):
-    """Извлекает факты из сообщения. Инской → Белово."""
     text_lower = text.lower()
     
-    # ===== ИМЯ =====
+    # ИМЯ
     if "меня зовут" in text_lower:
         parts = text_lower.split("меня зовут")
         if len(parts) > 1:
@@ -240,16 +242,7 @@ def extract_facts(text, user_id):
                 save_user(user_id, name=name)
                 print(f"✅ Запомнил имя: {name}")
     
-    if "зовут" in text_lower and "меня" not in text_lower:
-        parts = text_lower.split("зовут")
-        if len(parts) > 1:
-            name = parts[1].strip().split()[0].capitalize()
-            if name and len(name) > 1:
-                save_fact(user_id, "name", name)
-                save_user(user_id, name=name)
-                print(f"✅ Запомнил имя: {name}")
-    
-    # ===== ГОРОД =====
+    # ГОРОД
     city = None
     patterns = [
         r"из\s+([А-Яа-яёЁ\-]{3,})",
@@ -264,49 +257,54 @@ def extract_facts(text, user_id):
             break
     
     if city:
-        # Инской → Белово
         if city.lower() in ["инской", "инского", "инском"]:
             city = "Белово"
         save_fact(user_id, "city", city)
         save_user(user_id, city=city)
         print(f"✅ Запомнил город: {city}")
     
-    # ===== ЛЮБИТ/НЕ ЛЮБИТ =====
+    # ЛЮБИТ/НЕ ЛЮБИТ
     if "нравится" in text_lower:
         save_fact(user_id, "likes", text)
     if "не нравится" in text_lower:
         save_fact(user_id, "dislikes", text)
     
-    # ===== ТЕМЫ =====
+    # ТЕМЫ
     words = re.findall(r'\b[а-яА-ЯёЁ]{4,}\b', text_lower)
-    stop_words = ["привет", "здравствуй", "спасибо", "пока", "да", "нет", "хорошо", "плохо", "просто", "так", "ещё", "очень", "можно", "надо", "будет"]
+    stop_words = ["привет", "здравствуй", "спасибо", "пока", "да", "нет", "хорошо", "плохо"]
     for word in words:
         if word not in stop_words and len(word) > 3:
             save_topic(user_id, word)
 
 # ==========================
-# ПОИСК ПО ИСТОРИИ
+# ГИБРИДНЫЙ ПОИСК ПО СМЫСЛУ
 # ==========================
 
-def handle_memory_query(user_id, text):
-    """Обрабатывает запросы типа 'напомни'"""
-    memory_triggers = ["помнишь", "напомни", "что мы говорили", "о чём мы говорили", "когда мы обсуждали"]
-    if any(trigger in text.lower() for trigger in memory_triggers):
-        query = text
-        for trigger in memory_triggers:
-            query = query.replace(trigger, "")
-        query = query.strip()
-        
-        if query:
-            results = search_in_history(user_id, query)
-            if results:
-                found = []
-                for msg in results[:5]:
-                    found.append(f"• {msg['role']}: {msg['content'][:200]}...")
-                return "\n".join(found)
-            else:
-                return "📭 Не нашёл ничего в истории по этому запросу. Может, уточним?"
-    return None
+def search_by_meaning(user_id, query):
+    """
+    Ищет в истории по смыслу через DeepSeek
+    """
+    # Получаем всю историю (последние 50 сообщений)
+    history = get_all_history(user_id, limit=50)
+    if not history:
+        return None
+    
+    # Формируем запрос к DeepSeek
+    messages = [
+        {"role": "system", "content": "Ты — поисковик по истории. Найди в истории диалога информацию, которая относится к запросу пользователя. Верни ТОЛЬКО найденные фрагменты (1-3 предложения), без лишнего текста."},
+        {"role": "user", "content": f"История диалога:\n{chr(10).join(history[-30:])}\n\nЗапрос: {query}\n\nНайди релевантные фрагменты из истории."}
+    ]
+    
+    try:
+        response = deepseek.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=messages,
+            temperature=0.3,
+            max_tokens=200
+        )
+        return response.choices[0].message.content
+    except:
+        return None
 
 # ==========================
 # ЗАГЛУШКИ
@@ -329,23 +327,51 @@ def handle_voice():
 # ==========================
 
 async def process_message(user_id, text):
-    """Обработка сообщения с памятью и заглушками"""
+    """Гибридная память: хранение + пересоздание ответов"""
     
+    # Сохраняем сообщение
     save_message(user_id, "user", text)
     extract_facts(text, user_id)
     
-    # Получаем факты для подтверждения
+    # Получаем факты
     facts = get_user_facts(user_id)
     
-    # Проверяем, не хочет ли пользователь вспомнить что-то
-    memory_result = handle_memory_query(user_id, text)
-    if memory_result:
-        save_message(user_id, "assistant", memory_result)
-        return memory_result
-    
-    text_lower = text.lower()
+    # ===== ЗАПРОС НА ПОИСК В ИСТОРИИ =====
+    memory_triggers = ["помнишь", "напомни", "что мы говорили", "о чём мы говорили", "когда мы обсуждали"]
+    if any(trigger in text.lower() for trigger in memory_triggers):
+        # Ищем по смыслу через DeepSeek
+        query = text
+        for trigger in memory_triggers:
+            query = query.replace(trigger, "")
+        query = query.strip()
+        
+        if query:
+            found = search_by_meaning(user_id, query)
+            if found and "не найдено" not in found.lower():
+                # Передаём найденное в основной диалог
+                messages = [
+                    {"role": "system", "content": AGENT_PROMPT},
+                    {"role": "system", "content": f"В истории найдено:\n{found}\n\nПерескажи это своими словами, живо и тепло."},
+                    {"role": "user", "content": text}
+                ]
+                try:
+                    response = deepseek.chat.completions.create(
+                        model="deepseek-v4-flash",
+                        messages=messages,
+                        temperature=0.8,
+                        max_tokens=400
+                    )
+                    reply = response.choices[0].message.content
+                    save_message(user_id, "assistant", reply)
+                    return reply
+                except:
+                    pass
+            
+            return "📭 Не нашёл ничего по смыслу в истории. Может, уточним?"
     
     # ===== ЗАГЛУШКИ =====
+    text_lower = text.lower()
+    
     if "погод" in text_lower:
         city = facts.get("city", "твоём городе")
         reply = handle_weather(city)
@@ -367,20 +393,21 @@ async def process_message(user_id, text):
         save_message(user_id, "assistant", reply)
         return reply
     
-    # ===== ОБЫЧНЫЙ ДИАЛОГ =====
+    # ===== ОСНОВНОЙ ДИАЛОГ (ГИБРИДНЫЙ) =====
     recent = get_recent_history(user_id, limit=15)
     topics = get_all_topics(user_id)
     
+    # Формируем контекст
     context = []
     
     if facts:
-        context.append("📋 ИЗВЕСТНО О ПОЛЬЗОВАТЕЛЕ:")
+        context.append("📋 О ПОЛЬЗОВАТЕЛЕ:")
         for key, value in facts.items():
             if key in ["name", "city"]:
                 context.append(f"- {key}: {value}")
     
     if topics:
-        context.append(f"📚 ТЕМЫ РАЗГОВОРОВ: {', '.join(topics[:10])}")
+        context.append(f"📚 ТЕМЫ: {', '.join(topics[:10])}")
     
     context.append("💬 ПОСЛЕДНИЙ ДИАЛОГ:")
     for msg in recent[-10:]:
@@ -399,18 +426,18 @@ async def process_message(user_id, text):
         response = deepseek.chat.completions.create(
             model="deepseek-v4-flash",
             messages=messages,
-            temperature=0.8,
+            temperature=0.85,
             max_tokens=500
         )
         reply = response.choices[0].message.content
         
-        # Добавляем подтверждение, если запомнили имя или город
+        # Подтверждение
         if "name" in facts and "city" in facts:
-            reply = f"✅ Запомнил! Ты {facts['name']} из {facts['city']}.\n\n{reply}"
+            reply = f"✅ Помню! Ты {facts['name']} из {facts['city']}.\n\n{reply}"
         elif "name" in facts:
-            reply = f"✅ Запомнил, что тебя зовут {facts['name']}!\n\n{reply}"
+            reply = f"✅ Помню, что тебя зовут {facts['name']}!\n\n{reply}"
         elif "city" in facts:
-            reply = f"✅ Запомнил, что ты из {facts['city']}.\n\n{reply}"
+            reply = f"✅ Помню, что ты из {facts['city']}.\n\n{reply}"
         
         save_message(user_id, "assistant", reply)
         return reply
@@ -440,7 +467,7 @@ async def webhook(request: Request):
             
             if text.startswith("/start"):
                 save_user(user_id, message["from"]["first_name"])
-                reply = "👋 Привет! Я AURA. Я запоминаю ВСЁ, что ты говоришь. Можешь спросить меня о чём угодно — я помню нашу историю! 🤗"
+                reply = "👋 Привет! Я AURA — с гибридной памятью.\n\nЯ храню ВСЁ, но отвечаю как человек — пересказываю по смыслу, не цитирую.\n\nСпроси меня о чём угодно! 🤗"
             else:
                 reply = await process_message(user_id, text)
             
@@ -456,7 +483,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA Memory Agent is alive"}
+    return {"status": "AURA Hybrid Memory is alive"}
 
 if __name__ == "__main__":
     import uvicorn
