@@ -8,15 +8,12 @@ from datetime import datetime
 import os
 import requests
 import json
+import re
 from dotenv import load_dotenv
 from openai import OpenAI
 from supabase import create_client
 
 load_dotenv()
-
-# ==========================
-# КЛЮЧИ
-# ==========================
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
@@ -44,21 +41,46 @@ deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 
 AGENT_PROMPT = """Ты — AURA, умный и живой ИИ-помощник.
 
-Твоя задача — общаться как человек, помогать и запоминать важную информацию о пользователе.
+Ты всегда помнишь имя и город пользователя. Ты используешь их в каждом ответе.
 
-ПРАВИЛА:
-1. Всегда используй имя пользователя, если оно известно.
-2. Если пользователь спрашивает о чём-то, что ты не знаешь — скажи честно.
-3. Отвечай кратко (2-4 предложения), но тепло и с душой.
-4. Если пользователь представляется — запомни это и в следующем ответе используй его имя.
-5. Если пользователь говорит, откуда он — запомни город.
+Если пользователь спрашивает «как меня зовут» или «где я живу» — ты отвечаешь из своих фактов.
 
-Ты — не просто бот. Ты — друг и помощник.
+Правила:
+1. Всегда используй имя в ответе.
+2. Отвечай кратко (2-4 предложения), тепло, как человек.
+3. Не галлюцинируй. Если не знаешь — скажи «я не знаю».
 """
 
 # ==========================
-# РАБОТА С БАЗОЙ ДАННЫХ
+# РАБОТА С БАЗОЙ
 # ==========================
+
+def save_fact(user_id, key, value):
+    if not supabase:
+        return
+    try:
+        supabase.table("user_memory").delete().eq("user_id", user_id).eq("key", key).execute()
+        supabase.table("user_memory").insert({
+            "user_id": user_id,
+            "key": key,
+            "value": value,
+            "created_at": datetime.now().isoformat()
+        }).execute()
+        print(f"💾 Сохранён факт: {key} = {value}")
+    except Exception as e:
+        print(f"❌ Ошибка сохранения факта: {e}")
+
+def get_facts(user_id):
+    if not supabase:
+        return {}
+    try:
+        response = supabase.table("user_memory").select("key, value").eq("user_id", user_id).execute()
+        if response.data:
+            return {item["key"]: item["value"] for item in response.data}
+        return {}
+    except Exception as e:
+        print(f"❌ Ошибка получения фактов: {e}")
+        return {}
 
 def save_message(user_id, role, content):
     if not supabase:
@@ -88,52 +110,20 @@ def get_recent_history(user_id, limit=15):
         print(f"❌ Ошибка получения истории: {e}")
         return []
 
-def save_fact(user_id, key, value):
-    if not supabase:
-        return
-    try:
-        supabase.table("user_memory").delete().eq("user_id", user_id).eq("key", key).execute()
-        supabase.table("user_memory").insert({
-            "user_id": user_id,
-            "key": key,
-            "value": value,
-            "created_at": datetime.now().isoformat()
-        }).execute()
-        print(f"💾 Сохранён факт: {key} = {value}")
-    except Exception as e:
-        print(f"❌ Ошибка сохранения факта: {e}")
-
-def get_facts(user_id):
-    if not supabase:
-        return {}
-    try:
-        response = supabase.table("user_memory").select("key, value").eq("user_id", user_id).execute()
-        if response.data:
-            return {item["key"]: item["value"] for item in response.data}
-        return {}
-    except Exception as e:
-        print(f"❌ Ошибка получения фактов: {e}")
-        return {}
-
 # ==========================
-# ИЗВЛЕЧЕНИЕ ИМЕНИ И ГОРОДА ЧЕРЕЗ ДИПСИК
+# ИЗВЛЕЧЕНИЕ ИМЕНИ И ГОРОДА
 # ==========================
 
 def extract_info(text):
-    """DeepSeek сам находит имя и город в тексте"""
     try:
         response = deepseek.chat.completions.create(
             model="deepseek-v4-flash",
             messages=[
                 {"role": "system", "content": """
-Ты — помощник. Из текста пользователя нужно извлечь:
-1. Имя человека (если он представляется)
-2. Город (если он говорит, где живёт или откуда)
-
+Ты — помощник. Из текста пользователя нужно извлечь имя и город.
 Верни ответ строго в формате JSON:
 {"name": "имя или null", "city": "город или null"}
 
-Если имя не указано — верни null. Если город не указан — верни null.
 Примеры:
 "меня зовут Вадим" → {"name": "Вадим", "city": null}
 "я из Инского" → {"name": null, "city": "Белово"}
@@ -145,7 +135,6 @@ def extract_info(text):
             max_tokens=100
         )
         result = response.choices[0].message.content.strip()
-        print(f"🔍 AI ответ: {result}")
         data = json.loads(result)
         return data.get("name"), data.get("city")
     except Exception as e:
@@ -153,16 +142,15 @@ def extract_info(text):
         return None, None
 
 # ==========================
-# ГЛАВНАЯ ЛОГИКА БОТА
+# ОСНОВНАЯ ЛОГИКА
 # ==========================
 
 async def process_message(user_id, text):
-    # Сохраняем сообщение пользователя
+    # Сохраняем сообщение
     save_message(user_id, "user", text)
 
-    # Извлекаем имя и город через DeepSeek
+    # Извлекаем и сохраняем факты
     name, city = extract_info(text)
-
     if name:
         save_fact(user_id, "name", name)
     if city:
@@ -170,15 +158,16 @@ async def process_message(user_id, text):
             city = "Белово"
         save_fact(user_id, "city", city)
 
-    # Получаем все факты
+    # ПОЛУЧАЕМ ФАКТЫ ИЗ БАЗЫ (ВАЖНО!)
     facts = get_facts(user_id)
     user_name = facts.get("name")
     user_city = facts.get("city")
 
-    print(f"📋 Итоговые факты: имя={user_name}, город={user_city}")
+    print(f"📋 Имя: {user_name}, Город: {user_city}")
 
-    # Проверяем, если пользователь спрашивает имя или город
+    # ===== ПРЯМЫЕ ВОПРОСЫ =====
     text_lower = text.lower()
+
     if "как меня зовут" in text_lower or "моё имя" in text_lower:
         if user_name:
             reply = f"Тебя зовут **{user_name}**! 😊"
@@ -195,7 +184,7 @@ async def process_message(user_id, text):
         save_message(user_id, "assistant", reply)
         return reply
 
-    # Заглушки
+    # ===== ЗАГЛУШКИ =====
     if "погода" in text_lower:
         reply = "🌤️ Погода пока в разработке. Как только добавлю API — сразу скажу!"
         save_message(user_id, "assistant", reply)
@@ -206,16 +195,14 @@ async def process_message(user_id, text):
         save_message(user_id, "assistant", reply)
         return reply
 
-    # Основной диалог
+    # ===== ОСНОВНОЙ ДИАЛОГ =====
     history = get_recent_history(user_id, limit=15)
 
-    # Формируем контекст
     context = []
     if user_name:
         context.append(f"👤 Имя пользователя: {user_name}")
     if user_city:
         context.append(f"📍 Город: {user_city}")
-    
     context.append("💬 Последние сообщения:")
     for msg in history[-10:]:
         role = "Пользователь" if msg["role"] == "user" else "AURA"
@@ -238,7 +225,7 @@ async def process_message(user_id, text):
         )
         reply = response.choices[0].message.content
 
-        # Если имя есть — добавляем в ответ
+        # Если есть имя — добавляем его в начало
         if user_name and not reply.startswith(user_name):
             reply = f"{user_name}, {reply[0].lower() + reply[1:] if reply else ''}"
 
