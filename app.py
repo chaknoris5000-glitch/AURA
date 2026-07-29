@@ -10,7 +10,7 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DEEPSEEK_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
-OPENSERP_URL = os.getenv("OPENSERP_URL", "http://localhost:7000")  # можно поменять на адрес на Render
+TAVILY_KEY = os.getenv("TAVILY_API_KEY")
 GROQ_KEY = os.getenv("GROQ_API_KEY")
 
 if not TELEGRAM_TOKEN or not DEEPSEEK_KEY:
@@ -83,51 +83,65 @@ def get_real_time(city):
         pass
     return None
 
-# ========================== ПОИСК ЧЕРЕЗ OPENSERP ==========================
-def search_openserv(query, search_type="web"):
-    """
-    search_type: web, images, video
-    """
+# ========================== ПРОВЕРКА ССЫЛОК ==========================
+def check_url(url):
     try:
-        params = {
-            "text": query,
-            "engine": "yandex",
-            "gl": "ru",
-            "hl": "ru"
-        }
-        
-        # Для картинок и видео меняем движок
-        if search_type == "images":
-            params["engine"] = "yandex_images"
-        elif search_type == "video":
-            params["engine"] = "yandex_video"
-        
-        resp = requests.get(f"{OPENSERP_URL}/search", params=params, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            results = data.get("results", [])
+        r = requests.head(url, timeout=5, allow_redirects=True)
+        return r.status_code in [200, 301, 302]
+    except:
+        return False
+
+# ========================== ПОИСК (TAVILY + DUCK) ==========================
+def search_web(query):
+    # 1. Пробуем Tavily
+    if TAVILY_KEY:
+        try:
+            from tavily import TavilyClient
+            client = TavilyClient(api_key=TAVILY_KEY)
+            res = client.search(query, search_depth="advanced", max_results=3, include_answer=True)
             
-            # Формируем ответ
-            if results:
-                text_results = []
-                urls = []
-                for r in results[:3]:
-                    title = r.get("title", "")
-                    snippet = r.get("snippet", "")
+            if res.get("answer"):
+                # Если Tavily дал готовый ответ — возвращаем его
+                return {"text": res["answer"][:500], "urls": []}
+            
+            if res.get("results"):
+                for r in res["results"][:3]:
                     url = r.get("url", "")
-                    if title and url:
-                        text_results.append(f"{title}\n{snippet[:200]}...")
-                        urls.append(url)
-                
-                return {
-                    "text": "\n\n".join(text_results),
-                    "urls": urls
-                }
+                    if url:
+                        # Проверяем, открывается ли ссылка
+                        is_valid = check_url(url)
+                        return {
+                            "text": r.get("content", "")[:400],
+                            "urls": [url],
+                            "valid": is_valid
+                        }
+        except Exception as e:
+            print(f"❌ Tavily ошибка: {e}")
+    
+    # 2. Если Tavily не сработал — пробуем DuckDuckGo
+    try:
+        url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(resp.text, "html.parser")
         
-        return None
+        for result in soup.select(".result")[:3]:
+            title = result.select_one(".result__title")
+            snippet = result.select_one(".result__snippet")
+            link = result.select_one(".result__url")
+            if title and snippet and link:
+                link_text = html.unescape(link.text.strip())
+                if link_text:
+                    is_valid = check_url(link_text)
+                    return {
+                        "text": f"{html.unescape(title.text.strip())}\n{html.unescape(snippet.text.strip())}",
+                        "urls": [link_text],
+                        "valid": is_valid
+                    }
     except Exception as e:
-        print(f"❌ OpenSERP ошибка: {e}")
-        return None
+        print(f"❌ DuckDuckGo ошибка: {e}")
+    
+    return None
 
 # ========================== AI ==========================
 client = OpenAI(api_key=DEEPSEEK_KEY, base_url=DEEPSEEK_URL)
@@ -294,46 +308,49 @@ async def webhook(request: Request):
             return {"ok": True}
 
         # ==========================
-        # 3. КАРТИНКИ (через OpenSERP)
+        # 3. КАРТИНКИ
         # ==========================
         if "картинк" in lower or "рисунк" in lower or "фото" in lower:
             q = clean_query(text)
-            result = search_openserv(q, search_type="images")
-            if result and result.get("urls"):
-                reply = f"🖼️ Картинки по запросу «{q}»:\n🔗 {result['urls'][0]}"
-            else:
-                link = f"https://yandex.ru/images/search?text={q.replace(' ', '%20')}"
-                reply = f"🖼️ Картинки по запросу «{q}»:\n{link}"
-            send_msg(chat_id, reply + "\n\nЧто ещё могу сделать?")
+            link = f"https://yandex.ru/images/search?text={q.replace(' ', '%20')}"
+            reply = f"🖼️ Картинки по запросу «{q}»:\n{link}\n\nЧто ещё могу сделать?"
+            send_msg(chat_id, reply)
             save_msg(chat_id, "assistant", reply)
             return {"ok": True}
 
         # ==========================
-        # 4. ВИДЕО (через OpenSERP)
+        # 4. ВИДЕО
         # ==========================
         if "видео" in lower or "ютуб" in lower or "клип" in lower:
             q = clean_query(text)
-            result = search_openserv(q, search_type="video")
-            if result and result.get("urls"):
-                reply = f"🎬 Видео по запросу «{q}»:\n🔗 {result['urls'][0]}"
-            else:
-                link = f"https://yandex.ru/video/search?text={q.replace(' ', '%20')}"
-                reply = f"🎬 Видео по запросу «{q}»:\n{link}"
-            send_msg(chat_id, reply + "\n\nЧто ещё могу сделать?")
+            link = f"https://yandex.ru/video/search?text={q.replace(' ', '%20')}"
+            reply = f"🎬 Видео по запросу «{q}»:\n{link}\n\nЧто ещё могу сделать?"
+            send_msg(chat_id, reply)
             save_msg(chat_id, "assistant", reply)
             return {"ok": True}
 
         # ==========================
-        # 5. ПОИСК (через OpenSERP)
+        # 5. ПОИСК (TAVILY + DUCK)
         # ==========================
         if any(w in lower for w in ["найди", "узнай", "где", "сайт", "адрес", "телефон", "клиника", "авито", "дром", "озон", "валдберис", "wildberries"]):
-            result = search_openserv(text, search_type="web")
+            # Очищаем запрос
+            q = clean_query(text)
+            if not q or len(q) < 3:
+                q = text
+            
+            result = search_web(q)
+            
             if result and result.get("urls"):
-                reply = f"{result['text'][:400]}\n\n🔗 {result['urls'][0]}"
+                url = result["urls"][0]
+                if result.get("valid", False):
+                    reply = f"{result['text'][:400]}\n\n🔗 {url}"
+                else:
+                    reply = f"{result['text'][:400]}\n\n⚠️ Ссылка не открылась, но вот адрес: {url}"
             elif result and result.get("text"):
                 reply = result["text"][:400]
             else:
                 reply = "Не нашёл. Попробуй переформулировать."
+            
             send_msg(chat_id, reply + "\n\nЧто ещё могу сделать?")
             save_msg(chat_id, "assistant", reply)
             return {"ok": True}
