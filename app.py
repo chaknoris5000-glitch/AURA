@@ -51,15 +51,13 @@ AGENT_PROMPT = """Ты — AURA, живой ИИ-помощник с ГИБРИ�
 ТЫ ПОМНИШЬ ВСЁ:
 - Ты знаешь имя, город и предпочтения пользователя
 - Ты используешь эту информацию в каждом ответе
-- Ты НЕ галлюцинируешь — если не знаешь, скажи "не помню"
+- Ты НЕ галлюцинируешь
 
 ТВОЙ СТИЛЬ:
 - Отвечай как человек: тепло, с душой
 - Используй имя пользователя в ответе
 - Задавай встречные вопросы
 - Будь кратким (2-4 предложения)
-
-ТЫ НЕ ВЫДУМЫВАЕШЬ ИМЯ — ты берёшь его из фактов.
 """
 
 # ==========================
@@ -76,6 +74,7 @@ def save_message(user_id, role, content):
             "content": content,
             "created_at": datetime.now().isoformat()
         }).execute()
+        print(f"💾 Сохранено {role}: {content[:30]}...")
     except Exception as e:
         print(f"❌ Ошибка сохранения: {e}")
 
@@ -103,7 +102,10 @@ def get_user_facts(user_id):
             .eq("user_id", user_id)\
             .execute()
         if response.data:
-            return {item["key"]: item["value"] for item in response.data}
+            facts = {item["key"]: item["value"] for item in response.data}
+            print(f"📋 Факты из БД: {facts}")
+            return facts
+        print(f"📋 Фактов нет для {user_id}")
         return {}
     except Exception as e:
         print(f"❌ Ошибка получения фактов: {e}")
@@ -124,6 +126,7 @@ def save_fact(user_id, key, value):
             "value": value,
             "created_at": datetime.now().isoformat()
         }).execute()
+        print(f"💾 СОХРАНЁН ФАКТ: {key} = {value}")
     except Exception as e:
         print(f"❌ Ошибка сохранения факта: {e}")
 
@@ -160,6 +163,7 @@ def save_user(user_id, name=None, city=None):
                 "created_at": datetime.now().isoformat(),
                 "trial_start": datetime.now().isoformat()
             }).execute()
+        print(f"💾 СОХРАНЁН ПОЛЬЗОВАТЕЛЬ: {user_id} -> name={name}, city={city}")
     except Exception as e:
         print(f"❌ Ошибка сохранения пользователя: {e}")
 
@@ -179,6 +183,7 @@ def extract_facts(text, user_id):
                 save_fact(user_id, "name", name)
                 save_user(user_id, name=name)
                 print(f"✅ Запомнил имя: {name}")
+                return True
     
     # ГОРОД
     city = None
@@ -199,23 +204,45 @@ def extract_facts(text, user_id):
         save_fact(user_id, "city", city)
         save_user(user_id, city=city)
         print(f"✅ Запомнил город: {city}")
+        return True
+    
+    return False
 
 # ==========================
 # ОСНОВНАЯ ЛОГИКА
 # ==========================
 
 async def process_message(user_id, text):
+    # Сохраняем сообщение
     save_message(user_id, "user", text)
+    
+    # Извлекаем факты
     extract_facts(text, user_id)
     
+    # ПОЛУЧАЕМ ФАКТЫ
     facts = get_user_facts(user_id)
     name = facts.get("name")
     city = facts.get("city")
     
+    print(f"🔍 Имя: {name}, Город: {city}")
+    
+    # ===== ЕСЛИ ПОЛЬЗОВАТЕЛЬ НАПИСАЛ ТОЛЬКО ИМЯ =====
+    words = text.strip().split()
+    if len(words) == 1 and len(words[0]) > 1 and words[0][0].isupper():
+        possible_name = words[0].capitalize()
+        if possible_name not in ["Привет", "Здравствуй", "Спасибо", "Пока", "Да", "Нет"]:
+            if not name:
+                save_fact(user_id, "name", possible_name)
+                save_user(user_id, name=possible_name)
+                name = possible_name
+                reply = f"✅ Запомнила! Тебя зовут **{name}**. Приятно познакомиться! 😊"
+                save_message(user_id, "assistant", reply)
+                return reply
+    
+    # ===== ПРЯМЫЕ ВОПРОСЫ =====
     text_lower = text.lower()
     
-    # Прямые вопросы
-    if "как меня зовут" in text_lower or "моё имя" in text_lower:
+    if "как меня зовут" in text_lower or "моё имя" in text_lower or "напомни имя" in text_lower:
         if name:
             reply = f"Тебя зовут **{name}**! Я запомнила это. 😊"
         else:
@@ -231,7 +258,7 @@ async def process_message(user_id, text):
         save_message(user_id, "assistant", reply)
         return reply
     
-    # Заглушки
+    # ===== ЗАГЛУШКИ =====
     if "погод" in text_lower:
         reply = "🌤️ Погода — в разработке! Как только добавлю API — скажу. 😊"
         save_message(user_id, "assistant", reply)
@@ -242,15 +269,15 @@ async def process_message(user_id, text):
         save_message(user_id, "assistant", reply)
         return reply
     
-    # Основной диалог
+    # ===== ОСНОВНОЙ ДИАЛОГ =====
     recent = get_recent_history(user_id, limit=15)
     
     context = []
     if name:
-        context.append(f"👤 Имя: {name}")
+        context.append(f"👤 Имя пользователя: {name}")
     if city:
         context.append(f"📍 Город: {city}")
-    context.append("💬 ДИАЛОГ:")
+    context.append("💬 ПОСЛЕДНИЙ ДИАЛОГ:")
     for msg in recent[-10:]:
         role = "Пользователь" if msg["role"] == "user" else "AURA"
         context.append(f"{role}: {msg['content'][:200]}")
@@ -259,7 +286,7 @@ async def process_message(user_id, text):
     
     messages = [
         {"role": "system", "content": AGENT_PROMPT},
-        {"role": "system", "content": f"ФАКТЫ:\nИмя: {name or 'неизвестно'}\nГород: {city or 'неизвестен'}\n\nКОНТЕКСТ:\n{context_text}"},
+        {"role": "system", "content": f"ФАКТЫ О ПОЛЬЗОВАТЕЛЕ:\nИмя: {name or 'неизвестно'}\nГород: {city or 'неизвестен'}\n\nКОНТЕКСТ:\n{context_text}"},
         {"role": "user", "content": text}
     ]
     
@@ -271,6 +298,11 @@ async def process_message(user_id, text):
             max_tokens=400
         )
         reply = response.choices[0].message.content
+        
+        # Если в ответе нет имени и оно есть в фактах — добавляем
+        if name and name not in reply:
+            reply = f"{name}, {reply.lower()}"
+        
         save_message(user_id, "assistant", reply)
         return reply
     except Exception as e:
@@ -315,10 +347,6 @@ async def webhook(request: Request):
 @app.get("/")
 async def root():
     return {"status": "AURA Hybrid Memory is alive"}
-
-# ==========================
-# ЗАПУСК
-# ==========================
 
 if __name__ == "__main__":
     import uvicorn
