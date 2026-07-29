@@ -278,7 +278,7 @@ async def process_message(user_id, text):
         return "😅 Упс, что-то пошло не так. Попробуй ещё раз!"
 
 # ==========================
-# FASTAPI APP — ПРАВИЛЬНО!
+# FASTAPI APP
 # ==========================
 
 app = FastAPI()
