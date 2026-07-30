@@ -49,6 +49,7 @@ def save_message(user_id, role, content):
             "content": content,
             "created_at": datetime.now().isoformat()
         }).execute()
+        print(f"💾 Сохранено в history: {role} -> {content[:30]}...")
     except Exception as e:
         print(f"❌ Ошибка сохранения: {e}")
 
@@ -97,6 +98,7 @@ def save_fact(user_id, key, value):
             "value": value,
             "created_at": datetime.now().isoformat()
         }).execute()
+        print(f"💾 Сохранён факт: {key} = {value}")
     except Exception as e:
         print(f"❌ Ошибка сохранения факта: {e}")
 
@@ -126,25 +128,6 @@ def extract_city(text):
             return "Белово"
         return city
     return None
-
-# ===== УМНАЯ ПРОВЕРКА: ЗАПРОС К ИСТОРИИ ИЛИ НЕТ? =====
-
-def is_history_query(text):
-    """DeepSeek определяет, хочет ли пользователь найти что-то в истории"""
-    try:
-        response = deepseek.chat.completions.create(
-            model="deepseek-v4-flash",
-            messages=[
-                {"role": "system", "content": "Ты — помощник. Определи, хочет ли пользователь найти что-то из прошлого (истории диалога). Если вопрос про прошлое — ответь 'да'. Если это обычный вопрос — ответь 'нет'. Ответь только одним словом."},
-                {"role": "user", "content": text}
-            ],
-            temperature=0.1,
-            max_tokens=10
-        )
-        answer = response.choices[0].message.content.strip().lower()
-        return "да" in answer
-    except:
-        return False
 
 # ===== РАСПОЗНАВАНИЕ ГОЛОСА =====
 
@@ -201,7 +184,9 @@ async def webhook(request: Request):
         if not text:
             return JSONResponse({"ok": True})
 
-        # ===== СОХРАНЯЕМ СООБЩЕНИЕ =====
+        # ===== ===== ===== ===== ===== ===== ===== ===== ===== =====
+        # ===== ГЛАВНОЕ: СОХРАНЯЕМ КАЖДОЕ СООБЩЕНИЕ В ИСТОРИЮ =====
+        # ===== ===== ===== ===== ===== ===== ===== ===== ===== =====
         save_message(user_id, "user", text)
 
         # ===== ИЗВЛЕКАЕМ ФАКТЫ =====
@@ -232,17 +217,11 @@ async def webhook(request: Request):
             await send_message(user_id, reply)
             return JSONResponse({"ok": True})
 
-        # ===== УМНЫЙ ПОИСК В ИСТОРИИ (БЕЗ КЛЮЧЕВЫХ СЛОВ) =====
-        if is_history_query(text):
-            # Извлекаем ключевые слова из вопроса
+        # ===== ПОИСК В ИСТОРИИ =====
+        if any(w in lower for w in ["напомни", "что я говорил", "найди в истории", "вспомни"]):
             query = text
-            # Убираем вопросительные слова
-            for w in ["что", "кто", "где", "когда", "почему", "зачем", "как", "какой", "какая"]:
+            for w in ["напомни", "что я говорил", "найди в истории", "вспомни"]:
                 query = query.replace(w, "").strip()
-            # Если в запросе есть имя пользователя — убираем его
-            if user_name:
-                query = query.replace(user_name.lower(), "").strip()
-            
             if query:
                 results = search_history(user_id, query)
                 if results:
@@ -254,17 +233,19 @@ async def webhook(request: Request):
                     await send_message(user_id, reply)
                     return JSONResponse({"ok": True})
                 else:
-                    # Если ничего не нашлось — отвечаем как обычно
-                    pass
+                    reply = "📭 Ничего не нашёл в истории."
+                    save_message(user_id, "assistant", reply)
+                    await send_message(user_id, reply)
+                    return JSONResponse({"ok": True})
 
-        # ===== ОСНОВНОЙ ДИАЛОГ (5 последних сообщений) =====
+        # ===== ОСНОВНОЙ ДИАЛОГ (ТОЛЬКО 5 ПОСЛЕДНИХ) =====
         history = get_recent_history(user_id, limit=5)
-        messages = [{"role": "system", "content": "Ты — AURA, живой помощник. Отвечай кратко и по делу."}]
+        messages = [{"role": "system", "content": "Ты — AURA, живой помощник. Отвечай кратко."}]
         
         if user_name:
-            messages.append({"role": "system", "content": f"Имя пользователя: {user_name}."})
+            messages.append({"role": "system", "content": f"Имя: {user_name}."})
         if user_city:
-            messages.append({"role": "system", "content": f"Город пользователя: {user_city}."})
+            messages.append({"role": "system", "content": f"Город: {user_city}."})
         
         for h in history:
             messages.append({"role": h["role"], "content": h["content"]})
@@ -287,7 +268,7 @@ async def webhook(request: Request):
 
         except Exception as e:
             print(f"❌ Ошибка DeepSeek: {e}")
-            await send_message(user_id, "😅 Что-то пошло не так. Попробуй ещё раз.")
+            await send_message(user_id, "😅 Что-то пошло не так.")
 
         return JSONResponse({"ok": True})
 
