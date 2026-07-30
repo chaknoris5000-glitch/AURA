@@ -2,6 +2,8 @@ import sys
 import io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
+print("🚀 БОТ ЗАПУЩЕН. ВЕРСИЯ С ЛОГАМИ. ДАТА: 30.07.2026")
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from datetime import datetime
@@ -17,6 +19,8 @@ from groq import Groq
 
 load_dotenv()
 
+print("📁 .env загружен")
+
 # ==========================
 # КЛЮЧИ
 # ==========================
@@ -28,13 +32,14 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
+print(f"🔑 TELEGRAM_TOKEN: {TELEGRAM_TOKEN[:10]}..." if TELEGRAM_TOKEN else "❌ НЕТ TELEGRAM_TOKEN")
+print(f"🔑 DEEPSEEK_API_KEY: {DEEPSEEK_API_KEY[:10]}..." if DEEPSEEK_API_KEY else "❌ НЕТ DEEPSEEK_API_KEY")
+print(f"🔑 SUPABASE_URL: {SUPABASE_URL}" if SUPABASE_URL else "❌ НЕТ SUPABASE_URL")
+print(f"🔑 SUPABASE_KEY: {SUPABASE_KEY[:20]}..." if SUPABASE_KEY else "❌ НЕТ SUPABASE_KEY")
+
 # ==========================
 # ПОДКЛЮЧЕНИЯ
 # ==========================
-
-print("🔍 Проверка Supabase...")
-print(f"SUPABASE_URL: {SUPABASE_URL}")
-print(f"SUPABASE_KEY: {SUPABASE_KEY[:20]}...")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -44,10 +49,12 @@ if SUPABASE_URL and SUPABASE_KEY:
     except Exception as e:
         print(f"❌ Ошибка Supabase: {e}")
 else:
-    print("❌ Нет ключей Supabase!")
+    print("❌ НЕТ КЛЮЧЕЙ SUPABASE!")
 
 deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 groq = Groq(api_key=GROQ_API_KEY)
+
+print("✅ ВСЕ ПОДКЛЮЧЕНИЯ ГОТОВЫ")
 
 # ==========================
 # ПРОМПТ
@@ -142,21 +149,30 @@ def get_fact(user_id, key):
 
 def extract_name_force(text):
     """Ищет имя любым способом"""
+    print(f"🔍 Ищем имя в тексте: {text}")
+    
     # 1. Через "меня зовут"
     match = re.search(r"меня зовут\s+([А-Яа-яЁё]+)", text, re.IGNORECASE)
     if match:
-        return match.group(1).capitalize()
+        name = match.group(1).capitalize()
+        print(f"✅ Нашёл имя через 'меня зовут': {name}")
+        return name
     
     # 2. Через "зовут"
     match = re.search(r"зовут\s+([А-Яа-яЁё]+)", text, re.IGNORECASE)
     if match:
-        return match.group(1).capitalize()
+        name = match.group(1).capitalize()
+        print(f"✅ Нашёл имя через 'зовут': {name}")
+        return name
     
     # 3. Если текст начинается с имени (одно слово)
     words = text.strip().split()
     if len(words) == 1 and len(words[0]) > 1:
-        return words[0].capitalize()
+        name = words[0].capitalize()
+        print(f"✅ Нашёл имя как одно слово: {name}")
+        return name
     
+    print("❌ Имя не найдено")
     return None
 
 # ==========================
@@ -189,6 +205,8 @@ def transcribe_audio(audio_url):
 # ==========================
 
 async def process_message(user_id, text):
+    print(f"📩 Обработка сообщения от {user_id}: {text[:50]}...")
+    
     # Сохраняем сообщение
     save_message(user_id, "user", text)
     
@@ -197,12 +215,11 @@ async def process_message(user_id, text):
     if name:
         print(f"🔍 НАЙДЕНО ИМЯ: {name}")
         save_fact(user_id, "name", name)
-        print(f"✅ СОХРАНИЛ ИМЯ: {name}")
         # ПРОВЕРКА: сразу читаем из базы
         check = get_fact(user_id, "name")
         print(f"🔍 ПРОВЕРКА: имя в базе = {check}")
     else:
-        print(f"❌ Имя НЕ найдено в тексте: {text}")
+        print(f"❌ Имя НЕ найдено в тексте")
     
     # Извлекаем город через DeepSeek
     try:
@@ -221,8 +238,8 @@ async def process_message(user_id, text):
                 city = "Белово"
             save_fact(user_id, "city", city)
             print(f"✅ СОХРАНИЛ ГОРОД: {city}")
-    except:
-        pass
+    except Exception as e:
+        print(f"❌ Ошибка извлечения города: {e}")
     
     # Получаем факты из базы
     user_name = get_fact(user_id, "name")
