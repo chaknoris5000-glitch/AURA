@@ -157,7 +157,6 @@ async def webhook(request: Request):
         if name:
             save_user_fact(user_id, "name", name)
             await send_message(user_id, f"✅ Запомнил! Тебя зовут {name}.")
-            # После сохранения имени сразу отвечаем, чтобы диалог продолжился
             return JSONResponse({"ok": True})
 
         # ===== ИЗВЛЕКАЕМ И СОХРАНЯЕМ ГОРОД =====
