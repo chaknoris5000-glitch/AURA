@@ -22,7 +22,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # ===== ПОДКЛЮЧЕНИЯ =====
-print("🚀 БОТ ЗАПУЩЕН. ВЕРСИЯ С ЛОГАМИ. ДАТА: 30.07.2026")
+print("🚀 БОТ ЗАПУЩЕН. ВЕРСИЯ С ПАМЯТЬЮ.")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -41,30 +41,43 @@ app = FastAPI()
 def get_user_fact(user_id, key):
     if not supabase:
         return None
-    res = supabase.table("user_memory").select("value").eq("user_id", user_id).eq("key", key).execute()
-    return res.data[0]["value"] if res.data else None
+    try:
+        res = supabase.table("user_memory").select("value").eq("user_id", user_id).eq("key", key).execute()
+        return res.data[0]["value"] if res.data else None
+    except:
+        return None
 
 def save_user_fact(user_id, key, value):
     if not supabase:
         return
-    supabase.table("user_memory").delete().eq("user_id", user_id).eq("key", key).execute()
-    supabase.table("user_memory").insert({"user_id": user_id, "key": key, "value": value}).execute()
+    try:
+        supabase.table("user_memory").delete().eq("user_id", user_id).eq("key", key).execute()
+        supabase.table("user_memory").insert({"user_id": user_id, "key": key, "value": value}).execute()
+        print(f"✅ Сохранён факт: {key} = {value}")
+    except Exception as e:
+        print(f"❌ Ошибка сохранения: {e}")
 
 def get_history(user_id, limit=20):
     if not supabase:
         return []
-    res = supabase.table("history").select("role, content").eq("user_id", user_id).order("created_at", desc=True).limit(limit).execute()
-    return list(reversed(res.data)) if res.data else []
+    try:
+        res = supabase.table("history").select("role, content").eq("user_id", user_id).order("created_at", desc=True).limit(limit).execute()
+        return list(reversed(res.data)) if res.data else []
+    except:
+        return []
 
 def save_message(user_id, role, content):
     if not supabase:
         return
-    supabase.table("history").insert({
-        "user_id": user_id,
-        "role": role,
-        "content": content,
-        "created_at": datetime.now().isoformat()
-    }).execute()
+    try:
+        supabase.table("history").insert({
+            "user_id": user_id,
+            "role": role,
+            "content": content,
+            "created_at": datetime.now().isoformat()
+        }).execute()
+    except Exception as e:
+        print(f"❌ Ошибка сохранения сообщения: {e}")
 
 def extract_name(text):
     match = re.search(r"меня зовут\s+([А-Яа-я]+)", text, re.I)
@@ -99,6 +112,11 @@ def transcribe_audio(audio_url):
         print(f"❌ Ошибка распознавания: {e}")
         return None
 
+async def send_message(chat_id, text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    data = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+    requests.post(url, json=data)
+
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
@@ -127,41 +145,52 @@ async def webhook(request: Request):
         if not text:
             return JSONResponse({"ok": True})
 
-        # ===== ЛОГИКА =====
         if text.startswith("/start"):
             await send_message(user_id, "👋 Привет! Скажи 'Меня зовут ...' — я запомню.")
             return JSONResponse({"ok": True})
 
-        # Сохраняем сообщение пользователя
+        # ===== СОХРАНЯЕМ СООБЩЕНИЕ =====
         save_message(user_id, "user", text)
 
-        # Извлекаем имя и город
+        # ===== ИЗВЛЕКАЕМ И СОХРАНЯЕМ ИМЯ =====
         name = extract_name(text)
         if name:
             save_user_fact(user_id, "name", name)
+            await send_message(user_id, f"✅ Запомнил! Тебя зовут {name}.")
+            # После сохранения имени сразу отвечаем, чтобы диалог продолжился
+            return JSONResponse({"ok": True})
+
+        # ===== ИЗВЛЕКАЕМ И СОХРАНЯЕМ ГОРОД =====
         city = extract_city(text)
         if city:
             save_user_fact(user_id, "city", city)
+            await send_message(user_id, f"✅ Запомнил! Ты из {city}.")
+            return JSONResponse({"ok": True})
 
-        # Получаем имя и город из базы
+        # ===== ПОЛУЧАЕМ ФАКТЫ ИЗ БАЗЫ =====
         user_name = get_user_fact(user_id, "name")
         user_city = get_user_fact(user_id, "city")
 
         # ===== ПРЯМЫЕ ВОПРОСЫ =====
         lower = text.lower()
         if "как меня зовут" in lower or "моё имя" in lower:
-            reply = f"Тебя зовут {user_name}." if user_name else "Ты ещё не представлялся."
+            reply = f"Тебя зовут **{user_name}**." if user_name else "Ты ещё не представлялся. Скажи 'Меня зовут ...'"
             await send_message(user_id, reply)
             return JSONResponse({"ok": True})
 
         if "где я живу" in lower or "мой город" in lower:
-            reply = f"Ты из {user_city}." if user_city else "Ты ещё не говорил, откуда ты."
+            reply = f"Ты из **{user_city}**." if user_city else "Ты ещё не говорил, откуда ты. Скажи 'Я из ...'"
             await send_message(user_id, reply)
             return JSONResponse({"ok": True})
 
         # ===== ОСНОВНОЙ ДИАЛОГ =====
         history = get_history(user_id, limit=20)
         messages = [{"role": "system", "content": "Ты — AURA, живой помощник."}]
+        if user_name:
+            messages.append({"role": "system", "content": f"Имя пользователя: {user_name}."})
+        if user_city:
+            messages.append({"role": "system", "content": f"Город пользователя: {user_city}."})
+        
         for h in history:
             messages.append({"role": h["role"], "content": h["content"]})
         messages.append({"role": "user", "content": text})
@@ -190,11 +219,6 @@ async def webhook(request: Request):
     except Exception as e:
         print(f"❌ Ошибка вебхука: {e}")
         return JSONResponse({"ok": False, "error": str(e)})
-
-async def send_message(chat_id, text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    data = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
-    requests.post(url, json=data)
 
 @app.get("/")
 async def root():
