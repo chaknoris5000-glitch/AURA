@@ -129,51 +129,39 @@ def get_fact(user_id, key):
         return None
 
 # ==========================
-# ИЗВЛЕЧЕНИЕ ФАКТОВ ЧЕРЕЗ AI
+# ИЗВЛЕЧЕНИЕ ИМЕНИ (ЖЁСТКО)
 # ==========================
 
-def extract_info(text):
-    """DeepSeek сам находит имя и город"""
-    try:
-        response = deepseek.chat.completions.create(
-            model="deepseek-v4-flash",
-            messages=[
-                {"role": "system", "content": """
-Ты — помощник. Из текста пользователя нужно извлечь имя и город.
-Верни ответ строго в формате JSON:
-{"name": "имя или null", "city": "город или null"}
-
-Примеры:
-"меня зовут Вадим" → {"name": "Вадим", "city": null}
-"я из Инского" → {"name": null, "city": "Белово"}
-"Вадим из Инского" → {"name": "Вадим", "city": "Белово"}
-"""},
-                {"role": "user", "content": text}
-            ],
-            temperature=0.1,
-            max_tokens=100
-        )
-        result = response.choices[0].message.content.strip()
-        data = json.loads(result)
-        return data.get("name"), data.get("city")
-    except Exception as e:
-        print(f"❌ Ошибка извлечения: {e}")
-        return None, None
+def extract_name_force(text):
+    """Ищет имя любым способом"""
+    # 1. Через "меня зовут"
+    match = re.search(r"меня зовут\s+([А-Яа-яЁё]+)", text, re.IGNORECASE)
+    if match:
+        return match.group(1).capitalize()
+    
+    # 2. Через "зовут"
+    match = re.search(r"зовут\s+([А-Яа-яЁё]+)", text, re.IGNORECASE)
+    if match:
+        return match.group(1).capitalize()
+    
+    # 3. Если текст начинается с имени (одно слово)
+    words = text.strip().split()
+    if len(words) == 1 and len(words[0]) > 1:
+        return words[0].capitalize()
+    
+    return None
 
 # ==========================
 # РАСПОЗНАВАНИЕ ГОЛОСА
 # ==========================
 
 def transcribe_audio(audio_url):
-    """Распознаёт голос через Groq Whisper"""
     try:
-        # Скачиваем аудио
         response = requests.get(audio_url, timeout=30)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp:
             tmp.write(response.content)
             tmp_path = tmp.name
         
-        # Распознаём
         with open(tmp_path, "rb") as f:
             transcription = groq.audio.transcriptions.create(
                 file=(tmp_path, f.read()),
@@ -196,25 +184,42 @@ async def process_message(user_id, text):
     # Сохраняем сообщение
     save_message(user_id, "user", text)
     
-    # Извлекаем и сохраняем факты
-    name, city = extract_info(text)
+    # ===== ЖЁСТКОЕ ИЗВЛЕЧЕНИЕ ИМЕНИ =====
+    name = extract_name_force(text)
     if name:
         save_fact(user_id, "name", name)
-    if city:
-        if city.lower() in ["инской", "инского", "инском"]:
-            city = "Белово"
-        save_fact(user_id, "city", city)
+        print(f"✅ СОХРАНИЛ ИМЯ: {name}")
+    
+    # Извлекаем город через DeepSeek (он лучше понимает)
+    try:
+        response = deepseek.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=[
+                {"role": "system", "content": "Из текста извлеки город. Верни только название города или null."},
+                {"role": "user", "content": text}
+            ],
+            temperature=0.1,
+            max_tokens=20
+        )
+        city = response.choices[0].message.content.strip()
+        if city and city != "null" and len(city) > 2:
+            if city.lower() in ["инской", "инского", "инском"]:
+                city = "Белово"
+            save_fact(user_id, "city", city)
+            print(f"✅ СОХРАНИЛ ГОРОД: {city}")
+    except:
+        pass
     
     # Получаем факты из базы
     user_name = get_fact(user_id, "name")
     user_city = get_fact(user_id, "city")
     
-    print(f"📋 Имя: {user_name}, Город: {user_city}")
+    print(f"📋 Имя в базе: {user_name}, Город: {user_city}")
     
     # ===== ПРЯМЫЕ ВОПРОСЫ =====
     text_lower = text.lower()
     
-    if "как меня зовут" in text_lower or "моё имя" in text_lower:
+    if "как меня зовут" in text_lower or "моё имя" in text_lower or "напомни имя" in text_lower:
         if user_name:
             reply = f"Тебя зовут **{user_name}**! 😊"
         else:
@@ -281,7 +286,6 @@ async def webhook(request: Request):
     try:
         body = await request.json()
         
-        # Проверяем, есть ли сообщение
         if "message" not in body:
             return JSONResponse({"ok": True})
         
@@ -289,7 +293,7 @@ async def webhook(request: Request):
         user_id = str(message["from"]["id"])
         text = None
         
-        # ===== ГОЛОСОВОЕ =====
+        # ===== ГОЛОСОВОЕ (без лишних сообщений) =====
         if "voice" in message:
             file_id = message["voice"]["file_id"]
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
@@ -300,12 +304,7 @@ async def webhook(request: Request):
                 audio_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
                 text = transcribe_audio(audio_url)
                 
-                if text:
-                    # Отправляем распознанный текст
-                    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-                    data = {"chat_id": user_id, "text": f"🎤 Распознано: {text}"}
-                    requests.post(url, json=data)
-                else:
+                if not text:
                     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
                     data = {"chat_id": user_id, "text": "⚠️ Не удалось распознать голос."}
                     requests.post(url, json=data)
@@ -317,7 +316,7 @@ async def webhook(request: Request):
         
         if text:
             if text.startswith("/start"):
-                reply = "👋 Привет! Я AURA — твой умный помощник.\n\nПросто представься, и я запомню тебя навсегда. Расскажи, откуда ты, если хочешь.\n\n🎤 Можешь отправлять голосовые сообщения — я их распознаю!"
+                reply = "👋 Привет! Я AURA.\n\nПросто скажи 'Меня зовут ...' — и я запомню навсегда."
             else:
                 reply = await process_message(user_id, text)
             
