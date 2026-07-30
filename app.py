@@ -32,6 +32,10 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 # ПОДКЛЮЧЕНИЯ
 # ==========================
 
+print("🔍 Проверка Supabase...")
+print(f"SUPABASE_URL: {SUPABASE_URL}")
+print(f"SUPABASE_KEY: {SUPABASE_KEY[:20]}...")
+
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
@@ -39,6 +43,8 @@ if SUPABASE_URL and SUPABASE_KEY:
         print("✅ Supabase подключён")
     except Exception as e:
         print(f"❌ Ошибка Supabase: {e}")
+else:
+    print("❌ Нет ключей Supabase!")
 
 deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 groq = Groq(api_key=GROQ_API_KEY)
@@ -96,8 +102,10 @@ def get_recent_history(user_id, limit=15):
 
 def save_fact(user_id, key, value):
     if not supabase:
+        print("❌ Supabase не подключён, факт не сохранён")
         return
     try:
+        print(f"💾 Попытка сохранить: {key} = {value}")
         supabase.table("user_memory")\
             .delete()\
             .eq("user_id", user_id)\
@@ -109,7 +117,7 @@ def save_fact(user_id, key, value):
             "value": value,
             "created_at": datetime.now().isoformat()
         }).execute()
-        print(f"💾 Сохранён факт: {key} = {value}")
+        print(f"✅ Сохранён факт: {key} = {value}")
     except Exception as e:
         print(f"❌ Ошибка сохранения факта: {e}")
 
@@ -129,7 +137,7 @@ def get_fact(user_id, key):
         return None
 
 # ==========================
-# ИЗВЛЕЧЕНИЕ ИМЕНИ (ЖЁСТКО)
+# ИЗВЛЕЧЕНИЕ ИМЕНИ
 # ==========================
 
 def extract_name_force(text):
@@ -187,10 +195,16 @@ async def process_message(user_id, text):
     # ===== ЖЁСТКОЕ ИЗВЛЕЧЕНИЕ ИМЕНИ =====
     name = extract_name_force(text)
     if name:
+        print(f"🔍 НАЙДЕНО ИМЯ: {name}")
         save_fact(user_id, "name", name)
         print(f"✅ СОХРАНИЛ ИМЯ: {name}")
+        # ПРОВЕРКА: сразу читаем из базы
+        check = get_fact(user_id, "name")
+        print(f"🔍 ПРОВЕРКА: имя в базе = {check}")
+    else:
+        print(f"❌ Имя НЕ найдено в тексте: {text}")
     
-    # Извлекаем город через DeepSeek (он лучше понимает)
+    # Извлекаем город через DeepSeek
     try:
         response = deepseek.chat.completions.create(
             model="deepseek-v4-flash",
@@ -265,7 +279,6 @@ async def process_message(user_id, text):
         )
         reply = response.choices[0].message.content
         
-        # Если есть имя — добавляем в начало
         if user_name and not reply.startswith(user_name):
             reply = f"{user_name}, {reply[0].lower() + reply[1:] if reply else ''}"
         
@@ -293,7 +306,7 @@ async def webhook(request: Request):
         user_id = str(message["from"]["id"])
         text = None
         
-        # ===== ГОЛОСОВОЕ (без лишних сообщений) =====
+        # ===== ГОЛОСОВОЕ =====
         if "voice" in message:
             file_id = message["voice"]["file_id"]
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
