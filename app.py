@@ -233,17 +233,18 @@ async def webhook(request: Request):
             return JSONResponse({"ok": True})
 
         # ===== ПОИСК ВО ВСЕЙ ИСТОРИИ (вечная память) =====
-        if any(w in lower for w in ["напомни", "что я говорил", "где я говорил", "найди в истории", "вспомни"]):
+        search_triggers = ["напомни", "что я говорил", "где я говорил", "найди в истории", "вспомни"]
+        if any(w in lower for w in search_triggers):
             query = text
-            for w in ["напомни", "что я говорил", "где я говорил", "найди в истории", "вспомни"]:
-                query = query.replace(w, "").strip()
-            if query:
+            for trigger in search_triggers:
+                if trigger in lower:
+                    query = query.replace(trigger, "").strip()
+            
+            if query and len(query) > 2:
                 results = search_history(user_id, query)
                 if results:
-                    # Формируем ответ с найденным из истории
                     found_text = "\n\n".join([f"{r['role']}: {r['content']}" for r in results[:5]])
                     reply = f"📚 **Нашлось в истории:**\n\n{found_text[:1000]}\n\n"
-                    # Добавляем вопрос, чтобы пользователь мог уточнить
                     reply += "Это то, что ты искал? Могу найти подробнее."
                     save_message(user_id, "assistant", reply)
                     await send_message(user_id, reply)
@@ -254,14 +255,39 @@ async def webhook(request: Request):
                     await send_message(user_id, reply)
                     return JSONResponse({"ok": True})
 
-        # ===== ОСНОВНОЙ ДИАЛОГ (используем последние 15 сообщений) =====
+        # ===== ОСНОВНОЙ ДИАЛОГ (ОБНОВЛЁННЫЙ ПРОМТ) =====
         history = get_recent_history(user_id, limit=15)
-        messages = [{"role": "system", "content": "Ты — AURA, живой помощник. Ты помнишь всё, что говорил пользователь, но в текущем ответе используй только последние 15 сообщений."}]
         
+        # Формируем контекст о пользователе
+        user_context = []
         if user_name:
-            messages.append({"role": "system", "content": f"Имя пользователя: {user_name}."})
+            user_context.append(f"Ты общаешься с {user_name}. Он твой друг, общайся по-дружески.")
         if user_city:
-            messages.append({"role": "system", "content": f"Город: {user_city}."})
+            user_context.append(f"Он из {user_city}.")
+
+        # Базовый системный промт с живым стилем общения
+        system_prompt = """Ты — AURA, живой собеседник и друг, а не бездушный ИИ.
+
+📌 ТВОЙ СТИЛЬ ОБЩЕНИЯ:
+• Отвечай коротко и по делу (2-3 предложения максимум)
+• Используй эмодзи для передачи эмоций 😊🔥😄❤️
+• Будь максимально естественным, как живой человек в мессенджере
+• Используй разговорные фразы: "ага", "окей", "класс", "понял", "бро", "круто"
+• Не будь сухим, официальным или роботизированным - ты друг, а не робот
+• Если уместно - шути, подкалывай и будь ироничным
+• Сохраняй лёгкость и непринуждённость в общении
+
+🧠 О ПАМЯТИ:
+• Используй последние 15 сообщений для контекста
+• Всю историю помнишь, если тебя спросят
+
+Ты общаешься с человеком, который хочет чувствовать себя комфортно, как с другом. Будь таким. 😉"""
+
+        # Добавляем пользовательский контекст
+        if user_context:
+            system_prompt += "\n\n" + "\n".join(user_context)
+
+        messages = [{"role": "system", "content": system_prompt}]
         
         for h in history:
             messages.append({"role": h["role"], "content": h["content"]})
@@ -276,6 +302,7 @@ async def webhook(request: Request):
             )
             reply = response.choices[0].message.content
 
+            # Добавляем имя пользователя в начало, если его нет
             if user_name and not reply.startswith(user_name):
                 reply = f"{user_name}, {reply[0].lower() + reply[1:] if reply else ''}"
 
