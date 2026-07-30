@@ -21,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # ===== ПОДКЛЮЧЕНИЯ =====
-print("🚀 БОТ ЗАПУЩЕН. УМНАЯ ПАМЯТЬ. ЭКОНОМНЫЙ РЕЖИМ.")
+print("🚀 БОТ ЗАПУЩЕН. ЖИВОЙ ПОМОЩНИК. ЭКОНОМНЫЙ РЕЖИМ.")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -39,7 +39,6 @@ app = FastAPI()
 # ===== РАБОТА С БАЗОЙ =====
 
 def save_message(user_id, role, content):
-    """Сохраняет сообщение в историю"""
     if not supabase:
         return
     try:
@@ -49,12 +48,10 @@ def save_message(user_id, role, content):
             "content": content,
             "created_at": datetime.now().isoformat()
         }).execute()
-        print(f"💾 Сохранено в history: {role} -> {content[:30]}...")
     except Exception as e:
         print(f"❌ Ошибка сохранения: {e}")
 
 def get_recent_history(user_id, limit=5):
-    """Загружает последние 5 сообщений"""
     if not supabase:
         return []
     try:
@@ -70,7 +67,6 @@ def get_recent_history(user_id, limit=5):
         return []
 
 def search_history(user_id, query):
-    """Ищет во всей истории по ключевому слову"""
     if not supabase:
         return []
     try:
@@ -87,7 +83,6 @@ def search_history(user_id, query):
         return []
 
 def save_fact(user_id, key, value):
-    """Сохраняет факт (имя, город)"""
     if not supabase:
         return
     try:
@@ -98,12 +93,10 @@ def save_fact(user_id, key, value):
             "value": value,
             "created_at": datetime.now().isoformat()
         }).execute()
-        print(f"💾 Сохранён факт: {key} = {value}")
     except Exception as e:
         print(f"❌ Ошибка сохранения факта: {e}")
 
 def get_fact(user_id, key):
-    """Читает факт (имя, город)"""
     if not supabase:
         return None
     try:
@@ -184,9 +177,7 @@ async def webhook(request: Request):
         if not text:
             return JSONResponse({"ok": True})
 
-        # ===== ===== ===== ===== ===== ===== ===== ===== ===== =====
-        # ===== ГЛАВНОЕ: СОХРАНЯЕМ КАЖДОЕ СООБЩЕНИЕ В ИСТОРИЮ =====
-        # ===== ===== ===== ===== ===== ===== ===== ===== ===== =====
+        # ===== СОХРАНЯЕМ СООБЩЕНИЕ =====
         save_message(user_id, "user", text)
 
         # ===== ИЗВЛЕКАЕМ ФАКТЫ =====
@@ -206,18 +197,18 @@ async def webhook(request: Request):
         lower = text.lower()
 
         if "как меня зовут" in lower or "моё имя" in lower:
-            reply = f"Тебя зовут **{user_name}**." if user_name else "Ты ещё не представлялся."
+            reply = f"Тебя зовут **{user_name}**." if user_name else "Ты ещё не представлялся. Как тебя зовут? 😊"
             save_message(user_id, "assistant", reply)
             await send_message(user_id, reply)
             return JSONResponse({"ok": True})
 
         if "где я живу" in lower or "мой город" in lower:
-            reply = f"Ты из **{user_city}**." if user_city else "Ты ещё не говорил, откуда ты."
+            reply = f"Ты из **{user_city}**." if user_city else "Ты ещё не говорил, откуда ты. Расскажи! 😊"
             save_message(user_id, "assistant", reply)
             await send_message(user_id, reply)
             return JSONResponse({"ok": True})
 
-        # ===== ПОИСК В ИСТОРИИ =====
+        # ===== ПОИСК В ИСТОРИИ — БЕЗ СЛУЖЕБНЫХ ФРАЗ =====
         if any(w in lower for w in ["напомни", "что я говорил", "найди в истории", "вспомни"]):
             query = text
             for w in ["напомни", "что я говорил", "найди в истории", "вспомни"]:
@@ -225,22 +216,24 @@ async def webhook(request: Request):
             if query:
                 results = search_history(user_id, query)
                 if results:
-                    reply = "📚 **Нашлось в истории:**\n\n"
-                    for r in results[:5]:
-                        role = "👤" if r["role"] == "user" else "🤖"
-                        reply += f"{role} {r['content'][:200]}...\n\n"
+                    # Формируем естественный ответ без служебных фраз
+                    found_text = ""
+                    for r in results[:3]:
+                        role = "ты" if r["role"] == "user" else "я"
+                        found_text += f"- {role}: {r['content'][:150]}\n"
+                    reply = f"А, точно! Мы уже говорили об этом:\n{found_text}\n\nЧто именно тебя интересует? 😊"
                     save_message(user_id, "assistant", reply)
                     await send_message(user_id, reply)
                     return JSONResponse({"ok": True})
                 else:
-                    reply = "📭 Ничего не нашёл в истории."
+                    reply = "Не припомню такого. Может, расскажешь подробнее? 😊"
                     save_message(user_id, "assistant", reply)
                     await send_message(user_id, reply)
                     return JSONResponse({"ok": True})
 
         # ===== ОСНОВНОЙ ДИАЛОГ (ТОЛЬКО 5 ПОСЛЕДНИХ) =====
         history = get_recent_history(user_id, limit=5)
-        messages = [{"role": "system", "content": "Ты — AURA, живой помощник. Отвечай кратко."}]
+        messages = [{"role": "system", "content": "Ты — AURA, живой помощник. Отвечай коротко, эмоционально, как человек. Используй эмодзи, улыбайся, удивляйся. Твой ответ — это часть живого диалога."}]
         
         if user_name:
             messages.append({"role": "system", "content": f"Имя: {user_name}."})
@@ -255,8 +248,8 @@ async def webhook(request: Request):
             response = deepseek.chat.completions.create(
                 model="deepseek-v4-flash",
                 messages=messages,
-                temperature=0.7,
-                max_tokens=300
+                temperature=0.8,
+                max_tokens=200  # Уменьшил на 30% (было 300)
             )
             reply = response.choices[0].message.content
 
@@ -268,7 +261,7 @@ async def webhook(request: Request):
 
         except Exception as e:
             print(f"❌ Ошибка DeepSeek: {e}")
-            await send_message(user_id, "😅 Что-то пошло не так.")
+            await send_message(user_id, "😅 Что-то пошло не так. Попробуй ещё раз.")
 
         return JSONResponse({"ok": True})
 
