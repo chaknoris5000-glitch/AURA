@@ -1,6 +1,5 @@
 import os
 import re
-import json
 import tempfile
 from datetime import datetime
 from fastapi import FastAPI, Request
@@ -22,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # ===== ПОДКЛЮЧЕНИЯ =====
-print("🚀 БОТ ЗАПУЩЕН. ВЕРСИЯ С ПОЛНОЙ ПАМЯТЬЮ.")
+print("🚀 БОТ ЗАПУЩЕН. УМНАЯ ПАМЯТЬ. ЭКОНОМНЫЙ РЕЖИМ.")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -50,12 +49,11 @@ def save_message(user_id, role, content):
             "content": content,
             "created_at": datetime.now().isoformat()
         }).execute()
-        print(f"💾 Сохранено в history: {role} -> {content[:30]}...")
     except Exception as e:
-        print(f"❌ Ошибка сохранения в history: {e}")
+        print(f"❌ Ошибка сохранения: {e}")
 
-def get_history(user_id, limit=30):
-    """Загружает последние N сообщений из истории"""
+def get_recent_history(user_id, limit=5):
+    """Загружает последние 5 сообщений"""
     if not supabase:
         return []
     try:
@@ -67,11 +65,28 @@ def get_history(user_id, limit=30):
             .execute()
         return list(reversed(res.data)) if res.data else []
     except Exception as e:
-        print(f"❌ Ошибка загрузки истории: {e}")
+        print(f"❌ Ошибка загрузки: {e}")
+        return []
+
+def search_history(user_id, query):
+    """Ищет во всей истории по ключевому слову"""
+    if not supabase:
+        return []
+    try:
+        res = supabase.table("history")\
+            .select("role, content, created_at")\
+            .eq("user_id", user_id)\
+            .ilike("content", f"%{query}%")\
+            .order("created_at", desc=True)\
+            .limit(5)\
+            .execute()
+        return res.data if res.data else []
+    except Exception as e:
+        print(f"❌ Ошибка поиска: {e}")
         return []
 
 def save_fact(user_id, key, value):
-    """Сохраняет факт в user_memory"""
+    """Сохраняет факт (имя, город)"""
     if not supabase:
         return
     try:
@@ -82,12 +97,11 @@ def save_fact(user_id, key, value):
             "value": value,
             "created_at": datetime.now().isoformat()
         }).execute()
-        print(f"💾 Сохранён факт: {key} = {value}")
     except Exception as e:
         print(f"❌ Ошибка сохранения факта: {e}")
 
 def get_fact(user_id, key):
-    """Читает факт из user_memory"""
+    """Читает факт (имя, город)"""
     if not supabase:
         return None
     try:
@@ -96,30 +110,10 @@ def get_fact(user_id, key):
     except:
         return None
 
-def search_history(user_id, query):
-    """Ищет в истории по ключевому слову"""
-    if not supabase:
-        return []
-    try:
-        res = supabase.table("history")\
-            .select("role, content, created_at")\
-            .eq("user_id", user_id)\
-            .ilike("content", f"%{query}%")\
-            .order("created_at", desc=True)\
-            .limit(10)\
-            .execute()
-        return res.data if res.data else []
-    except Exception as e:
-        print(f"❌ Ошибка поиска: {e}")
-        return []
-
 # ===== ИЗВЛЕЧЕНИЕ ФАКТОВ =====
 
 def extract_name(text):
     match = re.search(r"меня зовут\s*([А-Яа-яёЁ\-]+)", text, re.I)
-    if match:
-        return match.group(1).capitalize()
-    match = re.search(r"зовут\s*([А-Яа-яёЁ\-]+)", text, re.I)
     if match:
         return match.group(1).capitalize()
     return None
@@ -132,6 +126,25 @@ def extract_city(text):
             return "Белово"
         return city
     return None
+
+# ===== УМНАЯ ПРОВЕРКА: ЗАПРОС К ИСТОРИИ ИЛИ НЕТ? =====
+
+def is_history_query(text):
+    """DeepSeek определяет, хочет ли пользователь найти что-то в истории"""
+    try:
+        response = deepseek.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=[
+                {"role": "system", "content": "Ты — помощник. Определи, хочет ли пользователь найти что-то из прошлого (истории диалога). Если вопрос про прошлое — ответь 'да'. Если это обычный вопрос — ответь 'нет'. Ответь только одним словом."},
+                {"role": "user", "content": text}
+            ],
+            temperature=0.1,
+            max_tokens=10
+        )
+        answer = response.choices[0].message.content.strip().lower()
+        return "да" in answer
+    except:
+        return False
 
 # ===== РАСПОЗНАВАНИЕ ГОЛОСА =====
 
@@ -188,7 +201,7 @@ async def webhook(request: Request):
         if not text:
             return JSONResponse({"ok": True})
 
-        # ===== СОХРАНЯЕМ СООБЩЕНИЕ В ИСТОРИЮ =====
+        # ===== СОХРАНЯЕМ СООБЩЕНИЕ =====
         save_message(user_id, "user", text)
 
         # ===== ИЗВЛЕКАЕМ ФАКТЫ =====
@@ -200,10 +213,12 @@ async def webhook(request: Request):
         if city:
             save_fact(user_id, "city", city)
 
-        # ===== ПРЯМЫЕ ЗАПРОСЫ =====
-        lower = text.lower()
+        # ===== ПОЛУЧАЕМ ФАКТЫ =====
         user_name = get_fact(user_id, "name")
         user_city = get_fact(user_id, "city")
+
+        # ===== ПРЯМЫЕ ВОПРОСЫ (БЕЗ DEEPSEEK) =====
+        lower = text.lower()
 
         if "как меня зовут" in lower or "моё имя" in lower:
             reply = f"Тебя зовут **{user_name}**." if user_name else "Ты ещё не представлялся."
@@ -217,11 +232,17 @@ async def webhook(request: Request):
             await send_message(user_id, reply)
             return JSONResponse({"ok": True})
 
-        # ===== ПОИСК В ИСТОРИИ =====
-        if any(w in lower for w in ["напомни", "что я говорил", "где я говорил", "найди в истории"]):
+        # ===== УМНЫЙ ПОИСК В ИСТОРИИ (БЕЗ КЛЮЧЕВЫХ СЛОВ) =====
+        if is_history_query(text):
+            # Извлекаем ключевые слова из вопроса
             query = text
-            for w in ["напомни", "что я говорил", "где я говорил", "найди в истории"]:
+            # Убираем вопросительные слова
+            for w in ["что", "кто", "где", "когда", "почему", "зачем", "как", "какой", "какая"]:
                 query = query.replace(w, "").strip()
+            # Если в запросе есть имя пользователя — убираем его
+            if user_name:
+                query = query.replace(user_name.lower(), "").strip()
+            
             if query:
                 results = search_history(user_id, query)
                 if results:
@@ -233,19 +254,17 @@ async def webhook(request: Request):
                     await send_message(user_id, reply)
                     return JSONResponse({"ok": True})
                 else:
-                    reply = "📭 Ничего не нашёл в истории по этому запросу."
-                    save_message(user_id, "assistant", reply)
-                    await send_message(user_id, reply)
-                    return JSONResponse({"ok": True})
+                    # Если ничего не нашлось — отвечаем как обычно
+                    pass
 
-        # ===== ОСНОВНОЙ ДИАЛОГ =====
-        history = get_history(user_id, limit=30)
-        messages = [{"role": "system", "content": "Ты — AURA, помощник с идеальной памятью. Ты помнишь ВСЁ, что говорил пользователь."}]
+        # ===== ОСНОВНОЙ ДИАЛОГ (5 последних сообщений) =====
+        history = get_recent_history(user_id, limit=5)
+        messages = [{"role": "system", "content": "Ты — AURA, живой помощник. Отвечай кратко и по делу."}]
         
         if user_name:
             messages.append({"role": "system", "content": f"Имя пользователя: {user_name}."})
         if user_city:
-            messages.append({"role": "system", "content": f"Город: {user_city}."})
+            messages.append({"role": "system", "content": f"Город пользователя: {user_city}."})
         
         for h in history:
             messages.append({"role": h["role"], "content": h["content"]})
@@ -255,15 +274,14 @@ async def webhook(request: Request):
             response = deepseek.chat.completions.create(
                 model="deepseek-v4-flash",
                 messages=messages,
-                temperature=0.8,
-                max_tokens=600
+                temperature=0.7,
+                max_tokens=300
             )
             reply = response.choices[0].message.content
 
             if user_name and not reply.startswith(user_name):
                 reply = f"{user_name}, {reply[0].lower() + reply[1:] if reply else ''}"
 
-            # ===== СОХРАНЯЕМ ОТВЕТ =====
             save_message(user_id, "assistant", reply)
             await send_message(user_id, reply)
 
