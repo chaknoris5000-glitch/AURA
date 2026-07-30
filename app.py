@@ -148,6 +148,62 @@ def extract_city(text):
         return city
     return None
 
+def extract_keywords(text):
+    """Извлекает ключевые слова из текста для поиска в истории"""
+    # Список стоп-слов, которые не нужно искать
+    stop_words = ["это", "тот", "этот", "все", "сам", "быть", "что", "как", "где", "когда", 
+                  "почему", "зачем", "кто", "какой", "такой", "так", "вот", "да", "нет"]
+    
+    # Разбиваем текст на слова и чистим
+    words = re.findall(r'[а-яА-ЯёЁa-zA-Z]+', text.lower())
+    
+    # Оставляем только значимые слова (длиннее 3 букв и не в стоп-листе)
+    keywords = [w for w in words if len(w) > 3 and w not in stop_words]
+    
+    return keywords
+
+def should_search_history(text):
+    """Определяет, нужно ли искать в истории"""
+    text_lower = text.lower()
+    
+    # 1. Прямые команды поиска
+    direct_triggers = ["напомни", "что я говорил", "где я говорил", "найди в истории", "вспомни", "что я писал"]
+    if any(trigger in text_lower for trigger in direct_triggers):
+        return True
+    
+    # 2. Вопросы о прошлом
+    past_triggers = ["загадк", "вопрос", "раньше", "прошлый", "прошлое", "помнишь", "говорил", "писал", 
+                     "рассказывал", "упоминал", "обсуждали", "было", "была"]
+    if any(trigger in text_lower for trigger in past_triggers):
+        return True
+    
+    # 3. Вопросы в прошедшем времени (можно расширить)
+    past_verbs = ["делал", "сказал", "спросил", "ответил", "написал", "рассказал", "упомянул"]
+    if any(verb in text_lower for verb in past_verbs):
+        return True
+    
+    return False
+
+def get_intelligent_search_query(text):
+    """Умно извлекает запрос для поиска"""
+    text_lower = text.lower()
+    
+    # Удаляем триггеры
+    direct_triggers = ["напомни", "что я говорил", "где я говорил", "найди в истории", "вспомни", "что я писал"]
+    query = text
+    for trigger in direct_triggers:
+        if trigger in text_lower:
+            query = query.replace(trigger, "").strip()
+    
+    # Если запрос слишком короткий - извлекаем ключевые слова
+    if len(query) < 3:
+        keywords = extract_keywords(text)
+        if keywords:
+            # Берём первое ключевое слово или комбинацию
+            return keywords[0]
+    
+    return query
+
 # ===== РАСПОЗНАВАНИЕ ГОЛОСА =====
 
 def transcribe_audio(audio_url):
@@ -232,17 +288,17 @@ async def webhook(request: Request):
             await send_message(user_id, reply)
             return JSONResponse({"ok": True})
 
-        # ===== ПОИСК ВО ВСЕЙ ИСТОРИИ (вечная память) =====
-        search_triggers = ["напомни", "что я говорил", "где я говорил", "найди в истории", "вспомни"]
-        if any(w in lower for w in search_triggers):
-            query = text
-            for trigger in search_triggers:
-                if trigger in lower:
-                    query = query.replace(trigger, "").strip()
+        # ===== ИНТЕЛЛЕКТУАЛЬНЫЙ ПОИСК В ИСТОРИИ =====
+        if should_search_history(text):
+            query = get_intelligent_search_query(text)
             
+            # Если есть запрос - ищем
             if query and len(query) > 2:
+                print(f"🔍 Ищу в истории: '{query}'")
                 results = search_history(user_id, query)
+                
                 if results:
+                    # Форматируем результаты
                     found_text = "\n\n".join([f"{r['role']}: {r['content']}" for r in results[:5]])
                     reply = f"📚 **Нашлось в истории:**\n\n{found_text[:1000]}\n\n"
                     reply += "Это то, что ты искал? Могу найти подробнее."
@@ -250,6 +306,19 @@ async def webhook(request: Request):
                     await send_message(user_id, reply)
                     return JSONResponse({"ok": True})
                 else:
+                    # Если ничего не нашли, пробуем поискать по отдельным ключевым словам
+                    keywords = extract_keywords(query)
+                    for keyword in keywords[:3]:  # пробуем первые 3 ключевых слова
+                        results = search_history(user_id, keyword)
+                        if results:
+                            found_text = "\n\n".join([f"{r['role']}: {r['content']}" for r in results[:3]])
+                            reply = f"📚 **Нашлось в истории по слову '{keyword}':**\n\n{found_text[:800]}\n\n"
+                            reply += "Это то, что ты искал? Могу найти подробнее."
+                            save_message(user_id, "assistant", reply)
+                            await send_message(user_id, reply)
+                            return JSONResponse({"ok": True})
+                    
+                    # Если всё равно ничего не нашли
                     reply = "📭 Ничего не нашёл в истории по этому запросу. Попробуй другие слова."
                     save_message(user_id, "assistant", reply)
                     await send_message(user_id, reply)
