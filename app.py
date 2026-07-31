@@ -21,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # ===== ПОДКЛЮЧЕНИЯ =====
-print("🚀 БОТ ЗАПУЩЕН. ВЕРСИЯ С АВТОМАТИЧЕСКИМ ПОИСКОМ (КОНТЕКСТ 15)")
+print("🚀 БОТ ЗАПУЩЕН. ВЕРСИЯ С ИСПРАВЛЕННЫМ АВТОПОИСКОМ")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -36,7 +36,6 @@ groq = Groq(api_key=GROQ_API_KEY)
 
 app = FastAPI()
 
-# ===== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ =====
 last_search_topic = None
 
 # ===== РАБОТА С БАЗОЙ =====
@@ -60,7 +59,6 @@ def save_message(user_id, role, content):
         return None
 
 def get_recent_history(user_id, limit=15):
-    """Загружает последние 15 сообщений"""
     if not supabase:
         return []
     try:
@@ -142,16 +140,25 @@ def extract_name(text):
     match = re.search(r"зовут\s*([А-Яа-яёЁ\-]+)", text, re.I)
     if match:
         return match.group(1).capitalize()
+    match = re.search(r"я\s*([А-Яа-яёЁ\-]+)", text, re.I)
+    if match:
+        name = match.group(1).capitalize()
+        if len(name) > 1 and name not in ["Я", "Ты", "Он", "Она", "Мы", "Вы", "Они"]:
+            return name
+    match = re.search(r"моё имя\s*([А-Яа-яёЁ\-]+)", text, re.I)
+    if match:
+        return match.group(1).capitalize()
+    words = text.strip().split()
+    if len(words) == 1 and len(words[0]) > 1 and words[0][0].isupper():
+        return words[0].capitalize()
     return None
 
 def extract_city(text):
     text_lower = text.lower()
-    
-    city_markers = ["живу в", "я из", "из города", "в городе", "посёлок", "город", "живу в посёлке"]
-    
+    city_markers = ["живу в", "я из", "из города", "в городе", "посёлок", "город", 
+                    "живу в посёлке", "я из города", "родился в", "живу в городе"]
     if not any(marker in text_lower for marker in city_markers):
         return None
-    
     match = re.search(r"(?:из|в|живу в|живу)\s*([А-Яа-яёЁ\-]+)", text, re.I)
     if match:
         city = match.group(1).capitalize()
@@ -196,38 +203,40 @@ def verify_and_save_city(user_id, city_name, user_name=None):
         
         if "существует" in result.lower() and "не существует" not in result.lower():
             save_fact(user_id, "city", city_name)
-            
             facts = result.replace("существует", "").strip()
             if facts:
                 return city_name, f"Круто! {city_name} — это {facts} 🔥 Запомнил!"
             else:
                 return city_name, f"Запомнил! Ты из {city_name}. А что там интересного? 😊"
-        
         else:
             return None, f"Хм, я не нашёл город {city_name} на карте. Ты уверен, что правильно назвал? Может, это посёлок или район? Напиши ещё раз 😊"
-            
     except Exception as e:
         print(f"❌ Ошибка проверки города: {e}")
         save_fact(user_id, "city", city_name)
         return city_name, f"Запомнил! Ты из {city_name}. Расскажи потом о нём подробнее 😊"
 
-# ===== ПОНИМАНИЕ ЗАПРОСА =====
+# ===== ПОНИМАНИЕ ЗАПРОСА (С ОЧИСТКОЙ МУСОРА) =====
 
 def understand_query(text, previous_topic=None):
     print(f"🧠 Понимаю запрос: '{text}'")
     
-    if previous_topic and any(word in text.lower() for word in ["него", "это", "них", "ней", "его"]):
-        stop_words_check = ["говорили", "сказал", "писал", "правильно", "вспомнил", "говорил", "напомни", "вспомни"]
-        if previous_topic.lower() not in stop_words_check:
+    garbage_topics = ["говорили", "сказал", "писал", "правильно", "вспомнил", "говорил", 
+                      "напомни", "вспомни", "неправильно", "давай", "запомнил", "про"]
+    
+    if previous_topic and any(word in text.lower() for word in ["него", "это", "них", "ней", "его", "этом"]):
+        if previous_topic.lower() not in garbage_topics:
             print(f"🧠 Заметил местоимение, подставляю тему: '{previous_topic}'")
             return previous_topic
+        else:
+            print(f"🧠 Заметил местоимение, но тема '{previous_topic}' мусорная — игнорирую")
     
     text_lower = text.lower()
     topic_triggers = {
-        "имя": ["имя", "имена", "зовут", "называют", "меня зовут"],
-        "город": ["город", "живу", "жил", "родился", "откуда"],
+        "имя": ["имя", "имена", "зовут", "называют", "меня зовут", "кто я"],
+        "город": ["город", "живу", "жил", "родился", "откуда", "в каком городе"],
         "загадка": ["загадк", "загадал"],
         "фильм": ["фильм", "кино", "смотрел", "сериал"],
+        "работа": ["работаю", "работа", "кем работаю", "где работаю", "моя работа"]
     }
     
     for topic, keywords in topic_triggers.items():
@@ -247,6 +256,8 @@ def understand_query(text, previous_topic=None):
         "Найди мне про росомаху" → росомаха
         "Какую загадку я загадал?" → загадка
         "Что мы говорили про угольный разрез?" → угольный разрез
+        "Где я работаю?" → работа
+        "Кто я?" → имя
         
         Вопрос: "{text}"
         
@@ -259,7 +270,7 @@ def understand_query(text, previous_topic=None):
             max_tokens=30
         )
         result = response.choices[0].message.content.strip()
-        if result:
+        if result and result.lower() not in garbage_topics:
             print(f"🧠 DeepSeek сказал искать: '{result}'")
             return result
     except Exception as e:
@@ -276,7 +287,7 @@ def understand_query(text, previous_topic=None):
                   "говорили", "правильно", "вспомнил", "вспомнила", "помнишь", "помню",
                   "делал", "сделал", "ходил", "ездил", "смотрел", "читал", "видел",
                   "упоминал", "обсуждали", "вспомни", "напомни", "давай", "давайте",
-                  "пожалуйста", "спасибо"]
+                  "пожалуйста", "спасибо", "неправильно", "запомнил"]
     
     phrases = re.findall(r'[А-Яа-яёЁ]+\s+[А-Яа-яёЁ]+', text)
     for phrase in phrases:
@@ -297,21 +308,30 @@ def understand_query(text, previous_topic=None):
             return word
     
     if words:
-        print(f"🧠 Запасной (последнее): '{words[-1]}'")
-        return words[-1]
+        last_word = words[-1]
+        if last_word.lower() not in stop_words:
+            print(f"🧠 Запасной (последнее): '{last_word}'")
+            return last_word
     
-    return text
+    return None
+
+# ===== ОПРЕДЕЛЕНИЕ НУЖНОСТИ ПОИСКА (РАСШИРЕННОЕ) =====
 
 def should_search_history(text):
     text_lower = text.lower()
-    triggers = ["напомни", "что я говорил", "где я говорил", "найди в истории", "вспомни", 
-                "что я писал", "загадк", "вопрос", "раньше", "прошлый", "прошлое", "помнишь", 
-                "говорил", "писал", "рассказывал", "упоминал", "обсуждали", "было", "была", "ранее",
-                "делал", "сказал", "спросил", "ответил", "написал", "вспомни", "помню",
-                "выжимку", "первое", "всего общения"]
+    triggers = [
+        "напомни", "что я говорил", "где я говорил", "найди в истории", "вспомни", 
+        "что я писал", "загадк", "вопрос", "раньше", "прошлый", "прошлое", "помнишь", 
+        "говорил", "писал", "рассказывал", "упоминал", "обсуждали", "было", "была", "ранее",
+        "делал", "сказал", "спросил", "ответил", "написал", "вспомни", "помню",
+        "выжимку", "первое", "всего общения",
+        "работаю", "работа", "кем работаю", "где работаю", "моя работа",
+        "кто я", "назови моё имя", "ты помнишь моё имя",
+        "откуда я", "в каком городе", "где я живу"
+    ]
     return any(trigger in text_lower for trigger in triggers)
 
-# ===== ФОРМАТИРОВАНИЕ В ЧЕЛОВЕЧЕСКИЙ ОТВЕТ =====
+# ===== ФОРМАТИРОВАНИЕ ОТВЕТА =====
 
 def format_results_to_human(results, original_query, search_word, user_name=None):
     if not results:
@@ -503,7 +523,7 @@ async def webhook(request: Request):
         user_city = get_fact(user_id, "city")
 
         # ===== ПРЯМЫЕ ЗАПРОСЫ =====
-        if "как меня зовут" in lower or "моё имя" in lower or "как зовут" in lower:
+        if "как меня зовут" in lower or "моё имя" in lower or "как зовут" in lower or "кто я" in lower:
             if user_name:
                 reply = f"Тебя зовут **{user_name}**."
             else:
@@ -512,7 +532,7 @@ async def webhook(request: Request):
             await send_message(user_id, reply)
             return JSONResponse({"ok": True})
 
-        if "где я живу" in lower or "мой город" in lower or "откуда я" in lower:
+        if "где я живу" in lower or "мой город" in lower or "откуда я" in lower or "в каком городе" in lower:
             if user_city:
                 reply = f"Ты из **{user_city}**."
             else:
@@ -521,14 +541,15 @@ async def webhook(request: Request):
             await send_message(user_id, reply)
             return JSONResponse({"ok": True})
 
-        # ===== ПОИСК С ЧЕЛОВЕЧЕСКИМ ОТВЕТОМ =====
+        # ===== ПОИСК С ЧЕЛОВЕЧЕСКИМ ОТВЕТОМ (ЕСЛИ СПЕЦИАЛЬНО ПОПРОСИЛИ) =====
         if should_search_history(text):
             search_topic = understand_query(text, last_search_topic)
             
-            if search_topic and search_topic.lower() not in ["говорили", "сказал", "писал", "правильно", "вспомнил", "давай"]:
+            garbage_topics = ["говорили", "сказал", "писал", "правильно", "вспомнил", "давай", "неправильно", "запомнил", "про"]
+            if search_topic and search_topic.lower() not in garbage_topics:
                 last_search_topic = search_topic
             
-            if search_topic and len(search_topic) > 1:
+            if search_topic and len(search_topic) > 1 and search_topic.lower() not in garbage_topics:
                 reply = hybrid_search(user_id, text, current_message_id, user_name)
                 
                 if reply:
@@ -544,22 +565,29 @@ async def webhook(request: Request):
         # ===== ОСНОВНОЙ ДИАЛОГ =====
         history = get_recent_history(user_id, limit=15)
         
-        # ===== АВТОМАТИЧЕСКИЙ ПОИСК, ЕСЛИ ТЕМЫ НЕТ В КОНТЕКСТЕ =====
+        # ===== АВТОМАТИЧЕСКИЙ ПОИСК (ЕСЛИ ТЕМЫ НЕТ В КОНТЕКСТЕ) =====
         search_topic = understand_query(text, last_search_topic)
-        if search_topic and len(search_topic) > 1:
-            # Проверяем, есть ли тема в контексте
+        
+        garbage_topics = ["говорили", "сказал", "писал", "правильно", "вспомнил", "давай", "неправильно", "запомнил", "про"]
+        
+        if search_topic and len(search_topic) > 1 and search_topic.lower() not in garbage_topics:
             topic_found_in_context = any(
                 search_topic.lower() in msg.get('content', '').lower() 
                 for msg in history
             )
             
             if not topic_found_in_context:
-                print(f"🔍 Темы '{search_topic}' нет в контексте, ищу в Supabase...")
+                print(f"🔍 АВТОПОИСК: темы '{search_topic}' нет в контексте, ищу в Supabase...")
                 reply = hybrid_search(user_id, text, current_message_id, user_name)
                 if reply:
+                    print(f"✅ АВТОПОИСК: нашёл ответ в Supabase!")
                     save_message(user_id, "assistant", reply)
                     await send_message(user_id, reply)
                     return JSONResponse({"ok": True})
+                else:
+                    print(f"❌ АВТОПОИСК: ничего не нашёл в Supabase")
+            else:
+                print(f"✅ АВТОПОИСК: тема '{search_topic}' есть в контексте, поиск не требуется")
 
         user_context = []
         if user_name:
