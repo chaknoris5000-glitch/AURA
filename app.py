@@ -21,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # ===== ПОДКЛЮЧЕНИЯ =====
-print("🚀 БОТ ЗАПУЩЕН. НОВАЯ ВЕРСИЯ С ИНТЕЛЛЕКТУАЛЬНЫМ ПОИСКОМ.")
+print("🚀 БОТ ЗАПУЩЕН. ВЕРСИЯ С ИНТЕЛЛЕКТУАЛЬНЫМ ПОИСКОМ (ТЕСТОВАЯ)")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -74,8 +74,24 @@ def get_recent_history(user_id, limit=15):
         print(f"❌ Ошибка загрузки: {e}")
         return []
 
+def get_all_history(user_id, limit=1000):
+    """Загружает ВСЮ историю (для поиска DeepSeek)"""
+    if not supabase:
+        return []
+    try:
+        res = supabase.table("history")\
+            .select("role, content, created_at, id")\
+            .eq("user_id", user_id)\
+            .order("created_at", desc=False)\
+            .limit(limit)\
+            .execute()
+        return res.data if res.data else []
+    except Exception as e:
+        print(f"❌ Ошибка загрузки всей истории: {e}")
+        return []
+
 def search_history(user_id, query, exclude_id=None):
-    """Ищет во ВСЕЙ истории, исключая конкретное сообщение по ID"""
+    """Ищет во ВСЕЙ истории Supabase по ключевому слову"""
     if not supabase:
         return []
     try:
@@ -84,7 +100,7 @@ def search_history(user_id, query, exclude_id=None):
             .eq("user_id", user_id)\
             .ilike("content", f"%{query}%")\
             .order("created_at", desc=True)\
-            .limit(20)\
+            .limit(30)\
             .execute()
         
         results = res.data if res.data else []
@@ -95,22 +111,6 @@ def search_history(user_id, query, exclude_id=None):
         return results[:10]
     except Exception as e:
         print(f"❌ Ошибка поиска: {e}")
-        return []
-
-def get_all_history(user_id, limit=1000):
-    """Загружает ВСЮ историю (для архива)"""
-    if not supabase:
-        return []
-    try:
-        res = supabase.table("history")\
-            .select("role, content")\
-            .eq("user_id", user_id)\
-            .order("created_at", desc=False)\
-            .limit(limit)\
-            .execute()
-        return res.data if res.data else []
-    except Exception as e:
-        print(f"❌ Ошибка загрузки всей истории: {e}")
         return []
 
 def save_fact(user_id, key, value):
@@ -162,72 +162,154 @@ def extract_city(text):
 # ===== ИНТЕЛЛЕКТУАЛЬНОЕ ПОНИМАНИЕ ЗАПРОСА =====
 
 def understand_query(text):
-    """Использует DeepSeek для понимания, что именно искать в истории"""
+    """Трёхуровневый поиск: DeepSeek → существительное → последнее слово"""
+    
+    print(f"🧠 Понимаю запрос: '{text}'")
+    
+    # ===== УРОВЕНЬ 1: DeepSeek =====
     try:
         prompt = f"""
-        Пользователь спрашивает: "{text}"
+        Извлеки главное слово (существительное) из вопроса для поиска в истории.
         
-        Задача: извлечь СУТЬ запроса - что именно он хочет найти в истории диалога?
+        Вопрос: "{text}"
         
-        Правила:
-        - Ответь одной фразой (2-4 слова), без лишнего текста
-        - Если спрашивают про конкретного человека/персонажа - напиши его имя
-        - Если спрашивают про тему - напиши тему
-        - Если спрашивают про действие - напиши действие
-        - Не пиши "история", "диалог", "разговор" - только суть
+        Главное слово (одно слово в именительном падеже):
+        """
         
-        Примеры:
-        "Что мы говорили про Магнето?" → Магнето
-        "Напомни про росомаху" → Росомаха
-        "Мы обсуждали фильмы?" → фильмы
-        "Что я говорил про Инской?" → Инской
-        "Где я живу?" → город
-        "Как меня зовут?" → имя
-        "Что я люблю есть?" → еда
-        "Помнишь загадку?" → загадка
+        response = deepseek.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.5,
+            max_tokens=20
+        )
         
-        Ответ:
+        result = response.choices[0].message.content.strip()
+        
+        if result:
+            print(f"🧠 Уровень 1 (DeepSeek): '{result}'")
+            return result
+            
+    except Exception as e:
+        print(f"❌ DeepSeek не ответил: {e}")
+    
+    # ===== УРОВЕНЬ 2: Поиск существительного =====
+    words = re.findall(r'[а-яА-ЯёЁa-zA-Z]{3,}', text)
+    
+    stop_words = ["какую", "первую", "тебе", "как", "что", "где", "когда", "почему", 
+                  "зачем", "кто", "какой", "такой", "так", "вот", "да", "нет", "уже",
+                  "ещё", "тоже", "только", "очень", "было", "была", "мою", "твою",
+                  "свою", "нашу", "вашу", "эту", "ту", "этот", "тот", "все", "сам",
+                  "говорил", "сказал", "писал", "рассказывал", "спросил", "ответил",
+                  "загадал", "спросил", "напомни", "вспомни"]
+    
+    # 2a: Ищем слова с большой буквы (имена собственные)
+    for word in words:
+        if word[0].isupper() and word.lower() not in stop_words:
+            print(f"🧠 Уровень 2 (имя собственное): '{word}'")
+            return word
+    
+    # 2b: Ищем существительные по окончаниям
+    noun_endings = ['а', 'я', 'о', 'е', 'и', 'ы', 'ь', 'й', 'н', 'р', 'л']
+    
+    for word in words:
+        word_lower = word.lower()
+        if word_lower not in stop_words and len(word) > 3:
+            if word[-1] in noun_endings:
+                print(f"🧠 Уровень 2 (существительное): '{word}'")
+                return word
+    
+    # ===== УРОВЕНЬ 3: Последнее слово =====
+    if words:
+        print(f"🧠 Уровень 3 (последнее слово): '{words[-1]}'")
+        return words[-1]
+    
+    return text
+
+def should_search_history(text):
+    """Определяет, нужно ли искать в истории"""
+    text_lower = text.lower()
+    
+    direct_triggers = ["напомни", "что я говорил", "где я говорил", "найди в истории", "вспомни", "что я писал"]
+    if any(trigger in text_lower for trigger in direct_triggers):
+        return True
+    
+    past_triggers = ["загадк", "вопрос", "раньше", "прошлый", "прошлое", "помнишь", "говорил", "писал", 
+                     "рассказывал", "упоминал", "обсуждали", "было", "была", "ранее"]
+    if any(trigger in text_lower for trigger in past_triggers):
+        return True
+    
+    past_verbs = ["делал", "сказал", "спросил", "ответил", "написал", "рассказал", "упомянул"]
+    if any(verb in text_lower for verb in past_verbs):
+        return True
+    
+    return False
+
+# ===== ПОИСК С ЗАПАСНЫМ ВАРИАНТОМ (БОТ → DEEPSEEK) =====
+
+def search_with_fallback(user_id, query, exclude_id=None):
+    """Сначала бот ищет в Supabase (по всей истории), если не нашёл - подключает DeepSeek (по всей истории)"""
+    
+    # ===== ЭТАП 1: БОТ ИЩЕТ В SUPABASE (ПО ВСЕЙ ИСТОРИИ) =====
+    print(f"🔍 Этап 1: Бот ищет в Supabase (по всей истории): '{query}'")
+    results = search_history(user_id, query, exclude_id)
+    
+    if results:
+        print(f"✅ Бот нашёл в Supabase: {len(results)} результатов")
+        return results
+    
+    # ===== ЭТАП 2: БОТ НЕ НАШЁЛ → ПОДКЛЮЧАЕТ DEEPSEEK (ПО ВСЕЙ ИСТОРИИ) =====
+    print(f"🔍 Этап 2: Бот не нашёл, подключаю DeepSeek (по всей истории)...")
+    
+    try:
+        # Загружаем ВСЮ историю для DeepSeek
+        all_history = get_all_history(user_id, limit=1000)
+        
+        if not all_history:
+            return []
+        
+        # Берём только сообщения пользователя для поиска
+        user_messages = [h for h in all_history if h['role'] == 'user']
+        
+        if not user_messages:
+            return []
+        
+        # Формируем текст ВСЕЙ истории
+        history_text = "\n".join([f"- {h['content']}" for h in user_messages[-50:]])  # Последние 50 для экономии
+        
+        prompt = f"""
+        Найди в истории сообщения пользователя, которые относятся к теме "{query}".
+        
+        История пользователя (все сообщения):
+        {history_text}
+        
+        Ответь ТОЛЬКО сообщениями, которые относятся к теме "{query}".
+        Если ничего не найдено - напиши "ничего не найдено".
         """
         
         response = deepseek.chat.completions.create(
             model="deepseek-v4-flash",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
-            max_tokens=30
+            max_tokens=300
         )
         
-        result = response.choices[0].message.content.strip()
-        print(f"🧠 Понял запрос: '{result}'")
-        return result
+        result = response.choices[0].message.content
+        
+        if "ничего не найдено" in result.lower():
+            print(f"❌ DeepSeek тоже не нашёл")
+            return []
+        
+        print(f"✅ DeepSeek нашёл в истории!")
+        
+        return [{
+            "role": "assistant",
+            "content": result,
+            "created_at": datetime.now().isoformat()
+        }]
+        
     except Exception as e:
-        print(f"❌ Ошибка понимания запроса: {e}")
-        # Если ошибка - пробуем извлечь ключевые слова старым способом
-        words = re.findall(r'[а-яА-ЯёЁa-zA-Z]{4,}', text)
-        if words:
-            return words[0]
-        return text
-
-def should_search_history(text):
-    """Определяет, нужно ли искать в истории"""
-    text_lower = text.lower()
-    
-    # 1. Прямые команды поиска
-    direct_triggers = ["напомни", "что я говорил", "где я говорил", "найди в истории", "вспомни", "что я писал"]
-    if any(trigger in text_lower for trigger in direct_triggers):
-        return True
-    
-    # 2. Вопросы о прошлом
-    past_triggers = ["загадк", "вопрос", "раньше", "прошлый", "прошлое", "помнишь", "говорил", "писал", 
-                     "рассказывал", "упоминал", "обсуждали", "было", "была", "ранее"]
-    if any(trigger in text_lower for trigger in past_triggers):
-        return True
-    
-    # 3. Вопросы в прошедшем времени
-    past_verbs = ["делал", "сказал", "спросил", "ответил", "написал", "рассказал", "упомянул"]
-    if any(verb in text_lower for verb in past_verbs):
-        return True
-    
-    return False
+        print(f"❌ Ошибка DeepSeek: {e}")
+        return []
 
 # ===== РАСПОЗНАВАНИЕ ГОЛОСА =====
 
@@ -321,7 +403,9 @@ async def webhook(request: Request):
             
             if search_topic and len(search_topic) > 1:
                 print(f"🔍 Ищу в истории по теме: '{search_topic}'")
-                results = search_history(user_id, search_topic, exclude_id=current_message_id)
+                
+                # 2. Ищем с запасным вариантом (бот → DeepSeek)
+                results = search_with_fallback(user_id, search_topic, exclude_id=current_message_id)
                 
                 if results:
                     found_text = "\n\n".join([f"{r['role']}: {r['content']}" for r in results[:5]])
@@ -331,8 +415,7 @@ async def webhook(request: Request):
                     await send_message(user_id, reply)
                     return JSONResponse({"ok": True})
                 else:
-                    # Если не нашли, говорим честно
-                    reply = f"📭 Ничего не нашёл в истории про '{search_topic}'. Попробуй спросить по-другому или уточни."
+                    reply = f"📭 Ничего не нашёл в истории про '{search_topic}'. Попробуй спросить по-другому."
                     save_message(user_id, "assistant", reply)
                     await send_message(user_id, reply)
                     return JSONResponse({"ok": True})
