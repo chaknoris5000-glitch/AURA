@@ -21,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # ===== ПОДКЛЮЧЕНИЯ =====
-print("🚀 БОТ ЗАПУЩЕН. ВЕРСИЯ С ВЕЧНОЙ ПАМЯТЬЮ.")
+print("🚀 БОТ ЗАПУЩЕН. НОВАЯ ВЕРСИЯ С ИНТЕЛЛЕКТУАЛЬНЫМ ПОИСКОМ.")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -51,7 +51,6 @@ def save_message(user_id, role, content):
         }).execute()
         print(f"💾 Сохранено в history: {role} -> {content[:30]}...")
         
-        # Возвращаем ID сохранённого сообщения
         if result.data and len(result.data) > 0:
             return result.data[0].get('id')
         return None
@@ -90,11 +89,10 @@ def search_history(user_id, query, exclude_id=None):
         
         results = res.data if res.data else []
         
-        # Исключаем ТОЛЬКО текущее сообщение (по ID)
         if exclude_id:
             results = [r for r in results if r.get('id') != exclude_id]
         
-        return results[:10]  # Показываем до 10 результатов
+        return results[:10]
     except Exception as e:
         print(f"❌ Ошибка поиска: {e}")
         return []
@@ -161,15 +159,53 @@ def extract_city(text):
         return city
     return None
 
-def extract_keywords(text):
-    """Извлекает ключевые слова из текста для поиска в истории"""
-    stop_words = ["это", "тот", "этот", "все", "сам", "быть", "что", "как", "где", "когда", 
-                  "почему", "зачем", "кто", "какой", "такой", "так", "вот", "да", "нет"]
-    
-    words = re.findall(r'[а-яА-ЯёЁa-zA-Z]+', text.lower())
-    keywords = [w for w in words if len(w) > 3 and w not in stop_words]
-    
-    return keywords
+# ===== ИНТЕЛЛЕКТУАЛЬНОЕ ПОНИМАНИЕ ЗАПРОСА =====
+
+def understand_query(text):
+    """Использует DeepSeek для понимания, что именно искать в истории"""
+    try:
+        prompt = f"""
+        Пользователь спрашивает: "{text}"
+        
+        Задача: извлечь СУТЬ запроса - что именно он хочет найти в истории диалога?
+        
+        Правила:
+        - Ответь одной фразой (2-4 слова), без лишнего текста
+        - Если спрашивают про конкретного человека/персонажа - напиши его имя
+        - Если спрашивают про тему - напиши тему
+        - Если спрашивают про действие - напиши действие
+        - Не пиши "история", "диалог", "разговор" - только суть
+        
+        Примеры:
+        "Что мы говорили про Магнето?" → Магнето
+        "Напомни про росомаху" → Росомаха
+        "Мы обсуждали фильмы?" → фильмы
+        "Что я говорил про Инской?" → Инской
+        "Где я живу?" → город
+        "Как меня зовут?" → имя
+        "Что я люблю есть?" → еда
+        "Помнишь загадку?" → загадка
+        
+        Ответ:
+        """
+        
+        response = deepseek.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=30
+        )
+        
+        result = response.choices[0].message.content.strip()
+        print(f"🧠 Понял запрос: '{result}'")
+        return result
+    except Exception as e:
+        print(f"❌ Ошибка понимания запроса: {e}")
+        # Если ошибка - пробуем извлечь ключевые слова старым способом
+        words = re.findall(r'[а-яА-ЯёЁa-zA-Z]{4,}', text)
+        if words:
+            return words[0]
+        return text
 
 def should_search_history(text):
     """Определяет, нужно ли искать в истории"""
@@ -192,25 +228,6 @@ def should_search_history(text):
         return True
     
     return False
-
-def get_intelligent_search_query(text):
-    """Умно извлекает запрос для поиска"""
-    text_lower = text.lower()
-    
-    # Удаляем триггеры
-    direct_triggers = ["напомни", "что я говорил", "где я говорил", "найди в истории", "вспомни", "что я писал"]
-    query = text
-    for trigger in direct_triggers:
-        if trigger in text_lower:
-            query = query.replace(trigger, "").strip()
-    
-    # Если запрос слишком короткий - извлекаем ключевые слова
-    if len(query) < 3:
-        keywords = extract_keywords(text)
-        if keywords:
-            return keywords[0]
-    
-    return query
 
 # ===== РАСПОЗНАВАНИЕ ГОЛОСА =====
 
@@ -268,7 +285,7 @@ async def webhook(request: Request):
         if not text:
             return JSONResponse({"ok": True})
 
-        # ===== СОХРАНЯЕМ СООБЩЕНИЕ В ИСТОРИЮ (ВЕЧНО) =====
+        # ===== СОХРАНЯЕМ СООБЩЕНИЕ В ИСТОРИЮ =====
         current_message_id = save_message(user_id, "user", text)
 
         # ===== ИЗВЛЕКАЕМ ФАКТЫ =====
@@ -299,51 +316,36 @@ async def webhook(request: Request):
 
         # ===== ИНТЕЛЛЕКТУАЛЬНЫЙ ПОИСК В ИСТОРИИ =====
         if should_search_history(text):
-            query = get_intelligent_search_query(text)
+            # 1. Понимаем, что искать
+            search_topic = understand_query(text)
             
-            # Если есть запрос - ищем
-            if query and len(query) > 2:
-                print(f"🔍 Ищу в истории: '{query}'")
-                results = search_history(user_id, query, exclude_id=current_message_id)
+            if search_topic and len(search_topic) > 1:
+                print(f"🔍 Ищу в истории по теме: '{search_topic}'")
+                results = search_history(user_id, search_topic, exclude_id=current_message_id)
                 
                 if results:
-                    # Форматируем результаты
                     found_text = "\n\n".join([f"{r['role']}: {r['content']}" for r in results[:5]])
-                    reply = f"📚 **Нашлось в истории:**\n\n{found_text[:1000]}\n\n"
+                    reply = f"📚 **Нашлось в истории про {search_topic}:**\n\n{found_text[:1000]}\n\n"
                     reply += "Это то, что ты искал? Могу найти подробнее."
                     save_message(user_id, "assistant", reply)
                     await send_message(user_id, reply)
                     return JSONResponse({"ok": True})
                 else:
-                    # Если ничего не нашли, пробуем поискать по отдельным ключевым словам
-                    keywords = extract_keywords(query)
-                    for keyword in keywords[:3]:
-                        results = search_history(user_id, keyword, exclude_id=current_message_id)
-                        if results:
-                            found_text = "\n\n".join([f"{r['role']}: {r['content']}" for r in results[:3]])
-                            reply = f"📚 **Нашлось в истории по слову '{keyword}':**\n\n{found_text[:800]}\n\n"
-                            reply += "Это то, что ты искал? Могу найти подробнее."
-                            save_message(user_id, "assistant", reply)
-                            await send_message(user_id, reply)
-                            return JSONResponse({"ok": True})
-                    
-                    # Если всё равно ничего не нашли
-                    reply = "📭 Ничего не нашёл в истории по этому запросу. Попробуй другие слова."
+                    # Если не нашли, говорим честно
+                    reply = f"📭 Ничего не нашёл в истории про '{search_topic}'. Попробуй спросить по-другому или уточни."
                     save_message(user_id, "assistant", reply)
                     await send_message(user_id, reply)
                     return JSONResponse({"ok": True})
 
-        # ===== ОСНОВНОЙ ДИАЛОГ (ОБНОВЛЁННЫЙ ПРОМТ) =====
+        # ===== ОСНОВНОЙ ДИАЛОГ =====
         history = get_recent_history(user_id, limit=15)
         
-        # Формируем контекст о пользователе
         user_context = []
         if user_name:
             user_context.append(f"Ты общаешься с {user_name}. Он твой друг, общайся по-дружески.")
         if user_city:
             user_context.append(f"Он из {user_city}.")
 
-        # Базовый системный промт с живым стилем общения
         system_prompt = """Ты — AURA, живой собеседник и друг, а не бездушный ИИ.
 
 📌 ТВОЙ СТИЛЬ ОБЩЕНИЯ:
@@ -361,7 +363,6 @@ async def webhook(request: Request):
 
 Ты общаешься с человеком, который хочет чувствовать себя комфортно, как с другом. Будь таким. 😉"""
 
-        # Добавляем пользовательский контекст
         if user_context:
             system_prompt += "\n\n" + "\n".join(user_context)
 
@@ -381,7 +382,6 @@ async def webhook(request: Request):
             )
             reply = response.choices[0].message.content
 
-            # Добавляем имя пользователя в начало, если его нет
             if user_name and not reply.startswith(user_name):
                 reply = f"{user_name}, {reply[0].lower() + reply[1:] if reply else ''}"
 
