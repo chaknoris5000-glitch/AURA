@@ -21,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # ===== ПОДКЛЮЧЕНИЯ =====
-print("🚀 БОТ ЗАПУЩЕН. ФИНАЛЬНАЯ ВЕРСИЯ (ВСЕ БАГИ ИСПРАВЛЕНЫ)")
+print("🚀 БОТ ЗАПУЩЕН. ФИНАЛЬНАЯ ВЕРСИЯ С ИСПРАВЛЕНИЯМИ")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -60,7 +60,6 @@ def save_message(user_id, role, content):
         return None
 
 def get_recent_history(user_id, limit=20):
-    """Загружает последние 20 сообщений (увеличено с 15)"""
     if not supabase:
         return []
     try:
@@ -133,7 +132,7 @@ def get_fact(user_id, key):
     except:
         return None
 
-# ===== ИЗВЛЕЧЕНИЕ ФАКТОВ =====
+# ===== ИЗВЛЕЧЕНИЕ ФАКТОВ (ИСПРАВЛЕНО) =====
 
 def extract_name(text):
     match = re.search(r"меня зовут\s*([А-Яа-яёЁ\-]+)", text, re.I)
@@ -145,27 +144,43 @@ def extract_name(text):
     return None
 
 def extract_city(text):
+    """Извлекает город только если есть явные маркеры"""
+    text_lower = text.lower()
+    
+    # Маркеры, которые точно указывают на город
+    city_markers = ["живу в", "я из", "из города", "в городе", "посёлок", "город", "живу в посёлке"]
+    
+    # Проверяем наличие маркеров
+    if not any(marker in text_lower for marker in city_markers):
+        return None
+    
+    # Ищем город
     match = re.search(r"(?:из|в|живу в|живу)\s*([А-Яа-яёЁ\-]+)", text, re.I)
     if match:
         city = match.group(1).capitalize()
+        # Исправляем распространённые ошибки
         if city.lower() in ["инской", "инского", "инском"]:
+            return "Инской"
+        if city.lower() in ["белово", "белова"]:
             return "Белово"
+        # Отсекаем мусор (короткие слова, явно не города)
+        if len(city) < 3:
+            return None
         return city
     return None
 
-# ===== ПОНИМАНИЕ ЗАПРОСА (ИСПРАВЛЕНО) =====
+# ===== ПОНИМАНИЕ ЗАПРОСА =====
 
 def understand_query(text, previous_topic=None):
     print(f"🧠 Понимаю запрос: '{text}'")
     
-    # ===== ПРОВЕРКА НА МЕСТОИМЕНИЯ =====
     if previous_topic and any(word in text.lower() for word in ["него", "это", "них", "ней", "его"]):
         stop_words_check = ["говорили", "сказал", "писал", "правильно", "вспомнил", "говорил", "напомни", "вспомни"]
         if previous_topic.lower() not in stop_words_check:
             print(f"🧠 Заметил местоимение, подставляю тему: '{previous_topic}'")
             return previous_topic
     
-    # ===== ПРОВЕРКА НА СПЕЦИАЛЬНЫЕ ТЕМЫ (НОВОЕ!) =====
+    # ===== ПРОВЕРКА НА СПЕЦИАЛЬНЫЕ ТЕМЫ =====
     text_lower = text.lower()
     topic_triggers = {
         "имя": ["имя", "имена", "зовут", "называют", "меня зовут"],
@@ -180,7 +195,7 @@ def understand_query(text, previous_topic=None):
                 print(f"🧠 Нашёл тему '{topic}' по ключевому слову '{keyword}'")
                 return topic
     
-    # ===== ОСНОВНОЙ СПОСОБ: DeepSeek говорит что искать =====
+    # ===== ОСНОВНОЙ СПОСОБ: DeepSeek =====
     try:
         prompt = f"""
         Из вопроса пользователя извлеки ОДНО ключевое слово для поиска в истории.
@@ -212,7 +227,6 @@ def understand_query(text, previous_topic=None):
     # ===== ЗАПАСНОЙ ВАРИАНТ =====
     words = re.findall(r'[а-яА-ЯёЁa-zA-Z]{3,}', text)
     
-    # ===== РАСШИРЕННЫЕ СТОП-СЛОВА =====
     stop_words = ["какую", "первую", "тебе", "как", "что", "где", "когда", "почему", 
                   "зачем", "кто", "какой", "такой", "так", "вот", "да", "нет", "уже",
                   "ещё", "тоже", "только", "очень", "было", "была", "мою", "твою",
@@ -245,7 +259,6 @@ def understand_query(text, previous_topic=None):
             print(f"🧠 Запасной (сущ): '{word}'")
             return word
     
-    # 4. Последнее слово
     if words:
         print(f"🧠 Запасной (последнее): '{words[-1]}'")
         return words[-1]
@@ -261,11 +274,11 @@ def should_search_history(text):
                 "выжимку", "первое", "всего общения"]
     return any(trigger in text_lower for trigger in triggers)
 
-# ===== ФОРМАТИРОВАНИЕ В ЧЕЛОВЕЧЕСКИЙ ОТВЕТ (С КОНТРОЛЕМ ДЛИНЫ) =====
+# ===== ФОРМАТИРОВАНИЕ В ЧЕЛОВЕЧЕСКИЙ ОТВЕТ (ИСПРАВЛЕНО) =====
 
 def format_results_to_human(results, original_query, search_word, user_name=None):
     if not results:
-        return f"Не припоминаю, чтобы мы говорили про {search_word}. Может, напомнишь? 😊"
+        return f"Что-то я подзабыл, {user_name or 'друг'}. Может, напомнишь, о чём именно шла речь? 😊"
     
     messages = []
     for r in results[:5]:
@@ -275,7 +288,7 @@ def format_results_to_human(results, original_query, search_word, user_name=None
         messages.append(content)
     
     if not messages:
-        return f"Помню, мы говорили про {search_word}. А что конкретно тебя интересует? 😊"
+        return f"Вроде бы говорили про {search_word}, но детали вылетели из головы 😅 Напомни, о чём именно? 🔥"
     
     history_text = "\n".join(messages)
     name_context = f"Ты общаешься с {user_name}." if user_name else ""
@@ -288,17 +301,18 @@ def format_results_to_human(results, original_query, search_word, user_name=None
     
     {name_context}
     
-    Задача: ответь пользователю КОРОТКО (максимум 800 символов, примерно 4-5 предложений).
+    Задача: ответь пользователю КОРОТКО (максимум 500 символов).
     
     Правила:
     - Извлеки СУТЬ из истории
     - Не перечисляй все сообщения
-    - Не пиши "в истории нашлось", "нашли", "обнаружили"
+    - Не пиши "в истории нашлось"
     - Говори как в обычном разговоре с другом
     - Если есть имя пользователя - обратись по имени
     - Используй эмодзи 😊🔥
-    - Уложись в 800 символов — ответ должен быть законченным, без обрывов
-    - Закончи предложение точкой, не обрывай на середине
+    - Если ты НЕ УВЕРЕН, что это точно то, о чём спрашивают — скажи "Что-то я подзабыл, напомни, пожалуйста"
+    - НЕ придумывай то, чего нет в истории
+    - Если в истории нет точного ответа — честно скажи об этом
     
     Ответ:
     """
@@ -308,20 +322,15 @@ def format_results_to_human(results, original_query, search_word, user_name=None
             model="deepseek-v4-flash",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
-            max_tokens=300  # 300 токенов ≈ 800 символов (увеличено с 200)
+            max_tokens=200
         )
         result = response.choices[0].message.content.strip()
         if result:
-            # Проверяем, что ответ не оборван
-            if result.endswith(('!', '?', '.', '…', '😊', '🔥', '❤️')):
-                return result
-            else:
-                # Если оборван - добавляем точку
-                return result + "."
+            return result
     except Exception as e:
         print(f"❌ Ошибка форматирования: {e}")
     
-    return f"Помню, мы говорили про {search_word}. Что именно тебя интересует? 😊"
+    return f"Что-то я подзабыл, {user_name or 'друг'}. Напомни, о чём мы говорили? 😊"
 
 # ===== ГИБРИДНЫЙ ПОИСК =====
 
@@ -337,7 +346,7 @@ def hybrid_search(user_id, query, exclude_id=None, user_name=None):
         print(f"✅ Бот нашёл: {len(results)} результатов")
         return format_results_to_human(results, query, search_word, user_name)
     
-    print(f"🔍 Бот не нашёл, пробую DeepSeek умный поиск...")
+    print(f"🔍 Бот не нашёл, пробую DeepSeek...")
     all_history = get_all_history(user_id, limit=1000)
     
     if not all_history:
@@ -364,7 +373,7 @@ def hybrid_search(user_id, query, exclude_id=None, user_name=None):
             model="deepseek-v4-flash",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
-            max_tokens=250
+            max_tokens=200
         )
         result = response.choices[0].message.content.strip()
         if result and "ничего не найдено" not in result.lower():
@@ -446,14 +455,21 @@ async def webhook(request: Request):
         user_name = get_fact(user_id, "name")
         user_city = get_fact(user_id, "city")
 
-        if "как меня зовут" in lower or "моё имя" in lower:
-            reply = f"Тебя зовут **{user_name}**." if user_name else "Ты ещё не представлялся."
+        # ===== ПРЯМЫЕ ЗАПРОСЫ (С УЛУЧШЕННЫМИ ОТВЕТАМИ) =====
+        if "как меня зовут" in lower or "моё имя" in lower or "как зовут" in lower:
+            if user_name:
+                reply = f"Тебя зовут **{user_name}**."
+            else:
+                reply = "Ты ещё не представлялся! Можешь сказать: 'Меня зовут ...' и я запомню 😊"
             save_message(user_id, "assistant", reply)
             await send_message(user_id, reply)
             return JSONResponse({"ok": True})
 
-        if "где я живу" in lower or "мой город" in lower:
-            reply = f"Ты из **{user_city}**." if user_city else "Ты ещё не говорил, откуда ты."
+        if "где я живу" in lower or "мой город" in lower or "откуда я" in lower:
+            if user_city:
+                reply = f"Ты из **{user_city}**."
+            else:
+                reply = "Ты ещё не говорил, откуда ты. Можешь сказать: 'Я живу в ...' и я запомню 😊"
             save_message(user_id, "assistant", reply)
             await send_message(user_id, reply)
             return JSONResponse({"ok": True})
@@ -462,7 +478,6 @@ async def webhook(request: Request):
         if should_search_history(text):
             search_topic = understand_query(text, last_search_topic)
             
-            # Не сохраняем мусорные темы
             if search_topic and search_topic.lower() not in ["говорили", "сказал", "писал", "правильно", "вспомнил", "давай"]:
                 last_search_topic = search_topic
             
@@ -474,7 +489,7 @@ async def webhook(request: Request):
                     await send_message(user_id, reply)
                     return JSONResponse({"ok": True})
                 else:
-                    reply = "Не припоминаю, чтобы мы говорили про это. Может, уточнишь? 😊"
+                    reply = f"Что-то я подзабыл, {user_name or 'друг'}. Может, напомнишь, о чём именно шла речь? 😊"
                     save_message(user_id, "assistant", reply)
                     await send_message(user_id, reply)
                     return JSONResponse({"ok": True})
@@ -484,26 +499,36 @@ async def webhook(request: Request):
         
         user_context = []
         if user_name:
-            user_context.append(f"Ты общаешься с {user_name}. Он твой друг, общайся по-дружески.")
+            user_context.append(f"Тебя зовут {user_name}.")
+        else:
+            user_context.append("Ты ещё не знаешь имени пользователя. Если он не представился — мягко спроси, как его зовут. Если представился — запомни.")
+        
         if user_city:
             user_context.append(f"Он из {user_city}.")
+        else:
+            user_context.append("Ты не знаешь, откуда пользователь. Если он не сказал — можно спросить.")
 
-        system_prompt = """Ты — AURA, живой собеседник и друг, а не бездушный ИИ.
+        system_prompt = """Ты — AURA, живой собеседник и друг.
 
 📌 ТВОЙ СТИЛЬ ОБЩЕНИЯ:
-• Отвечай коротко и по делу (2-3 предложения максимум)
-• Используй эмодзи для передачи эмоций 😊🔥😄❤️
-• Будь максимально естественным, как живой человек в мессенджере
-• Используй разговорные фразы: "ага", "окей", "класс", "понял", "бро", "круто"
-• Не будь сухим, официальным или роботизированным - ты друг, а не робот
-• Если уместно - шути, подкалывай и будь ироничным
-• Сохраняй лёгкость и непринуждённость в общении
+• Отвечай коротко и по делу (2-3 предложения)
+• Используй эмодзи 😊🔥😄
+• Говори как живой человек в мессенджере
+• Используй разговорные фразы: "ага", "окей", "класс", "бро"
+• Не будь сухим или роботизированным - ты друг
+• Если уместно - шути и подкалывай
+
+🧠 ПРАВИЛА ЗНАКОМСТВА:
+• Если пользователь ещё не представился — мягко спроси имя
+• При знакомстве: "Приятно познакомиться, [имя]! А ты из какого города?" 😊
+• Если пользователь назвал имя — запомни его и используй в общении
+• Если пользователь назвал город — запомни и используй
 
 🧠 О ПАМЯТИ:
 • Используй последние 20 сообщений для контекста
 • Всю историю помнишь, если тебя спросят
 
-Ты общаешься с человеком, который хочет чувствовать себя комфортно, как с другом. Будь таким. 😉"""
+Ты общаешься с человеком, который хочет чувствовать себя комфортно. Будь таким. 😉"""
 
         if user_context:
             system_prompt += "\n\n" + "\n".join(user_context)
