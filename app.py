@@ -21,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # ===== ПОДКЛЮЧЕНИЯ =====
-print("🚀 БОТ ЗАПУЩЕН. ФИНАЛЬНАЯ ВЕРСИЯ (ИСПРАВЛЕНО ИСПОЛЬЗОВАНИЕ ИМЕНИ)")
+print("🚀 БОТ ЗАПУЩЕН. ВЕРСИЯ С АВТОМАТИЧЕСКИМ ПОИСКОМ (КОНТЕКСТ 15)")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -59,7 +59,8 @@ def save_message(user_id, role, content):
         print(f"❌ Ошибка сохранения: {e}")
         return None
 
-def get_recent_history(user_id, limit=20):
+def get_recent_history(user_id, limit=15):
+    """Загружает последние 15 сообщений"""
     if not supabase:
         return []
     try:
@@ -183,6 +184,7 @@ def verify_and_save_city(user_id, city_name, user_name=None):
     """
     
     try:
+        print(f"🤖 DeepSeek (flash): проверяю город '{city_name}'...")
         response = deepseek.chat.completions.create(
             model="deepseek-v4-flash",
             messages=[{"role": "user", "content": prompt}],
@@ -235,6 +237,7 @@ def understand_query(text, previous_topic=None):
                 return topic
     
     try:
+        print(f"🤖 DeepSeek (flash): извлекаю ключевое слово из запроса...")
         prompt = f"""
         Из вопроса пользователя извлеки ОДНО ключевое слово для поиска в истории.
         Ответь только этим словом в именительном падеже.
@@ -352,6 +355,7 @@ def format_results_to_human(results, original_query, search_word, user_name=None
     """
     
     try:
+        print(f"🤖 DeepSeek (flash): форматирую ответ...")
         response = deepseek.chat.completions.create(
             model="deepseek-v4-flash",
             messages=[{"role": "user", "content": prompt}],
@@ -403,6 +407,7 @@ def hybrid_search(user_id, query, exclude_id=None, user_name=None):
     """
     
     try:
+        print(f"🤖 DeepSeek (flash): умный поиск в истории...")
         response = deepseek.chat.completions.create(
             model="deepseek-v4-flash",
             messages=[{"role": "user", "content": prompt}],
@@ -537,8 +542,25 @@ async def webhook(request: Request):
                     return JSONResponse({"ok": True})
 
         # ===== ОСНОВНОЙ ДИАЛОГ =====
-        history = get_recent_history(user_id, limit=20)
+        history = get_recent_history(user_id, limit=15)
         
+        # ===== АВТОМАТИЧЕСКИЙ ПОИСК, ЕСЛИ ТЕМЫ НЕТ В КОНТЕКСТЕ =====
+        search_topic = understand_query(text, last_search_topic)
+        if search_topic and len(search_topic) > 1:
+            # Проверяем, есть ли тема в контексте
+            topic_found_in_context = any(
+                search_topic.lower() in msg.get('content', '').lower() 
+                for msg in history
+            )
+            
+            if not topic_found_in_context:
+                print(f"🔍 Темы '{search_topic}' нет в контексте, ищу в Supabase...")
+                reply = hybrid_search(user_id, text, current_message_id, user_name)
+                if reply:
+                    save_message(user_id, "assistant", reply)
+                    await send_message(user_id, reply)
+                    return JSONResponse({"ok": True})
+
         user_context = []
         if user_name:
             user_context.append(f"Тебя зовут {user_name}.")
@@ -564,15 +586,14 @@ async def webhook(request: Request):
 • НЕ начинай КАЖДЫЙ ответ с имени
 • Имя уместно: при приветствии, при прощании, для привлечения внимания
 • Имя НЕ уместно: в середине каждого сообщения, в каждом ответе подряд
-• Пример хорошего использования: "Привет! Как дела?" → "Норм, у тебя?" → "Класс! А что нового?"
-• Пример плохого использования: "Вадим, привет! Вадим, как дела? Вадим, а что нового?"
 
 📌 ПРАВИЛА ЗНАКОМСТВА:
 • Если пользователь ещё не представился — мягко спроси имя
 • При знакомстве: "Приятно познакомиться! А ты из какого города?" 😊
 
 🧠 О ПАМЯТИ:
-• Используй последние 20 сообщений для контекста
+• Используй последние 15 сообщений для контекста
+• Если темы нет в контексте — автоматически ищи в Supabase
 • Всю историю помнишь, если тебя спросят
 
 Ты общаешься с человеком, который хочет чувствовать себя комфортно. Будь таким. 😉"""
@@ -587,7 +608,7 @@ async def webhook(request: Request):
         messages.append({"role": "user", "content": text})
 
         try:
-            print(f"🤖 DeepSeek: использую модель deepseek-v4-flash")
+            print(f"🤖 DeepSeek (flash): основной диалог, {len(messages)} сообщений")
             response = deepseek.chat.completions.create(
                 model="deepseek-v4-flash",
                 messages=messages,
@@ -595,8 +616,6 @@ async def webhook(request: Request):
                 max_tokens=600
             )
             reply = response.choices[0].message.content
-
-            # Больше НЕ добавляем имя принудительно — DeepSeek сам решит, когда его использовать
 
             save_message(user_id, "assistant", reply)
             await send_message(user_id, reply)
