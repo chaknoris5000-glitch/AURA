@@ -21,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # ===== ПОДКЛЮЧЕНИЯ =====
-print("🚀 БОТ ЗАПУЩЕН. ГИБРИДНЫЙ ПОДХОД С ЧЕЛОВЕЧЕСКИМИ ОТВЕТАМИ (ФИНАЛЬНАЯ ВЕРСИЯ)")
+print("🚀 БОТ ЗАПУЩЕН. ФИНАЛЬНАЯ ВЕРСИЯ С ИСПРАВЛЕННЫМИ БАГАМИ")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -59,7 +59,8 @@ def save_message(user_id, role, content):
         print(f"❌ Ошибка сохранения: {e}")
         return None
 
-def get_recent_history(user_id, limit=15):
+def get_recent_history(user_id, limit=20):
+    """Загружает последние 20 сообщений для контекста"""
     if not supabase:
         return []
     try:
@@ -159,7 +160,7 @@ def understand_query(text, previous_topic=None):
     
     # Если есть местоимение и предыдущая тема (и она не мусорная)
     if previous_topic and any(word in text.lower() for word in ["него", "это", "них", "ней", "его"]):
-        stop_words_check = ["говорили", "сказал", "писал", "правильно", "вспомнил"]
+        stop_words_check = ["говорили", "сказал", "писал", "правильно", "вспомнил", "говорил", "напомни", "вспомни", "помню", "помнишь"]
         if previous_topic.lower() not in stop_words_check:
             print(f"🧠 Заметил местоимение, подставляю тему: '{previous_topic}'")
             return previous_topic
@@ -175,6 +176,7 @@ def understand_query(text, previous_topic=None):
         "Найди мне про росомаху" → росомаха
         "Какую загадку я загадал?" → загадка
         "Что мы говорили про угольный разрез?" → угольный разрез
+        "Напомни про фильмы Люди Икс" → Люди Икс
         
         Вопрос: "{text}"
         
@@ -196,6 +198,7 @@ def understand_query(text, previous_topic=None):
     # ===== ЗАПАСНОЙ ВАРИАНТ =====
     words = re.findall(r'[а-яА-ЯёЁa-zA-Z]{3,}', text)
     
+    # ===== РАСШИРЕННЫЕ СТОП-СЛОВА =====
     stop_words = ["какую", "первую", "тебе", "как", "что", "где", "когда", "почему", 
                   "зачем", "кто", "какой", "такой", "так", "вот", "да", "нет", "уже",
                   "ещё", "тоже", "только", "очень", "было", "была", "мою", "твою",
@@ -203,13 +206,14 @@ def understand_query(text, previous_topic=None):
                   "говорил", "сказал", "писал", "рассказывал", "спросил", "ответил",
                   "загадал", "спросил", "напомни", "вспомни", "вчера", "сегодня", "завтра",
                   "говорили", "правильно", "вспомнил", "вспомнила", "помнишь", "помню",
-                  "делал", "сделал", "ходил", "ездил", "смотрел", "читал", "видел"]
+                  "делал", "сделал", "ходил", "ездил", "смотрел", "читал", "видел",
+                  "упоминал", "обсуждали", "вспомни", "напомни", "расскажи", "скажи"]
     
-    # 1. Ищем фразы (несколько слов) - для "угольный разрез", "столица триатлона"
+    # 1. Ищем фразы (угольный разрез, Люди Икс, столица триатлона)
     phrases = re.findall(r'[А-Яа-яёЁ]+\s+[А-Яа-яёЁ]+', text)
     for phrase in phrases:
         phrase_lower = phrase.lower()
-        if any(word in phrase_lower for word in ["угольный", "разрез", "столица", "триатлон"]):
+        if any(word in phrase_lower for word in ["угольный", "разрез", "столица", "триатлон", "люди", "икс"]):
             print(f"🧠 Запасной (фраза): '{phrase}'")
             return phrase
     
@@ -219,7 +223,7 @@ def understand_query(text, previous_topic=None):
             print(f"🧠 Запасной (имя): '{word}'")
             return word
     
-    # 3. Ищем существительные по окончаниям
+    # 3. Ищем существительные (исключая стоп-слова)
     for word in words:
         word_lower = word.lower()
         if word_lower not in stop_words and len(word) > 3 and word[-1] in 'аяоеиыьйнрл':
@@ -242,7 +246,7 @@ def should_search_history(text):
                 "выжимку", "первое", "всего общения"]
     return any(trigger in text_lower for trigger in triggers)
 
-# ===== ФОРМАТИРОВАНИЕ В ЧЕЛОВЕЧЕСКИЙ ОТВЕТ (С КОНТРОЛЕМ ДЛИНЫ) =====
+# ===== ФОРМАТИРОВАНИЕ В ЧЕЛОВЕЧЕСКИЙ ОТВЕТ =====
 
 def format_results_to_human(results, original_query, search_word, user_name=None):
     if not results:
@@ -269,7 +273,7 @@ def format_results_to_human(results, original_query, search_word, user_name=None
     
     {name_context}
     
-    Задача: ответь пользователю КОРОТКО (максимум 500 символов, примерно 3-4 предложения).
+    Задача: ответь пользователю КОРОТКО (максимум 700 символов, примерно 4-5 предложений).
     
     Правила:
     - Извлеки СУТЬ из истории
@@ -278,7 +282,7 @@ def format_results_to_human(results, original_query, search_word, user_name=None
     - Говори как в обычном разговоре с другом
     - Если есть имя пользователя - обратись по имени
     - Используй эмодзи 😊🔥
-    - Уложись в 500 символов — ответ должен быть законченным, без обрывов
+    - Уложись в 700 символов — ответ должен быть законченным, без обрывов
     
     Ответ:
     """
@@ -288,7 +292,7 @@ def format_results_to_human(results, original_query, search_word, user_name=None
             model="deepseek-v4-flash",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
-            max_tokens=200  # 200 токенов ≈ 500 символов
+            max_tokens=280  # 280 токенов ≈ 700 символов
         )
         result = response.choices[0].message.content.strip()
         if result:
@@ -349,6 +353,58 @@ def hybrid_search(user_id, query, exclude_id=None, user_name=None):
         print(f"❌ Ошибка DeepSeek: {e}")
     
     return None
+
+# ===== ФУНКЦИЯ ДЛЯ ВЫЖИМКИ =====
+
+def get_summary(user_id, user_name=None):
+    """Собирает все темы из истории и делает выжимку"""
+    
+    all_history = get_all_history(user_id, limit=1000)
+    
+    if not all_history:
+        return "История пуста. Давай что-то обсудим! 😊"
+    
+    user_messages = [h['content'] for h in all_history if h['role'] == 'user']
+    
+    if not user_messages:
+        return "Ты ещё ничего не писал. Задавай вопросы! 😊"
+    
+    history_text = "\n".join(user_messages[-50:])
+    name_context = f"Ты общаешься с {user_name}." if user_name else ""
+    
+    prompt = f"""
+    Пользователь просит выжимку всех тем, которые мы обсуждали.
+    
+    История диалога:
+    {history_text}
+    
+    {name_context}
+    
+    Задача: сделай КОРОТКУЮ ВЫЖИМКУ (3-4 предложения) всех тем, которые мы обсуждали.
+    
+    Правила:
+    - Перечисли основные темы
+    - Не перечисляй все сообщения
+    - Говори как в обычном разговоре
+    - Используй эмодзи 😊🔥
+    
+    Ответ:
+    """
+    
+    try:
+        response = deepseek.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=200
+        )
+        result = response.choices[0].message.content.strip()
+        if result:
+            return result
+    except Exception as e:
+        print(f"❌ Ошибка выжимки: {e}")
+    
+    return "Мы обсуждали разные темы. А что именно тебя интересует? 😊"
 
 # ===== РАСПОЗНАВАНИЕ ГОЛОСА =====
 
@@ -434,12 +490,19 @@ async def webhook(request: Request):
             await send_message(user_id, reply)
             return JSONResponse({"ok": True})
 
+        # ===== ВЫЖИМКА =====
+        if "выжимку" in lower or "всего общения" in lower or "первое" in lower and "помнишь" in lower:
+            reply = get_summary(user_id, user_name)
+            save_message(user_id, "assistant", reply)
+            await send_message(user_id, reply)
+            return JSONResponse({"ok": True})
+
         # ===== ПОИСК С ЧЕЛОВЕЧЕСКИМ ОТВЕТОМ =====
         if should_search_history(text):
             search_topic = understand_query(text, last_search_topic)
             
             # Не сохраняем мусорные темы
-            if search_topic and search_topic.lower() not in ["говорили", "сказал", "писал", "правильно", "вспомнил"]:
+            if search_topic and search_topic.lower() not in ["говорили", "сказал", "писал", "правильно", "вспомнил", "говорил", "напомни", "вспомни", "помню", "помнишь"]:
                 last_search_topic = search_topic
             
             if search_topic and len(search_topic) > 1:
@@ -456,7 +519,7 @@ async def webhook(request: Request):
                     return JSONResponse({"ok": True})
 
         # ===== ОСНОВНОЙ ДИАЛОГ =====
-        history = get_recent_history(user_id, limit=15)
+        history = get_recent_history(user_id, limit=20)
         
         user_context = []
         if user_name:
@@ -476,7 +539,7 @@ async def webhook(request: Request):
 • Сохраняй лёгкость и непринуждённость в общении
 
 🧠 О ПАМЯТИ:
-• Используй последние 15 сообщений для контекста
+• Используй последние 20 сообщений для контекста
 • Всю историю помнишь, если тебя спросят
 
 Ты общаешься с человеком, который хочет чувствовать себя комфортно, как с другом. Будь таким. 😉"""
