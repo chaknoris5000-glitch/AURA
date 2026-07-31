@@ -19,10 +19,9 @@ DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 # ===== ПОДКЛЮЧЕНИЯ =====
-print("🚀 БОТ ЗАПУЩЕН. ФИНАЛЬНАЯ ВЕРСИЯ С ПРОВЕРКОЙ ГОРОДОВ")
+print("🚀 БОТ ЗАПУЩЕН. ФИНАЛЬНАЯ ВЕРСИЯ (ИСПРАВЛЕНО ИСПОЛЬЗОВАНИЕ ИМЕНИ)")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -145,7 +144,6 @@ def extract_name(text):
     return None
 
 def extract_city(text):
-    """Извлекает город только если есть явные маркеры"""
     text_lower = text.lower()
     
     city_markers = ["живу в", "я из", "из города", "в городе", "посёлок", "город", "живу в посёлке"]
@@ -165,15 +163,12 @@ def extract_city(text):
         return city
     return None
 
-# ===== ПРОВЕРКА ГОРОДА ЧЕРЕЗ DEEPSEEK =====
+# ===== ПРОВЕРКА ГОРОДА =====
 
 def verify_and_save_city(user_id, city_name, user_name=None):
-    """Проверяет город через DeepSeek и сохраняет, если всё правильно"""
-    
     if not city_name or len(city_name) < 3:
         return None, "Город не указан или слишком короткое название. Напиши, где ты живёшь, я запомню! 😊"
     
-    # Проверяем город через DeepSeek
     prompt = f"""
     Проверь, существует ли город или посёлок "{city_name}" в России или странах СНГ.
     
@@ -202,9 +197,9 @@ def verify_and_save_city(user_id, city_name, user_name=None):
             
             facts = result.replace("существует", "").strip()
             if facts:
-                return city_name, f"Круто, {user_name or 'друг'}! {city_name} — это {facts} 🔥 Запомнил!"
+                return city_name, f"Круто! {city_name} — это {facts} 🔥 Запомнил!"
             else:
-                return city_name, f"Запомнил, {user_name or 'друг'}! Ты из {city_name}. А что там интересного? 😊"
+                return city_name, f"Запомнил! Ты из {city_name}. А что там интересного? 😊"
         
         else:
             return None, f"Хм, я не нашёл город {city_name} на карте. Ты уверен, что правильно назвал? Может, это посёлок или район? Напиши ещё раз 😊"
@@ -212,7 +207,7 @@ def verify_and_save_city(user_id, city_name, user_name=None):
     except Exception as e:
         print(f"❌ Ошибка проверки города: {e}")
         save_fact(user_id, "city", city_name)
-        return city_name, f"Запомнил, {user_name or 'друг'}! Ты из {city_name}. Расскажи потом о нём подробнее 😊"
+        return city_name, f"Запомнил! Ты из {city_name}. Расскажи потом о нём подробнее 😊"
 
 # ===== ПОНИМАНИЕ ЗАПРОСА =====
 
@@ -317,7 +312,7 @@ def should_search_history(text):
 
 def format_results_to_human(results, original_query, search_word, user_name=None):
     if not results:
-        return f"Что-то я подзабыл, {user_name or 'друг'}. Может, напомнишь, о чём именно шла речь? 😊"
+        return f"Что-то я подзабыл. Может, напомнишь, о чём именно шла речь? 😊"
     
     messages = []
     for r in results[:5]:
@@ -347,11 +342,11 @@ def format_results_to_human(results, original_query, search_word, user_name=None
     - Не перечисляй все сообщения
     - Не пиши "в истории нашлось"
     - Говори как в обычном разговоре с другом
-    - Если есть имя пользователя - обратись по имени
     - Используй эмодзи 😊🔥
     - Если ты НЕ УВЕРЕН, что это точно то, о чём спрашивают — скажи "Что-то я подзабыл, напомни, пожалуйста"
     - НЕ придумывай то, чего нет в истории
     - Если в истории нет точного ответа — честно скажи об этом
+    - Имя пользователя используй ТОЛЬКО в начале разговора или для привлечения внимания, НЕ в каждом предложении
     
     Ответ:
     """
@@ -369,7 +364,7 @@ def format_results_to_human(results, original_query, search_word, user_name=None
     except Exception as e:
         print(f"❌ Ошибка форматирования: {e}")
     
-    return f"Что-то я подзабыл, {user_name or 'друг'}. Напомни, о чём мы говорили? 😊"
+    return f"Что-то я подзабыл. Напомни, о чём мы говорили? 😊"
 
 # ===== ГИБРИДНЫЙ ПОИСК =====
 
@@ -486,9 +481,9 @@ async def webhook(request: Request):
         if name:
             save_fact(user_id, "name", name)
         
-        # ===== ПРОВЕРКА ГОРОДА =====
         city = extract_city(text)
         if city:
+            user_name = get_fact(user_id, "name")
             verified_city, response_text = verify_and_save_city(user_id, city, user_name)
             if verified_city:
                 save_fact(user_id, "city", verified_city)
@@ -536,7 +531,7 @@ async def webhook(request: Request):
                     await send_message(user_id, reply)
                     return JSONResponse({"ok": True})
                 else:
-                    reply = f"Что-то я подзабыл, {user_name or 'друг'}. Может, напомнишь, о чём именно шла речь? 😊"
+                    reply = "Что-то я подзабыл. Может, напомнишь, о чём именно шла речь? 😊"
                     save_message(user_id, "assistant", reply)
                     await send_message(user_id, reply)
                     return JSONResponse({"ok": True})
@@ -563,13 +558,18 @@ async def webhook(request: Request):
 • Говори как живой человек в мессенджере
 • Используй разговорные фразы: "ага", "окей", "класс", "бро"
 • Не будь сухим или роботизированным - ты друг
-• Если уместно - шути и подкалывай
 
-🧠 ПРАВИЛА ЗНАКОМСТВА:
+📌 ПРАВИЛА ИСПОЛЬЗОВАНИЯ ИМЕНИ:
+• Используй имя ТОЛЬКО в начале диалога или при обращении
+• НЕ начинай КАЖДЫЙ ответ с имени
+• Имя уместно: при приветствии, при прощании, для привлечения внимания
+• Имя НЕ уместно: в середине каждого сообщения, в каждом ответе подряд
+• Пример хорошего использования: "Привет! Как дела?" → "Норм, у тебя?" → "Класс! А что нового?"
+• Пример плохого использования: "Вадим, привет! Вадим, как дела? Вадим, а что нового?"
+
+📌 ПРАВИЛА ЗНАКОМСТВА:
 • Если пользователь ещё не представился — мягко спроси имя
-• При знакомстве: "Приятно познакомиться, [имя]! А ты из какого города?" 😊
-• Если пользователь назвал имя — запомни его и используй в общении
-• Если пользователь назвал город — проверь его существование и дай факты
+• При знакомстве: "Приятно познакомиться! А ты из какого города?" 😊
 
 🧠 О ПАМЯТИ:
 • Используй последние 20 сообщений для контекста
@@ -596,8 +596,7 @@ async def webhook(request: Request):
             )
             reply = response.choices[0].message.content
 
-            if user_name and not reply.startswith(user_name):
-                reply = f"{user_name}, {reply[0].lower() + reply[1:] if reply else ''}"
+            # Больше НЕ добавляем имя принудительно — DeepSeek сам решит, когда его использовать
 
             save_message(user_id, "assistant", reply)
             await send_message(user_id, reply)
