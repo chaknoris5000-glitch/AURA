@@ -39,19 +39,25 @@ app = FastAPI()
 # ===== РАБОТА С БАЗОЙ =====
 
 def save_message(user_id, role, content):
-    """Сохраняет сообщение в историю (вечно)"""
+    """Сохраняет сообщение в историю и возвращает его ID"""
     if not supabase:
-        return
+        return None
     try:
-        supabase.table("history").insert({
+        result = supabase.table("history").insert({
             "user_id": user_id,
             "role": role,
             "content": content,
             "created_at": datetime.now().isoformat()
         }).execute()
         print(f"💾 Сохранено в history: {role} -> {content[:30]}...")
+        
+        # Возвращаем ID сохранённого сообщения
+        if result.data and len(result.data) > 0:
+            return result.data[0].get('id')
+        return None
     except Exception as e:
         print(f"❌ Ошибка сохранения: {e}")
+        return None
 
 def get_recent_history(user_id, limit=15):
     """Загружает последние N сообщений (для текущего диалога)"""
@@ -69,19 +75,26 @@ def get_recent_history(user_id, limit=15):
         print(f"❌ Ошибка загрузки: {e}")
         return []
 
-def search_history(user_id, query):
-    """Ищет во ВСЕЙ истории по ключевому слову"""
+def search_history(user_id, query, exclude_id=None):
+    """Ищет во ВСЕЙ истории, исключая конкретное сообщение по ID"""
     if not supabase:
         return []
     try:
         res = supabase.table("history")\
-            .select("role, content, created_at")\
+            .select("role, content, created_at, id")\
             .eq("user_id", user_id)\
             .ilike("content", f"%{query}%")\
             .order("created_at", desc=True)\
-            .limit(10)\
+            .limit(20)\
             .execute()
-        return res.data if res.data else []
+        
+        results = res.data if res.data else []
+        
+        # Исключаем ТОЛЬКО текущее сообщение (по ID)
+        if exclude_id:
+            results = [r for r in results if r.get('id') != exclude_id]
+        
+        return results[:10]  # Показываем до 10 результатов
     except Exception as e:
         print(f"❌ Ошибка поиска: {e}")
         return []
@@ -150,14 +163,10 @@ def extract_city(text):
 
 def extract_keywords(text):
     """Извлекает ключевые слова из текста для поиска в истории"""
-    # Список стоп-слов, которые не нужно искать
     stop_words = ["это", "тот", "этот", "все", "сам", "быть", "что", "как", "где", "когда", 
                   "почему", "зачем", "кто", "какой", "такой", "так", "вот", "да", "нет"]
     
-    # Разбиваем текст на слова и чистим
     words = re.findall(r'[а-яА-ЯёЁa-zA-Z]+', text.lower())
-    
-    # Оставляем только значимые слова (длиннее 3 букв и не в стоп-листе)
     keywords = [w for w in words if len(w) > 3 and w not in stop_words]
     
     return keywords
@@ -173,11 +182,11 @@ def should_search_history(text):
     
     # 2. Вопросы о прошлом
     past_triggers = ["загадк", "вопрос", "раньше", "прошлый", "прошлое", "помнишь", "говорил", "писал", 
-                     "рассказывал", "упоминал", "обсуждали", "было", "была"]
+                     "рассказывал", "упоминал", "обсуждали", "было", "была", "ранее"]
     if any(trigger in text_lower for trigger in past_triggers):
         return True
     
-    # 3. Вопросы в прошедшем времени (можно расширить)
+    # 3. Вопросы в прошедшем времени
     past_verbs = ["делал", "сказал", "спросил", "ответил", "написал", "рассказал", "упомянул"]
     if any(verb in text_lower for verb in past_verbs):
         return True
@@ -199,7 +208,6 @@ def get_intelligent_search_query(text):
     if len(query) < 3:
         keywords = extract_keywords(text)
         if keywords:
-            # Берём первое ключевое слово или комбинацию
             return keywords[0]
     
     return query
@@ -241,6 +249,7 @@ async def webhook(request: Request):
         msg = body["message"]
         user_id = str(msg["from"]["id"])
         text = None
+        current_message_id = None
 
         if "voice" in msg:
             file_id = msg["voice"]["file_id"]
@@ -260,7 +269,7 @@ async def webhook(request: Request):
             return JSONResponse({"ok": True})
 
         # ===== СОХРАНЯЕМ СООБЩЕНИЕ В ИСТОРИЮ (ВЕЧНО) =====
-        save_message(user_id, "user", text)
+        current_message_id = save_message(user_id, "user", text)
 
         # ===== ИЗВЛЕКАЕМ ФАКТЫ =====
         name = extract_name(text)
@@ -295,7 +304,7 @@ async def webhook(request: Request):
             # Если есть запрос - ищем
             if query and len(query) > 2:
                 print(f"🔍 Ищу в истории: '{query}'")
-                results = search_history(user_id, query)
+                results = search_history(user_id, query, exclude_id=current_message_id)
                 
                 if results:
                     # Форматируем результаты
@@ -308,8 +317,8 @@ async def webhook(request: Request):
                 else:
                     # Если ничего не нашли, пробуем поискать по отдельным ключевым словам
                     keywords = extract_keywords(query)
-                    for keyword in keywords[:3]:  # пробуем первые 3 ключевых слова
-                        results = search_history(user_id, keyword)
+                    for keyword in keywords[:3]:
+                        results = search_history(user_id, keyword, exclude_id=current_message_id)
                         if results:
                             found_text = "\n\n".join([f"{r['role']}: {r['content']}" for r in results[:3]])
                             reply = f"📚 **Нашлось в истории по слову '{keyword}':**\n\n{found_text[:800]}\n\n"
@@ -363,6 +372,7 @@ async def webhook(request: Request):
         messages.append({"role": "user", "content": text})
 
         try:
+            print(f"🤖 DeepSeek: использую модель deepseek-v4-flash")
             response = deepseek.chat.completions.create(
                 model="deepseek-v4-flash",
                 messages=messages,
