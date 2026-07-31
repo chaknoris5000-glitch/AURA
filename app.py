@@ -21,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # ===== ПОДКЛЮЧЕНИЯ =====
-print("🚀 БОТ ЗАПУЩЕН. ВЕРСИЯ С ПРИОРИТЕТОМ DEEPSEEK ПОИСКА")
+print("🚀 БОТ ЗАПУЩЕН. ГИБРИДНЫЙ ПОДХОД: DeepSeek говорит что искать, бот ищет в Supabase")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -75,22 +75,6 @@ def get_recent_history(user_id, limit=15):
         return list(reversed(res.data)) if res.data else []
     except Exception as e:
         print(f"❌ Ошибка загрузки: {e}")
-        return []
-
-def get_all_history(user_id, limit=1000):
-    """Загружает ВСЮ историю (для поиска DeepSeek)"""
-    if not supabase:
-        return []
-    try:
-        res = supabase.table("history")\
-            .select("role, content, created_at, id")\
-            .eq("user_id", user_id)\
-            .order("created_at", desc=False)\
-            .limit(limit)\
-            .execute()
-        return res.data if res.data else []
-    except Exception as e:
-        print(f"❌ Ошибка загрузки всей истории: {e}")
         return []
 
 def search_history(user_id, query, exclude_id=None):
@@ -162,10 +146,10 @@ def extract_city(text):
         return city
     return None
 
-# ===== ИНТЕЛЛЕКТУАЛЬНОЕ ПОНИМАНИЕ ЗАПРОСА =====
+# ===== ГИБРИДНЫЙ ПОДХОД: DEEPSEEK ГОВОРИТ ЧТО ИСКАТЬ =====
 
 def understand_query(text, previous_topic=None):
-    """Трёхуровневый поиск: DeepSeek → существительное → последнее слово"""
+    """DeepSeek понимает запрос и говорит, что искать в истории"""
     
     print(f"🧠 Понимаю запрос: '{text}'")
     
@@ -174,35 +158,45 @@ def understand_query(text, previous_topic=None):
         print(f"🧠 Заметил местоимение, подставляю тему: '{previous_topic}'")
         return previous_topic
     
-    # ===== УРОВЕНЬ 1: DeepSeek =====
+    # ===== ОСНОВНОЙ СПОСОБ: DeepSeek говорит что искать =====
     try:
         prompt = f"""
-        Извлеки главное слово (существительное) из вопроса для поиска в истории.
+        Из вопроса пользователя извлеки ОДНО ключевое слово для поиска в истории.
+        Ответь только этим словом в именительном падеже.
+        
+        Примеры:
+        "Что мы говорили про Магнето?" → Магнето
+        "Найди мне про росомаху" → росомаха
+        "Какую загадку я загадал?" → загадка
+        "Что мы обсуждали про фильмы?" → фильмы
+        "Где я живу?" → город
+        "Как меня зовут?" → имя
         
         Вопрос: "{text}"
         
-        Главное слово (одно слово в именительном падеже):
+        Ключевое слово:
         """
         
         response = deepseek.chat.completions.create(
             model="deepseek-v4-flash",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.5,
+            temperature=0.3,
             max_tokens=20
         )
         
         result = response.choices[0].message.content.strip()
         
         if result:
-            print(f"🧠 Уровень 1 (DeepSeek): '{result}'")
+            print(f"🧠 DeepSeek сказал искать: '{result}'")
             return result
             
     except Exception as e:
-        print(f"❌ DeepSeek не ответил: {e}")
+        print(f"❌ Ошибка DeepSeek: {e}")
     
-    # ===== УРОВЕНЬ 2: Поиск существительного =====
+    # ===== ЗАПАСНОЙ ВАРИАНТ: ручной разбор =====
     words = re.findall(r'[а-яА-ЯёЁa-zA-Z]{3,}', text)
     
+    # Слова, которые не нужно искать
     stop_words = ["какую", "первую", "тебе", "как", "что", "где", "когда", "почему", 
                   "зачем", "кто", "какой", "такой", "так", "вот", "да", "нет", "уже",
                   "ещё", "тоже", "только", "очень", "было", "была", "мою", "твою",
@@ -211,25 +205,25 @@ def understand_query(text, previous_topic=None):
                   "загадал", "спросил", "напомни", "вспомни",
                   "вчера", "сегодня", "завтра", "утром", "вечером", "днём", "ночью"]
     
-    # 2a: Ищем слова с большой буквы (имена собственные)
+    # Ищем слова с большой буквы (имена собственные)
     for word in words:
         if word[0].isupper() and word.lower() not in stop_words:
-            print(f"🧠 Уровень 2 (имя собственное): '{word}'")
+            print(f"🧠 Запасной вариант (имя): '{word}'")
             return word
     
-    # 2b: Ищем существительные по окончаниям
+    # Ищем существительные по окончаниям
     noun_endings = ['а', 'я', 'о', 'е', 'и', 'ы', 'ь', 'й', 'н', 'р', 'л']
     
     for word in words:
         word_lower = word.lower()
         if word_lower not in stop_words and len(word) > 3:
             if word[-1] in noun_endings:
-                print(f"🧠 Уровень 2 (существительное): '{word}'")
+                print(f"🧠 Запасной вариант (существительное): '{word}'")
                 return word
     
-    # ===== УРОВЕНЬ 3: Последнее слово =====
+    # Последнее слово
     if words:
-        print(f"🧠 Уровень 3 (последнее слово): '{words[-1]}'")
+        print(f"🧠 Запасной вариант (последнее): '{words[-1]}'")
         return words[-1]
     
     return text
@@ -253,28 +247,33 @@ def should_search_history(text):
     
     return False
 
-# ===== ПОИСК С ПРИОРИТЕТОМ DEEPSEEK =====
+# ===== ГИБРИДНЫЙ ПОИСК =====
 
-def search_with_priority(user_id, query, exclude_id=None):
-    """Сначала DeepSeek (умный поиск), если не нашёл - Supabase (буквальный)"""
+def hybrid_search(user_id, query, exclude_id=None):
+    """DeepSeek говорит что искать → бот ищет в Supabase"""
     
-    # ===== ЭТАП 1: DEEPSEEK ИЩЕТ ПО СМЫСЛУ =====
-    print(f"🔍 Этап 1: DeepSeek ищет в истории по смыслу: '{query}'")
+    # ===== ЭТАП 1: Бот ищет в Supabase по слову от DeepSeek =====
+    print(f"🔍 Бот ищет в Supabase: '{query}'")
+    results = search_history(user_id, query, exclude_id)
+    
+    if results:
+        print(f"✅ Бот нашёл в Supabase: {len(results)} результатов")
+        return results
+    
+    # ===== ЭТАП 2: Если не нашёл - пробуем умный поиск через DeepSeek =====
+    print(f"🔍 Бот не нашёл, пробую DeepSeek умный поиск...")
     
     try:
-        # Загружаем историю для DeepSeek
         all_history = get_all_history(user_id, limit=1000)
         
         if not all_history:
             return []
         
-        # Берём только сообщения пользователя
         user_messages = [h for h in all_history if h['role'] == 'user']
         
         if not user_messages:
             return []
         
-        # Формируем текст истории (последние 50 для экономии)
         history_text = "\n".join([f"- {h['content']}" for h in user_messages[-50:]])
         
         prompt = f"""
@@ -297,28 +296,19 @@ def search_with_priority(user_id, query, exclude_id=None):
         result = response.choices[0].message.content
         
         if "ничего не найдено" in result.lower():
-            print(f"❌ DeepSeek не нашёл")
-        else:
-            print(f"✅ DeepSeek нашёл в истории!")
-            return [{
-                "role": "assistant",
-                "content": result,
-                "created_at": datetime.now().isoformat()
-            }]
+            print(f"❌ DeepSeek тоже не нашёл")
+            return []
+        
+        print(f"✅ DeepSeek помог найти!")
+        return [{
+            "role": "assistant",
+            "content": result,
+            "created_at": datetime.now().isoformat()
+        }]
         
     except Exception as e:
         print(f"❌ Ошибка DeepSeek: {e}")
-    
-    # ===== ЭТАП 2: БОТ ИЩЕТ В SUPABASE (ЕСЛИ DEEPSEEK НЕ НАШЁЛ) =====
-    print(f"🔍 Этап 2: Бот ищет в Supabase (по всей истории): '{query}'")
-    results = search_history(user_id, query, exclude_id)
-    
-    if results:
-        print(f"✅ Бот нашёл в Supabase: {len(results)} результатов")
-        return results
-    
-    print(f"❌ Никто ничего не нашёл")
-    return []
+        return []
 
 # ===== РАСПОЗНАВАНИЕ ГОЛОСА =====
 
@@ -407,20 +397,19 @@ async def webhook(request: Request):
             await send_message(user_id, reply)
             return JSONResponse({"ok": True})
 
-        # ===== ИНТЕЛЛЕКТУАЛЬНЫЙ ПОИСК В ИСТОРИИ (ПРИОРИТЕТ DEEPSEEK) =====
+        # ===== ГИБРИДНЫЙ ПОИСК В ИСТОРИИ =====
         if should_search_history(text):
-            # 1. Понимаем, что искать (с учётом предыдущей темы)
+            # 1. DeepSeek говорит, что искать
             search_topic = understand_query(text, last_search_topic)
             last_search_topic = search_topic
             
             if search_topic and len(search_topic) > 1:
-                print(f"🔍 Ищу в истории по теме: '{search_topic}'")
+                print(f"🔍 Бот ищет в истории по слову: '{search_topic}'")
                 
-                # 2. Ищем с приоритетом DeepSeek
-                results = search_with_priority(user_id, search_topic, exclude_id=current_message_id)
+                # 2. Бот ищет в Supabase (гибридный поиск)
+                results = hybrid_search(user_id, search_topic, exclude_id=current_message_id)
                 
                 if results:
-                    # Формируем ответ из найденного
                     found_text = "\n\n".join([f"{r['role']}: {r['content']}" for r in results[:5]])
                     reply = f"📚 **Нашлось в истории про {search_topic}:**\n\n{found_text[:1000]}"
                     
