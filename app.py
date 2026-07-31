@@ -21,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # ===== ПОДКЛЮЧЕНИЯ =====
-print("🚀 БОТ ЗАПУЩЕН. ВЕРСИЯ С ИНТЕЛЛЕКТУАЛЬНЫМ ПОИСКОМ (ТЕСТОВАЯ)")
+print("🚀 БОТ ЗАПУЩЕН. ВЕРСИЯ С ЖИВЫМ ФОРМАТИРОВАНИЕМ ОТВЕТОВ")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -35,6 +35,9 @@ deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 groq = Groq(api_key=GROQ_API_KEY)
 
 app = FastAPI()
+
+# ===== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ =====
+last_search_topic = None
 
 # ===== РАБОТА С БАЗОЙ =====
 
@@ -161,10 +164,15 @@ def extract_city(text):
 
 # ===== ИНТЕЛЛЕКТУАЛЬНОЕ ПОНИМАНИЕ ЗАПРОСА =====
 
-def understand_query(text):
+def understand_query(text, previous_topic=None):
     """Трёхуровневый поиск: DeepSeek → существительное → последнее слово"""
     
     print(f"🧠 Понимаю запрос: '{text}'")
+    
+    # Если есть местоимение и предыдущая тема
+    if previous_topic and any(word in text.lower() for word in ["него", "это", "них", "ней", "его"]):
+        print(f"🧠 Заметил местоимение, подставляю тему: '{previous_topic}'")
+        return previous_topic
     
     # ===== УРОВЕНЬ 1: DeepSeek =====
     try:
@@ -311,6 +319,62 @@ def search_with_fallback(user_id, query, exclude_id=None):
         print(f"❌ Ошибка DeepSeek: {e}")
         return []
 
+# ===== ФОРМАТИРОВАНИЕ РЕЗУЛЬТАТОВ В ЖИВОЙ ОТВЕТ =====
+
+def format_search_results(user_id, query, results, user_name=None):
+    """DeepSeek форматирует результаты поиска в короткий живой ответ"""
+    
+    if not results:
+        return f"Не припоминаю, чтобы мы говорили про {query}. Может, напомнишь? 😊"
+    
+    # Формируем текст найденных сообщений (до 5 для краткости)
+    found_text = "\n".join([f"- {r['content'][:200]}" for r in results[:5]])
+    
+    # Учитываем имя пользователя
+    name_context = f"Ты общаешься с {user_name}." if user_name else ""
+    
+    prompt = f"""
+    Пользователь спросил про тему: "{query}"
+    
+    Вот что нашлось в истории (сообщения пользователя и бота):
+    {found_text}
+    
+    Задача: ответь КОРОТКО (2-3 предложения) как живой человек.
+    
+    Правила:
+    - Подтверди, что помнишь эту тему
+    - Кратко скажи, о чём говорили (1-2 факта из истории)
+    - Спроси, что именно хочет узнать пользователь
+    - Используй эмодзи для эмоций 😊🔥😄
+    - Будь дружелюбным и естественным
+    - НЕ выводи список сообщений
+    - НЕ пиши "в истории нашлось"
+    
+    {name_context}
+    
+    Ответ:
+    """
+    
+    try:
+        response = deepseek.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=150
+        )
+        
+        reply = response.choices[0].message.content.strip()
+        
+        # Если ответ пустой или слишком короткий - запасной вариант
+        if not reply or len(reply) < 10:
+            return f"Помню, мы говорили про {query}! А что именно тебя интересует? 😊"
+        
+        return reply
+        
+    except Exception as e:
+        print(f"❌ Ошибка форматирования: {e}")
+        return f"Помню, мы говорили про {query}! Что именно хочешь вспомнить? 😊"
+
 # ===== РАСПОЗНАВАНИЕ ГОЛОСА =====
 
 def transcribe_audio(audio_url):
@@ -340,6 +404,8 @@ async def send_message(chat_id, text):
 
 @app.post("/webhook")
 async def webhook(request: Request):
+    global last_search_topic
+    
     try:
         body = await request.json()
         if "message" not in body:
@@ -398,8 +464,9 @@ async def webhook(request: Request):
 
         # ===== ИНТЕЛЛЕКТУАЛЬНЫЙ ПОИСК В ИСТОРИИ =====
         if should_search_history(text):
-            # 1. Понимаем, что искать
-            search_topic = understand_query(text)
+            # 1. Понимаем, что искать (с учётом предыдущей темы)
+            search_topic = understand_query(text, last_search_topic)
+            last_search_topic = search_topic
             
             if search_topic and len(search_topic) > 1:
                 print(f"🔍 Ищу в истории по теме: '{search_topic}'")
@@ -407,18 +474,12 @@ async def webhook(request: Request):
                 # 2. Ищем с запасным вариантом (бот → DeepSeek)
                 results = search_with_fallback(user_id, search_topic, exclude_id=current_message_id)
                 
-                if results:
-                    found_text = "\n\n".join([f"{r['role']}: {r['content']}" for r in results[:5]])
-                    reply = f"📚 **Нашлось в истории про {search_topic}:**\n\n{found_text[:1000]}\n\n"
-                    reply += "Это то, что ты искал? Могу найти подробнее."
-                    save_message(user_id, "assistant", reply)
-                    await send_message(user_id, reply)
-                    return JSONResponse({"ok": True})
-                else:
-                    reply = f"📭 Ничего не нашёл в истории про '{search_topic}'. Попробуй спросить по-другому."
-                    save_message(user_id, "assistant", reply)
-                    await send_message(user_id, reply)
-                    return JSONResponse({"ok": True})
+                # 3. Форматируем ответ
+                reply = format_search_results(user_id, search_topic, results, user_name)
+                
+                save_message(user_id, "assistant", reply)
+                await send_message(user_id, reply)
+                return JSONResponse({"ok": True})
 
         # ===== ОСНОВНОЙ ДИАЛОГ =====
         history = get_recent_history(user_id, limit=15)
