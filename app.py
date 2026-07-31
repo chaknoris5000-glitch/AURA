@@ -21,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # ===== ПОДКЛЮЧЕНИЯ =====
-print("🚀 БОТ ЗАПУЩЕН. ВЕРСИЯ С ЖИВЫМ ФОРМАТИРОВАНИЕМ ОТВЕТОВ")
+print("🚀 БОТ ЗАПУЩЕН. ВЕРСИЯ С ПРИОРИТЕТОМ DEEPSEEK ПОИСКА")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -208,7 +208,8 @@ def understand_query(text, previous_topic=None):
                   "ещё", "тоже", "только", "очень", "было", "была", "мою", "твою",
                   "свою", "нашу", "вашу", "эту", "ту", "этот", "тот", "все", "сам",
                   "говорил", "сказал", "писал", "рассказывал", "спросил", "ответил",
-                  "загадал", "спросил", "напомни", "вспомни"]
+                  "загадал", "спросил", "напомни", "вспомни",
+                  "вчера", "сегодня", "завтра", "утром", "вечером", "днём", "ночью"]
     
     # 2a: Ищем слова с большой буквы (имена собственные)
     for word in words:
@@ -252,42 +253,34 @@ def should_search_history(text):
     
     return False
 
-# ===== ПОИСК С ЗАПАСНЫМ ВАРИАНТОМ (БОТ → DEEPSEEK) =====
+# ===== ПОИСК С ПРИОРИТЕТОМ DEEPSEEK =====
 
-def search_with_fallback(user_id, query, exclude_id=None):
-    """Сначала бот ищет в Supabase (по всей истории), если не нашёл - подключает DeepSeek (по всей истории)"""
+def search_with_priority(user_id, query, exclude_id=None):
+    """Сначала DeepSeek (умный поиск), если не нашёл - Supabase (буквальный)"""
     
-    # ===== ЭТАП 1: БОТ ИЩЕТ В SUPABASE (ПО ВСЕЙ ИСТОРИИ) =====
-    print(f"🔍 Этап 1: Бот ищет в Supabase (по всей истории): '{query}'")
-    results = search_history(user_id, query, exclude_id)
-    
-    if results:
-        print(f"✅ Бот нашёл в Supabase: {len(results)} результатов")
-        return results
-    
-    # ===== ЭТАП 2: БОТ НЕ НАШЁЛ → ПОДКЛЮЧАЕТ DEEPSEEK (ПО ВСЕЙ ИСТОРИИ) =====
-    print(f"🔍 Этап 2: Бот не нашёл, подключаю DeepSeek (по всей истории)...")
+    # ===== ЭТАП 1: DEEPSEEK ИЩЕТ ПО СМЫСЛУ =====
+    print(f"🔍 Этап 1: DeepSeek ищет в истории по смыслу: '{query}'")
     
     try:
-        # Загружаем ВСЮ историю для DeepSeek
+        # Загружаем историю для DeepSeek
         all_history = get_all_history(user_id, limit=1000)
         
         if not all_history:
             return []
         
-        # Берём только сообщения пользователя для поиска
+        # Берём только сообщения пользователя
         user_messages = [h for h in all_history if h['role'] == 'user']
         
         if not user_messages:
             return []
         
-        # Формируем текст ВСЕЙ истории
-        history_text = "\n".join([f"- {h['content']}" for h in user_messages[-50:]])  # Последние 50 для экономии
+        # Формируем текст истории (последние 50 для экономии)
+        history_text = "\n".join([f"- {h['content']}" for h in user_messages[-50:]])
         
         prompt = f"""
         Найди в истории сообщения пользователя, которые относятся к теме "{query}".
         
-        История пользователя (все сообщения):
+        История пользователя:
         {history_text}
         
         Ответь ТОЛЬКО сообщениями, которые относятся к теме "{query}".
@@ -304,76 +297,28 @@ def search_with_fallback(user_id, query, exclude_id=None):
         result = response.choices[0].message.content
         
         if "ничего не найдено" in result.lower():
-            print(f"❌ DeepSeek тоже не нашёл")
-            return []
-        
-        print(f"✅ DeepSeek нашёл в истории!")
-        
-        return [{
-            "role": "assistant",
-            "content": result,
-            "created_at": datetime.now().isoformat()
-        }]
+            print(f"❌ DeepSeek не нашёл")
+        else:
+            print(f"✅ DeepSeek нашёл в истории!")
+            return [{
+                "role": "assistant",
+                "content": result,
+                "created_at": datetime.now().isoformat()
+            }]
         
     except Exception as e:
         print(f"❌ Ошибка DeepSeek: {e}")
-        return []
-
-# ===== ФОРМАТИРОВАНИЕ РЕЗУЛЬТАТОВ В ЖИВОЙ ОТВЕТ =====
-
-def format_search_results(user_id, query, results, user_name=None):
-    """DeepSeek форматирует результаты поиска в короткий живой ответ"""
     
-    if not results:
-        return f"Не припоминаю, чтобы мы говорили про {query}. Может, напомнишь? 😊"
+    # ===== ЭТАП 2: БОТ ИЩЕТ В SUPABASE (ЕСЛИ DEEPSEEK НЕ НАШЁЛ) =====
+    print(f"🔍 Этап 2: Бот ищет в Supabase (по всей истории): '{query}'")
+    results = search_history(user_id, query, exclude_id)
     
-    # Формируем текст найденных сообщений (до 5 для краткости)
-    found_text = "\n".join([f"- {r['content'][:200]}" for r in results[:5]])
+    if results:
+        print(f"✅ Бот нашёл в Supabase: {len(results)} результатов")
+        return results
     
-    # Учитываем имя пользователя
-    name_context = f"Ты общаешься с {user_name}." if user_name else ""
-    
-    prompt = f"""
-    Пользователь спросил про тему: "{query}"
-    
-    Вот что нашлось в истории (сообщения пользователя и бота):
-    {found_text}
-    
-    Задача: ответь КОРОТКО (2-3 предложения) как живой человек.
-    
-    Правила:
-    - Подтверди, что помнишь эту тему
-    - Кратко скажи, о чём говорили (1-2 факта из истории)
-    - Спроси, что именно хочет узнать пользователь
-    - Используй эмодзи для эмоций 😊🔥😄
-    - Будь дружелюбным и естественным
-    - НЕ выводи список сообщений
-    - НЕ пиши "в истории нашлось"
-    
-    {name_context}
-    
-    Ответ:
-    """
-    
-    try:
-        response = deepseek.chat.completions.create(
-            model="deepseek-v4-flash",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=150
-        )
-        
-        reply = response.choices[0].message.content.strip()
-        
-        # Если ответ пустой или слишком короткий - запасной вариант
-        if not reply or len(reply) < 10:
-            return f"Помню, мы говорили про {query}! А что именно тебя интересует? 😊"
-        
-        return reply
-        
-    except Exception as e:
-        print(f"❌ Ошибка форматирования: {e}")
-        return f"Помню, мы говорили про {query}! Что именно хочешь вспомнить? 😊"
+    print(f"❌ Никто ничего не нашёл")
+    return []
 
 # ===== РАСПОЗНАВАНИЕ ГОЛОСА =====
 
@@ -462,7 +407,7 @@ async def webhook(request: Request):
             await send_message(user_id, reply)
             return JSONResponse({"ok": True})
 
-        # ===== ИНТЕЛЛЕКТУАЛЬНЫЙ ПОИСК В ИСТОРИИ =====
+        # ===== ИНТЕЛЛЕКТУАЛЬНЫЙ ПОИСК В ИСТОРИИ (ПРИОРИТЕТ DEEPSEEK) =====
         if should_search_history(text):
             # 1. Понимаем, что искать (с учётом предыдущей темы)
             search_topic = understand_query(text, last_search_topic)
@@ -471,15 +416,22 @@ async def webhook(request: Request):
             if search_topic and len(search_topic) > 1:
                 print(f"🔍 Ищу в истории по теме: '{search_topic}'")
                 
-                # 2. Ищем с запасным вариантом (бот → DeepSeek)
-                results = search_with_fallback(user_id, search_topic, exclude_id=current_message_id)
+                # 2. Ищем с приоритетом DeepSeek
+                results = search_with_priority(user_id, search_topic, exclude_id=current_message_id)
                 
-                # 3. Форматируем ответ
-                reply = format_search_results(user_id, search_topic, results, user_name)
-                
-                save_message(user_id, "assistant", reply)
-                await send_message(user_id, reply)
-                return JSONResponse({"ok": True})
+                if results:
+                    # Формируем ответ из найденного
+                    found_text = "\n\n".join([f"{r['role']}: {r['content']}" for r in results[:5]])
+                    reply = f"📚 **Нашлось в истории про {search_topic}:**\n\n{found_text[:1000]}"
+                    
+                    save_message(user_id, "assistant", reply)
+                    await send_message(user_id, reply)
+                    return JSONResponse({"ok": True})
+                else:
+                    reply = f"📭 Ничего не нашёл в истории про '{search_topic}'. Попробуй спросить по-другому."
+                    save_message(user_id, "assistant", reply)
+                    await send_message(user_id, reply)
+                    return JSONResponse({"ok": True})
 
         # ===== ОСНОВНОЙ ДИАЛОГ =====
         history = get_recent_history(user_id, limit=15)
