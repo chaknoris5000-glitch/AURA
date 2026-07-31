@@ -19,9 +19,10 @@ DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 # ===== ПОДКЛЮЧЕНИЯ =====
-print("🚀 БОТ ЗАПУЩЕН. ФИНАЛЬНАЯ ВЕРСИЯ С ИСПРАВЛЕНИЯМИ")
+print("🚀 БОТ ЗАПУЩЕН. ФИНАЛЬНАЯ ВЕРСИЯ С ПРОВЕРКОЙ ГОРОДОВ")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -132,7 +133,7 @@ def get_fact(user_id, key):
     except:
         return None
 
-# ===== ИЗВЛЕЧЕНИЕ ФАКТОВ (ИСПРАВЛЕНО) =====
+# ===== ИЗВЛЕЧЕНИЕ ФАКТОВ =====
 
 def extract_name(text):
     match = re.search(r"меня зовут\s*([А-Яа-яёЁ\-]+)", text, re.I)
@@ -147,27 +148,71 @@ def extract_city(text):
     """Извлекает город только если есть явные маркеры"""
     text_lower = text.lower()
     
-    # Маркеры, которые точно указывают на город
     city_markers = ["живу в", "я из", "из города", "в городе", "посёлок", "город", "живу в посёлке"]
     
-    # Проверяем наличие маркеров
     if not any(marker in text_lower for marker in city_markers):
         return None
     
-    # Ищем город
     match = re.search(r"(?:из|в|живу в|живу)\s*([А-Яа-яёЁ\-]+)", text, re.I)
     if match:
         city = match.group(1).capitalize()
-        # Исправляем распространённые ошибки
         if city.lower() in ["инской", "инского", "инском"]:
             return "Инской"
         if city.lower() in ["белово", "белова"]:
             return "Белово"
-        # Отсекаем мусор (короткие слова, явно не города)
         if len(city) < 3:
             return None
         return city
     return None
+
+# ===== ПРОВЕРКА ГОРОДА ЧЕРЕЗ DEEPSEEK =====
+
+def verify_and_save_city(user_id, city_name, user_name=None):
+    """Проверяет город через DeepSeek и сохраняет, если всё правильно"""
+    
+    if not city_name or len(city_name) < 3:
+        return None, "Город не указан или слишком короткое название. Напиши, где ты живёшь, я запомню! 😊"
+    
+    # Проверяем город через DeepSeek
+    prompt = f"""
+    Проверь, существует ли город или посёлок "{city_name}" в России или странах СНГ.
+    
+    Если существует:
+    - Напиши "существует"
+    - Напиши регион и 1-2 интересных факта (кратко)
+    
+    Если не существует или это явно не город (например "Ут", "Тоже", "Привет"):
+    - Напиши "не существует"
+    
+    Ответ одним словом и коротким пояснением:
+    """
+    
+    try:
+        response = deepseek.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=100
+        )
+        result = response.choices[0].message.content.strip()
+        print(f"🔍 Проверка города: {result}")
+        
+        if "существует" in result.lower() and "не существует" not in result.lower():
+            save_fact(user_id, "city", city_name)
+            
+            facts = result.replace("существует", "").strip()
+            if facts:
+                return city_name, f"Круто, {user_name or 'друг'}! {city_name} — это {facts} 🔥 Запомнил!"
+            else:
+                return city_name, f"Запомнил, {user_name or 'друг'}! Ты из {city_name}. А что там интересного? 😊"
+        
+        else:
+            return None, f"Хм, я не нашёл город {city_name} на карте. Ты уверен, что правильно назвал? Может, это посёлок или район? Напиши ещё раз 😊"
+            
+    except Exception as e:
+        print(f"❌ Ошибка проверки города: {e}")
+        save_fact(user_id, "city", city_name)
+        return city_name, f"Запомнил, {user_name or 'друг'}! Ты из {city_name}. Расскажи потом о нём подробнее 😊"
 
 # ===== ПОНИМАНИЕ ЗАПРОСА =====
 
@@ -180,7 +225,6 @@ def understand_query(text, previous_topic=None):
             print(f"🧠 Заметил местоимение, подставляю тему: '{previous_topic}'")
             return previous_topic
     
-    # ===== ПРОВЕРКА НА СПЕЦИАЛЬНЫЕ ТЕМЫ =====
     text_lower = text.lower()
     topic_triggers = {
         "имя": ["имя", "имена", "зовут", "называют", "меня зовут"],
@@ -195,7 +239,6 @@ def understand_query(text, previous_topic=None):
                 print(f"🧠 Нашёл тему '{topic}' по ключевому слову '{keyword}'")
                 return topic
     
-    # ===== ОСНОВНОЙ СПОСОБ: DeepSeek =====
     try:
         prompt = f"""
         Из вопроса пользователя извлеки ОДНО ключевое слово для поиска в истории.
@@ -224,7 +267,6 @@ def understand_query(text, previous_topic=None):
     except Exception as e:
         print(f"❌ Ошибка DeepSeek: {e}")
     
-    # ===== ЗАПАСНОЙ ВАРИАНТ =====
     words = re.findall(r'[а-яА-ЯёЁa-zA-Z]{3,}', text)
     
     stop_words = ["какую", "первую", "тебе", "как", "что", "где", "когда", "почему", 
@@ -238,7 +280,6 @@ def understand_query(text, previous_topic=None):
                   "упоминал", "обсуждали", "вспомни", "напомни", "давай", "давайте",
                   "пожалуйста", "спасибо"]
     
-    # 1. Ищем фразы
     phrases = re.findall(r'[А-Яа-яёЁ]+\s+[А-Яа-яёЁ]+', text)
     for phrase in phrases:
         phrase_lower = phrase.lower()
@@ -246,13 +287,11 @@ def understand_query(text, previous_topic=None):
             print(f"🧠 Запасной (фраза): '{phrase}'")
             return phrase
     
-    # 2. Ищем слова с большой буквы
     for word in words:
         if word[0].isupper() and word.lower() not in stop_words:
             print(f"🧠 Запасной (имя): '{word}'")
             return word
     
-    # 3. Ищем существительные
     for word in words:
         word_lower = word.lower()
         if word_lower not in stop_words and len(word) > 3 and word[-1] in 'аяоеиыьйнрл':
@@ -274,7 +313,7 @@ def should_search_history(text):
                 "выжимку", "первое", "всего общения"]
     return any(trigger in text_lower for trigger in triggers)
 
-# ===== ФОРМАТИРОВАНИЕ В ЧЕЛОВЕЧЕСКИЙ ОТВЕТ (ИСПРАВЛЕНО) =====
+# ===== ФОРМАТИРОВАНИЕ В ЧЕЛОВЕЧЕСКИЙ ОТВЕТ =====
 
 def format_results_to_human(results, original_query, search_word, user_name=None):
     if not results:
@@ -447,15 +486,23 @@ async def webhook(request: Request):
         if name:
             save_fact(user_id, "name", name)
         
+        # ===== ПРОВЕРКА ГОРОДА =====
         city = extract_city(text)
         if city:
-            save_fact(user_id, "city", city)
+            verified_city, response_text = verify_and_save_city(user_id, city, user_name)
+            if verified_city:
+                save_fact(user_id, "city", verified_city)
+                await send_message(user_id, response_text)
+                return JSONResponse({"ok": True})
+            else:
+                await send_message(user_id, response_text)
+                return JSONResponse({"ok": True})
 
         lower = text.lower()
         user_name = get_fact(user_id, "name")
         user_city = get_fact(user_id, "city")
 
-        # ===== ПРЯМЫЕ ЗАПРОСЫ (С УЛУЧШЕННЫМИ ОТВЕТАМИ) =====
+        # ===== ПРЯМЫЕ ЗАПРОСЫ =====
         if "как меня зовут" in lower or "моё имя" in lower or "как зовут" in lower:
             if user_name:
                 reply = f"Тебя зовут **{user_name}**."
@@ -522,7 +569,7 @@ async def webhook(request: Request):
 • Если пользователь ещё не представился — мягко спроси имя
 • При знакомстве: "Приятно познакомиться, [имя]! А ты из какого города?" 😊
 • Если пользователь назвал имя — запомни его и используй в общении
-• Если пользователь назвал город — запомни и используй
+• Если пользователь назвал город — проверь его существование и дай факты
 
 🧠 О ПАМЯТИ:
 • Используй последние 20 сообщений для контекста
