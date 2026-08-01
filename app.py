@@ -9,6 +9,7 @@ from openai import OpenAI
 from groq import Groq
 from dotenv import load_dotenv
 import requests
+import json
 
 load_dotenv()
 
@@ -19,9 +20,10 @@ DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 # ===== ПОДКЛЮЧЕНИЯ =====
-print("🚀 БОТ ЗАПУЩЕН. АРХИТЕКТУРА: Ты → Бот → DeepSeek → Supabase → Бот → Ты")
+print("🚀 БОТ ЗАПУЩЕН. АРХИТЕКТУРА: Ты → Бот → DeepSeek → Tavily → Бот → Ты")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -43,7 +45,6 @@ last_search_topic = None
 # ============================================================
 
 def save_message(user_id, role, content):
-    """Сохраняет сообщение в историю"""
     if not supabase:
         return None
     try:
@@ -62,7 +63,6 @@ def save_message(user_id, role, content):
         return None
 
 def get_recent_history(user_id, limit=15):
-    """Загружает последние N сообщений (для контекста)"""
     if not supabase:
         return []
     try:
@@ -78,7 +78,6 @@ def get_recent_history(user_id, limit=15):
         return []
 
 def get_all_history(user_id, limit=1000):
-    """Загружает ВСЮ историю для поиска"""
     if not supabase:
         return []
     try:
@@ -94,7 +93,6 @@ def get_all_history(user_id, limit=1000):
         return []
 
 def search_history(user_id, query, exclude_id=None):
-    """Ищет в Supabase по ключевому слову"""
     if not supabase:
         return []
     try:
@@ -114,7 +112,6 @@ def search_history(user_id, query, exclude_id=None):
         return []
 
 def search_history_with_time(user_id, topic, time_filter=None, exclude_id=None):
-    """Ищет в Supabase с фильтром по времени"""
     if not supabase:
         return []
     
@@ -142,7 +139,6 @@ def search_history_with_time(user_id, topic, time_filter=None, exclude_id=None):
         return []
 
 def save_fact(user_id, key, value):
-    """Сохраняет факт (имя, город)"""
     if not supabase:
         return
     try:
@@ -158,7 +154,6 @@ def save_fact(user_id, key, value):
         print(f"❌ Ошибка сохранения факта: {e}")
 
 def get_fact(user_id, key):
-    """Читает факт (имя, город)"""
     if not supabase:
         return None
     try:
@@ -172,8 +167,6 @@ def get_fact(user_id, key):
 # ============================================================
 
 def handle_set_name(text, user_id):
-    """Обрабатывает команды для запоминания имени"""
-    # /setname Вадим
     if text.lower().startswith("/setname"):
         parts = text.split(maxsplit=1)
         if len(parts) > 1:
@@ -183,7 +176,6 @@ def handle_set_name(text, user_id):
                 return f"Запомнил! Тебя зовут **{name}** 😊"
         return "Напиши: /setname [имя]"
     
-    # "Меня зовут Вадим"
     match = re.search(r"меня зовут\s+([А-Яа-яёЁ\-]+)", text, re.I)
     if match:
         name = match.group(1).capitalize()
@@ -194,8 +186,6 @@ def handle_set_name(text, user_id):
     return None
 
 def handle_set_city(text, user_id):
-    """Обрабатывает команды для запоминания города"""
-    # /setcity Белово
     if text.lower().startswith("/setcity"):
         parts = text.split(maxsplit=1)
         if len(parts) > 1:
@@ -205,7 +195,6 @@ def handle_set_city(text, user_id):
                 return f"Запомнил! Ты из **{city}** 😊"
         return "Напиши: /setcity [город]"
     
-    # "Я живу в Белово"
     match = re.search(r"(?:живу в|я из)\s+([А-Яа-яёЁ\-]+)", text, re.I)
     if match:
         city = match.group(1).capitalize()
@@ -216,11 +205,10 @@ def handle_set_city(text, user_id):
     return None
 
 # ============================================================
-# 3. DEEPSEEK — ПОНИМАНИЕ СМЫСЛА (ПЕРВЫЙ ПРИОРИТЕТ)
+# 3. ПОНИМАНИЕ ЗАПРОСА (DEEPSEEK)
 # ============================================================
 
 def parse_time_filter(time_text):
-    """Преобразует текстовое время в дату"""
     if not time_text:
         return None
     
@@ -245,13 +233,8 @@ def parse_time_filter(time_text):
     return None
 
 def understand_query_with_time(text, previous_topic=None):
-    """
-    DeepSeek понимает СМЫСЛ запроса.
-    Это ПЕРВЫЙ приоритет!
-    """
     print(f"🧠 Понимаю запрос: '{text}'")
     
-    # ===== 1. DEEPSEEK ПОНИМАЕТ СМЫСЛ (ГЛАВНЫЙ ПРИОРИТЕТ) =====
     try:
         print(f"🤖 DeepSeek (flash): анализирую СМЫСЛ запроса...")
         prompt = f"""
@@ -286,7 +269,6 @@ def understand_query_with_time(text, previous_topic=None):
     except Exception as e:
         print(f"❌ Ошибка DeepSeek: {e}")
     
-    # ===== 2. ЗАПАСНОЙ ВАРИАНТ (местоимения, триггеры) =====
     garbage_topics = ["говорили", "сказал", "писал", "правильно", "вспомнил", "говорил", 
                       "напомни", "вспомни", "неправильно", "давай", "запомнил", "про",
                       "поговорим", "другом", "о другом", "другое", "забудь", "не надо"]
@@ -311,7 +293,6 @@ def understand_query_with_time(text, previous_topic=None):
                 print(f"🧠 Нашёл тему '{topic}' по ключевому слову '{keyword}'")
                 return topic, None
     
-    # ===== 3. ПОСЛЕДНЯЯ ПОПЫТКА (извлечение слова) =====
     words = re.findall(r'[а-яА-ЯёЁa-zA-Z]{3,}', text)
     stop_words = ["какую", "первую", "тебе", "как", "что", "где", "когда", "почему", 
                   "зачем", "кто", "какой", "такой", "так", "вот", "да", "нет", "уже",
@@ -338,7 +319,6 @@ def understand_query_with_time(text, previous_topic=None):
     return None, None
 
 def should_search_history(text):
-    """Определяет, нужно ли искать в истории"""
     text_lower = text.lower()
     triggers = [
         "напомни", "что я говорил", "где я говорил", "найди в истории", "вспомни", 
@@ -354,12 +334,184 @@ def should_search_history(text):
     ]
     return any(trigger in text_lower for trigger in triggers)
 
+def should_search_web(text):
+    """Определяет, нужно ли искать в интернете"""
+    text_lower = text.lower()
+    triggers = [
+        "найди", "найти", "поищи", "покажи", "где находится", "какой адрес",
+        "кто такой", "что такое", "узнай", "расскажи о", "что это", "сколько стоит",
+        "сайт", "ссылка", "как найти", "адрес", "контакты", "телефон", "расписание"
+    ]
+    return any(trigger in text_lower for trigger in triggers)
+
 # ============================================================
-# 4. DEEPSEEK — ФОРМАТИРОВАНИЕ ОТВЕТА
+# 4. ПОИСК В ИНТЕРНЕТЕ (TAVILY)
+# ============================================================
+
+def search_web(query, max_results=5):
+    """
+    Ищет в интернете через Tavily API
+    """
+    if not TAVILY_API_KEY:
+        print("❌ Tavily API ключ не найден")
+        return None
+    
+    print(f"🌐 Ищу в интернете: '{query}'")
+    
+    try:
+        url = "https://api.tavily.com/search"
+        payload = {
+            "api_key": TAVILY_API_KEY,
+            "query": query,
+            "max_results": max_results,
+            "include_answer": True,
+            "include_raw_content": False,
+            "search_depth": "advanced"  # более детальный поиск
+        }
+        
+        response = requests.post(url, json=payload, timeout=30)
+        
+        if response.status_code == 200:
+            data = response.json()
+            results = data.get("results", [])
+            answer = data.get("answer", "")
+            
+            print(f"✅ Найдено {len(results)} результатов")
+            return {
+                "answer": answer,
+                "results": results,
+                "query": query
+            }
+        else:
+            print(f"❌ Ошибка Tavily: {response.status_code}")
+            return None
+            
+    except Exception as e:
+        print(f"❌ Ошибка поиска: {e}")
+        return None
+
+def format_web_results(search_data, original_query, user_name=None, user_city=None):
+    """
+    DeepSeek форматирует результаты поиска в человеческий ответ
+    """
+    if not search_data or not search_data.get("results"):
+        city_text = f" в {user_city}" if user_city else ""
+        return f"Не нашёл ничего в интернете по запросу '{original_query}'{city_text}. Попробуй переформулировать вопрос 😊"
+    
+    answer = search_data.get("answer", "")
+    results = search_data.get("results", [])
+    
+    # Формируем текст результатов для DeepSeek
+    results_text = ""
+    for i, r in enumerate(results[:5], 1):
+        title = r.get("title", "Без названия")
+        content = r.get("content", "")[:500]
+        url = r.get("url", "")
+        results_text += f"\n{i}. {title}\n   {content}\n   Источник: {url}\n"
+    
+    name_context = f"Ты общаешься с {user_name}." if user_name else ""
+    city_context = f"Пользователь из {user_city}." if user_city else ""
+    
+    prompt = f"""
+    Пользователь спросил: "{original_query}"
+    
+    Вот что нашлось в интернете:
+    {results_text}
+    
+    {name_context}
+    {city_context}
+    
+    Задача: ответь пользователю КОРОТКО (максимум 500 символов).
+    
+    Правила:
+    - Извлеки САМОЕ ВАЖНОЕ из найденного
+    - Если есть ответ от Tavily (answer) — используй его
+    - Проверь, что информация достоверная
+    - Если нужно — дай ссылку на источник
+    - Не перечисляй все результаты подряд
+    - Говори как в обычном разговоре с другом
+    - Используй эмодзи 😊🔥
+    
+    Ответ:
+    """
+    
+    try:
+        print(f"🤖 DeepSeek (flash): форматирую поиск...")
+        response = deepseek.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=300
+        )
+        result = response.choices[0].message.content.strip()
+        if result:
+            return result
+    except Exception as e:
+        print(f"❌ Ошибка форматирования: {e}")
+    
+    # Запасной вариант
+    if answer:
+        return f"Вот что я нашёл: {answer[:500]}"
+    
+    # Если есть результаты — показываем первый
+    if results:
+        first = results[0]
+        return f"Вот что я нашёл: {first.get('title', '')}\n\n{first.get('content', '')[:300]}\n\nИсточник: {first.get('url', '')}"
+    
+    return f"Ничего не нашёл по запросу '{original_query}'. Попробуй переформулировать вопрос 😊"
+
+def search_web_with_fallback(query, user_name=None, user_city=None):
+    """
+    Сначала ищет через Tavily, если не работает — запасной вариант
+    """
+    # 1. Tavily поиск
+    search_data = search_web(query)
+    
+    if search_data and search_data.get("results"):
+        return format_web_results(search_data, query, user_name, user_city)
+    
+    # 2. Запасной вариант
+    return f"Не удалось найти информацию в интернете по запросу '{query}'. Попробуй переформулировать вопрос или поищи позже 😊"
+
+# ============================================================
+# 5. ГИБРИДНЫЙ ПОИСК (ИСТОРИЯ + ИНТЕРНЕТ)
+# ============================================================
+
+def hybrid_search_with_web(user_id, query, exclude_id=None, user_name=None, user_city=None):
+    """
+    Сначала ищет в истории, потом в интернете
+    """
+    # 1. Сначала ищем в истории
+    topic, time_filter = understand_query_with_time(query, last_search_topic)
+    
+    if topic and len(topic) > 1:
+        # Проверяем, есть ли в истории
+        search_topic = topic
+        if user_city:
+            search_topic = f"{topic} {user_city}"
+        
+        results = search_history_with_time(user_id, search_topic, time_filter, exclude_id)
+        
+        if results:
+            print(f"✅ Нашёл в истории: {len(results)} результатов")
+            return format_results_to_human(results, query, topic, time_filter, user_name, user_city)
+    
+    # 2. Если в истории не нашлось — ищем в интернете
+    print(f"🌐 В истории не нашлось, ищу в интернете...")
+    
+    # Формируем запрос для поиска
+    search_query = query
+    if user_city and any(word in query.lower() for word in ["найди", "покажи", "где", "адрес"]):
+        search_query = f"{query} {user_city}"
+        print(f"🌐 Добавляю город к поиску: '{user_city}'")
+    
+    return search_web_with_fallback(search_query, user_name, user_city)
+
+# ============================================================
+# 6. ФОРМАТИРОВАНИЕ ОТВЕТА (ИСТОРИЯ)
 # ============================================================
 
 def format_results_to_human(results, original_query, search_word, time_filter, user_name=None, user_city=None):
-    """DeepSeek форматирует найденное в человеческий ответ"""
     if not results:
         time_text = f" {time_filter}" if time_filter else ""
         city_text = f" в {user_city}" if user_city else ""
@@ -419,84 +571,7 @@ def format_results_to_human(results, original_query, search_word, time_filter, u
     return f"Мы говорили про {search_word}. Что именно тебя интересует? 😊"
 
 # ============================================================
-# 5. БОТ — ПОИСК В SUPABASE (ПО КОМАНДЕ DEEPSEEK)
-# ============================================================
-
-def hybrid_search_with_time(user_id, query, exclude_id=None, user_name=None, user_city=None):
-    """
-    Бот ищет в Supabase по команде от DeepSeek
-    """
-    # 1. DeepSeek понимает, что искать
-    topic, time_filter = understand_query_with_time(query, last_search_topic)
-    
-    if not topic or len(topic) < 2:
-        return None
-    
-    # 2. Если есть город — добавляем для поиска (только если явно ищет место)
-    place_triggers = ["найди", "покажи", "где находится", "что есть", "где", "адрес", "рядом"]
-    is_place_search = any(trigger in query.lower() for trigger in place_triggers)
-    
-    search_topic = topic
-    if user_city and is_place_search:
-        search_topic = f"{topic} {user_city}"
-        print(f"🔍 Автоматически добавляю город: '{user_city}' к поиску")
-    else:
-        if user_city:
-            print(f"🔍 Поиск без города (тема: '{topic}'), город не используется")
-        else:
-            print(f"🔍 Тема: '{topic}', Время: {time_filter if time_filter else 'всё время'}")
-    
-    # 3. Бот ищет в Supabase
-    results = search_history_with_time(user_id, search_topic, time_filter, exclude_id)
-    
-    if results:
-        print(f"✅ Бот нашёл: {len(results)} результатов")
-        # 4. DeepSeek форматирует ответ
-        return format_results_to_human(results, query, topic, time_filter, user_name, user_city)
-    
-    # 5. Если не нашёл — пробуем DeepSeek умный поиск
-    print(f"🔍 Бот не нашёл, пробую DeepSeek...")
-    all_history = get_all_history(user_id, limit=1000)
-    
-    if not all_history:
-        return None
-    
-    user_messages = [h['content'] for h in all_history if h['role'] == 'user']
-    if not user_messages:
-        return None
-    
-    history_text = "\n".join(user_messages[-30:])
-    
-    prompt = f"""
-    Найди в истории сообщения пользователя, которые относятся к теме "{topic}".
-    {f'Особенно за период: {time_filter}' if time_filter else ''}
-    {f'И особенно в городе: {user_city}' if user_city else ''}
-    
-    История пользователя:
-    {history_text}
-    
-    Если нашёл - напиши краткую суть (2-3 предложения) как в разговоре с другом.
-    Если ничего не найдено - напиши "ничего не найдено".
-    """
-    
-    try:
-        print(f"🤖 DeepSeek (flash): умный поиск в истории...")
-        response = deepseek.chat.completions.create(
-            model="deepseek-v4-flash",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=200
-        )
-        result = response.choices[0].message.content.strip()
-        if result and "ничего не найдено" not in result.lower():
-            return result
-    except Exception as e:
-        print(f"❌ Ошибка DeepSeek: {e}")
-    
-    return None
-
-# ============================================================
-# 6. РАСПОЗНАВАНИЕ ГОЛОСА (GROQ WHISPER)
+# 7. РАСПОЗНАВАНИЕ ГОЛОСА (GROQ WHISPER)
 # ============================================================
 
 def transcribe_audio(audio_url):
@@ -517,13 +592,30 @@ def transcribe_audio(audio_url):
         print(f"❌ Ошибка распознавания: {e}")
         return None
 
+# ============================================================
+# 8. ОТПРАВКА СООБЩЕНИЙ С ИНДИКАТОРОМ "ПЕЧАТАЕТ..."
+# ============================================================
+
+async def send_chat_action(chat_id, action="typing"):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction"
+    data = {"chat_id": chat_id, "action": action}
+    try:
+        requests.post(url, json=data)
+    except Exception as e:
+        print(f"❌ Ошибка отправки action: {e}")
+
 async def send_message(chat_id, text):
+    await send_chat_action(chat_id, "typing")
+    
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     data = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
-    requests.post(url, json=data)
+    try:
+        requests.post(url, json=data)
+    except Exception as e:
+        print(f"❌ Ошибка отправки сообщения: {e}")
 
 # ============================================================
-# 7. ОСНОВНАЯ ЛОГИКА (WEBHOOK)
+# 9. ОСНОВНАЯ ЛОГИКА (WEBHOOK)
 # ============================================================
 
 @app.post("/webhook")
@@ -558,7 +650,6 @@ async def webhook(request: Request):
         if not text:
             return JSONResponse({"ok": True})
 
-        # ===== БОТ СОХРАНЯЕТ СООБЩЕНИЕ В SUPABASE =====
         current_message_id = save_message(user_id, "user", text)
 
         # ===== ОБРАБОТКА КОМАНД (ИМЯ, ГОРОД) =====
@@ -597,6 +688,15 @@ async def webhook(request: Request):
             await send_message(user_id, reply)
             return JSONResponse({"ok": True})
 
+        # ===== ПОИСК В ИНТЕРНЕТЕ (ЕСЛИ НУЖНО) =====
+        if should_search_web(text):
+            print(f"🌐 Пользователь хочет поискать в интернете...")
+            reply = hybrid_search_with_web(user_id, text, current_message_id, user_name, user_city)
+            if reply:
+                save_message(user_id, "assistant", reply)
+                await send_message(user_id, reply)
+                return JSONResponse({"ok": True})
+
         # ===== ПОИСК В ИСТОРИИ (ЕСЛИ НУЖНО) =====
         if should_search_history(text):
             topic, time_filter = understand_query_with_time(text, last_search_topic)
@@ -606,7 +706,7 @@ async def webhook(request: Request):
                 last_search_topic = topic
             
             if topic and len(topic) > 1 and topic.lower() not in garbage_topics:
-                reply = hybrid_search_with_time(user_id, text, current_message_id, user_name, user_city)
+                reply = hybrid_search_with_web(user_id, text, current_message_id, user_name, user_city)
                 
                 if reply:
                     save_message(user_id, "assistant", reply)
@@ -634,14 +734,14 @@ async def webhook(request: Request):
             
             if not topic_found_in_context:
                 print(f"🔍 АВТОПОИСК: темы '{topic}' нет в контексте, ищу в Supabase...")
-                reply = hybrid_search_with_time(user_id, text, current_message_id, user_name, user_city)
+                reply = hybrid_search_with_web(user_id, text, current_message_id, user_name, user_city)
                 if reply:
-                    print(f"✅ АВТОПОИСК: нашёл ответ в Supabase!")
+                    print(f"✅ АВТОПОИСК: нашёл ответ!")
                     save_message(user_id, "assistant", reply)
                     await send_message(user_id, reply)
                     return JSONResponse({"ok": True})
                 else:
-                    print(f"❌ АВТОПОИСК: ничего не нашёл в Supabase")
+                    print(f"❌ АВТОПОИСК: ничего не нашёл")
             else:
                 print(f"✅ АВТОПОИСК: тема '{topic}' есть в контексте, поиск не требуется")
 
@@ -680,8 +780,14 @@ async def webhook(request: Request):
 • Используй последние 15 сообщений для контекста
 • Если темы нет в контексте — автоматически ищи в Supabase
 • Понимай время: "месяц назад", "вчера", "неделю назад"
-• Если знаешь город пользователя — используй его при поиске мест
+• Если знаешь город пользователя — используй его при поиске
 • Всю историю помнишь, если тебя спросят
+
+🌐 О ПОИСКЕ В ИНТЕРНЕТЕ:
+• Если не нашёл в истории — ищи в интернете
+• Используй Tavily для поиска
+• Проверяй источники на достоверность
+• Дай краткую выжимку информации
 
 Ты общаешься с человеком, который хочет чувствовать себя комфортно. Будь таким. 😉"""
 
