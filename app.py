@@ -21,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-print("🚀 БОТ — ФАСАД, ПОИСК ЧЕРЕЗ TAVILY (РАБОТАЕТ 100%)")
+print("🚀 БОТ — ФАСАД, ПОИСК ЧЕРЕЗ TAVILY + ВРЕМЯ")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -110,7 +110,15 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ПОИСК В ИНТЕРНЕТЕ (TAVILY)
+# 2. ВРЕМЯ (НОВАЯ ФУНКЦИЯ)
+# ============================================================
+
+def get_current_time():
+    now = datetime.now()
+    return f"Сейчас **{now.strftime('%H:%M')}**, {now.strftime('%d.%m.%Y')} 😊"
+
+# ============================================================
+# 3. ПОИСК В ИНТЕРНЕТЕ (TAVILY)
 # ============================================================
 
 def search_web(query, max_results=5):
@@ -141,7 +149,7 @@ def search_web(query, max_results=5):
     return None
 
 # ============================================================
-# 3. ГОЛОС
+# 4. ГОЛОС
 # ============================================================
 
 def transcribe_audio(audio_url):
@@ -163,7 +171,7 @@ def transcribe_audio(audio_url):
         return None
 
 # ============================================================
-# 4. ОТПРАВКА
+# 5. ОТПРАВКА
 # ============================================================
 
 async def send_chat_action(chat_id):
@@ -182,10 +190,15 @@ async def send_message(chat_id, text):
         print(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# 5. DEEPSEEK + TAVILY
+# 6. DEEPSEEK + TAVILY
 # ============================================================
 
 def deepseek_process(user_id, text):
+    # === ПРОВЕРКА НА ВРЕМЯ ===
+    text_lower = text.lower()
+    if any(word in text_lower for word in ["время", "сколько времени", "который час", "какое сегодня число", "какой день"]):
+        return get_current_time()
+
     history = get_recent_history(user_id, limit=20)
     user_name = get_fact(user_id, "name")
     user_city = get_fact(user_id, "city")
@@ -284,7 +297,7 @@ def deepseek_process(user_id, text):
     return reply
 
 # ============================================================
-# 6. WEBHOOK
+# 7. WEBHOOK
 # ============================================================
 
 @app.post("/webhook")
