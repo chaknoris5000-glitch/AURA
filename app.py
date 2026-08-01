@@ -22,12 +22,8 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-# ===== ДОПОЛНИТЕЛЬНЫЕ КЛЮЧИ ДЛЯ API =====
-WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")  # OpenWeatherMap
-NEWS_API_KEY = os.getenv("NEWS_API_KEY")        # NewsAPI
-
 # ===== ПОДКЛЮЧЕНИЯ =====
-print("🚀 БОТ ЗАПУЩЕН. ЭТАЛОН #12 — ВСЕ ФИШКИ")
+print("🚀 БОТ ЗАПУЩЕН. ЭТАЛОН #13 — ИСПРАВЛЕННАЯ ВЕРСИЯ")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -43,7 +39,6 @@ groq = Groq(api_key=GROQ_API_KEY)
 app = FastAPI()
 
 last_search_topic = None
-last_location = None
 
 # ============================================================
 # 1. РАБОТА С БАЗОЙ ДАННЫХ (SUPABASE)
@@ -234,9 +229,10 @@ def get_location_by_ip(ip):
 # 4. СПЕЦИАЛЬНЫЕ ФУНКЦИИ (ВРЕМЯ, КУРС, ПОГОДА, НОВОСТИ)
 # ============================================================
 
-def get_current_time(timezone=None):
-    """Возвращает текущее время и дату"""
-    now = datetime.now()
+def get_current_time():
+    """Возвращает текущее время и дату в МОСКОВСКОМ времени (MSK)"""
+    # Используем московское время (UTC+3)
+    now = datetime.utcnow() + timedelta(hours=3)
     return {
         "time": now.strftime("%H:%M"),
         "date": now.strftime("%d.%m.%Y"),
@@ -255,50 +251,35 @@ def get_currency_rate(from_currency="USD", to_currency="RUB"):
                 "from": from_currency,
                 "to": to_currency,
                 "rate": rate,
-                "updated": datetime.now().strftime("%H:%M")
+                "updated": datetime.utcnow().strftime("%H:%M")
             }
     except Exception as e:
         print(f"❌ Ошибка получения курса: {e}")
     return None
 
-def get_weather(city, api_key=None):
-    """Возвращает погоду в городе"""
-    if not WEATHER_API_KEY:
-        return None
-    
+def get_weather(city):
+    """Возвращает погоду в городе (без API ключа — парсит сайт)"""
     try:
-        url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
-        response = requests.get(url, timeout=10)
-        data = response.json()
-        if data.get("cod") == 200:
-            return {
-                "city": data.get("name"),
-                "temp": data.get("main", {}).get("temp"),
-                "feels_like": data.get("main", {}).get("feels_like"),
-                "description": data.get("weather", [{}])[0].get("description"),
-                "humidity": data.get("main", {}).get("humidity"),
-                "wind": data.get("wind", {}).get("speed")
-            }
+        # Используем бесплатный парсинг погоды через wttr.in
+        response = requests.get(f"https://wttr.in/{city}?format=%C+%t+%w+%h", timeout=10)
+        if response.status_code == 200:
+            data = response.text.strip()
+            # Парсим ответ: "Cloudy +12°C 5 km/h 80%"
+            parts = data.split()
+            if len(parts) >= 4:
+                description = " ".join(parts[:-3]) if len(parts) > 3 else parts[0]
+                temp = parts[-3] if len(parts) >= 3 else "?"
+                wind = parts[-2] if len(parts) >= 2 else "?"
+                humidity = parts[-1] if len(parts) >= 1 else "?"
+                return {
+                    "city": city,
+                    "description": description,
+                    "temp": temp.replace("+", "").replace("-", ""),
+                    "wind": wind,
+                    "humidity": humidity
+                }
     except Exception as e:
         print(f"❌ Ошибка получения погоды: {e}")
-    return None
-
-def get_news(country="ru", category=None, max_results=5):
-    """Возвращает последние новости"""
-    if not NEWS_API_KEY:
-        return None
-    
-    try:
-        url = f"https://newsapi.org/v2/top-headlines?country={country}&apiKey={NEWS_API_KEY}&pageSize={max_results}"
-        if category:
-            url += f"&category={category}"
-        
-        response = requests.get(url, timeout=10)
-        data = response.json()
-        if data.get("status") == "ok":
-            return data.get("articles", [])
-    except Exception as e:
-        print(f"❌ Ошибка получения новостей: {e}")
     return None
 
 # ============================================================
@@ -310,7 +291,7 @@ def parse_time_filter(time_text):
         return None
     
     time_text = time_text.lower()
-    now = datetime.now()
+    now = datetime.utcnow()
     
     if "месяц" in time_text or "30" in time_text or "31" in time_text:
         return now - timedelta(days=30)
@@ -332,21 +313,36 @@ def parse_time_filter(time_text):
 def understand_query_with_time(text, previous_topic=None):
     print(f"🧠 Понимаю запрос: '{text}'")
     
+    # Сначала проверяем специальные темы
+    text_lower = text.lower()
+    topic_triggers = {
+        "имя": ["имя", "имена", "зовут", "называют", "меня зовут", "кто я"],
+        "город": ["город", "живу", "жил", "родился", "откуда", "в каком городе"],
+        "загадка": ["загадк", "загадал"],
+        "фильм": ["фильм", "кино", "смотрел", "сериал"],
+        "работа": ["работаю", "работа", "кем работаю", "где работаю", "моя работа"]
+    }
+    
+    for topic, keywords in topic_triggers.items():
+        for keyword in keywords:
+            if keyword in text_lower:
+                print(f"🧠 Нашёл тему '{topic}' по ключевому слову '{keyword}'")
+                return topic, None
+    
+    # Если специальные темы не найдены — пробуем DeepSeek
     try:
         print(f"🤖 DeepSeek (flash): анализирую СМЫСЛ запроса...")
         prompt = f"""
         Пользователь спросил: "{text}"
         
-        Извлеки ОСНОВНУЮ СУТЬ вопроса (2-3 слова).
+        Извлеки ОСНОВНУЮ СУТЬ вопроса (одно слово).
         Это должна быть ТЕМА, по которой нужно искать в истории.
         
         Примеры:
-        "Поговорим о другом. Скажи, ты запомнишь всё, что я тебе говорю?" → память
-        "Найди пиццерию" → пиццерия
         "Что мы говорили про работу?" → работа
         "Как меня зовут?" → имя
         "Где я живу?" → город
-        "Найди адрес, который я просил запомнить месяц назад" → адрес
+        "Найди адрес" → адрес
         
         Ответь ТОЛЬКО темой (одно слово):
         """
@@ -366,35 +362,7 @@ def understand_query_with_time(text, previous_topic=None):
     except Exception as e:
         print(f"❌ Ошибка DeepSeek: {e}")
     
-    garbage_topics = ["говорили", "сказал", "писал", "правильно", "вспомнил", "говорил", 
-                      "напомни", "вспомни", "неправильно", "давай", "запомнил", "про",
-                      "поговорим", "другом", "о другом", "другое", "забудь", "не надо"]
-    
-    if previous_topic and any(word in text.lower() for word in ["него", "это", "них", "ней", "его", "этом"]):
-        if previous_topic.lower() not in garbage_topics:
-            print(f"🧠 Заметил местоимение, подставляю тему: '{previous_topic}'")
-            return previous_topic, None
-    
-    text_lower = text.lower()
-    topic_triggers = {
-        "имя": ["имя", "имена", "зовут", "называют", "меня зовут", "кто я"],
-        "город": ["город", "живу", "жил", "родился", "откуда", "в каком городе"],
-        "загадка": ["загадк", "загадал"],
-        "фильм": ["фильм", "кино", "смотрел", "сериал"],
-        "работа": ["работаю", "работа", "кем работаю", "где работаю", "моя работа"],
-        "время": ["время", "сколько времени", "часы", "час", "который час"],
-        "дата": ["дата", "какое число", "день", "месяц", "год"],
-        "погода": ["погода", "температура", "дождь", "снег", "ветер", "солнце"],
-        "курс": ["курс", "доллар", "евро", "рубль", "валюта"],
-        "новости": ["новости", "события", "происходит", "в мире"]
-    }
-    
-    for topic, keywords in topic_triggers.items():
-        for keyword in keywords:
-            if keyword in text_lower:
-                print(f"🧠 Нашёл тему '{topic}' по ключевому слову '{keyword}'")
-                return topic, None
-    
+    # Запасной вариант
     words = re.findall(r'[а-яА-ЯёЁa-zA-Z]{3,}', text)
     stop_words = ["какую", "первую", "тебе", "как", "что", "где", "когда", "почему", 
                   "зачем", "кто", "какой", "такой", "так", "вот", "да", "нет", "уже",
@@ -427,12 +395,7 @@ def should_search_history(text):
         "что я писал", "загадк", "вопрос", "раньше", "прошлый", "прошлое", "помнишь", 
         "говорил", "писал", "рассказывал", "упоминал", "обсуждали", "было", "была", "ранее",
         "делал", "сказал", "спросил", "ответил", "написал", "вспомни", "помню",
-        "выжимку", "первое", "всего общения",
-        "работаю", "работа", "кем работаю", "где работаю", "моя работа",
-        "кто я", "назови моё имя", "ты помнишь моё имя",
-        "откуда я", "в каком городе", "где я живу",
-        "месяц", "неделю", "вчера", "сегодня", "год",
-        "найди", "покажи", "где находится", "что есть"
+        "выжимку", "первое", "всего общения"
     ]
     return any(trigger in text_lower for trigger in triggers)
 
@@ -441,15 +404,16 @@ def should_search_web(text):
     triggers = [
         "найди", "найти", "поищи", "покажи", "где находится", "какой адрес",
         "кто такой", "что такое", "узнай", "расскажи о", "что это", "сколько стоит",
-        "сайт", "ссылка", "как найти", "адрес", "контакты", "телефон", "расписание"
+        "сайт", "ссылка", "как найти", "адрес", "контакты", "телефон"
     ]
     return any(trigger in text_lower for trigger in triggers)
 
 # ============================================================
-# 6. ПОИСК В ИНТЕРНЕТЕ (TAVILY + DEEPSEEK ПРОВЕРКА)
+# 6. ПОИСК В ИНТЕРНЕТЕ (TAVILY)
 # ============================================================
 
 def search_web(query, max_results=5):
+    """Ищет в интернете через Tavily API"""
     if not TAVILY_API_KEY:
         print("❌ Tavily API ключ не найден")
         return None
@@ -464,7 +428,7 @@ def search_web(query, max_results=5):
             "max_results": max_results,
             "include_answer": True,
             "include_raw_content": False,
-            "search_depth": "advanced"
+            "search_depth": "basic"  # basic быстрее и дешевле
         }
         
         response = requests.post(url, json=payload, timeout=30)
@@ -488,122 +452,42 @@ def search_web(query, max_results=5):
         print(f"❌ Ошибка поиска: {e}")
         return None
 
-def verify_search_results(results, original_query, user_city=None):
-    results_text = "\n".join([
-        f"- {r.get('title', '')}: {r.get('content', '')[:300]}" 
-        for r in results[:5]
-    ])
+def format_web_results(search_data, original_query, user_name=None, user_city=None):
+    """DeepSeek форматирует результаты поиска"""
+    if not search_data or not search_data.get("results"):
+        city_text = f" в {user_city}" if user_city else ""
+        return f"Не нашёл ничего в интернете по запросу '{original_query}'{city_text}. Попробуй переформулировать вопрос 😊"
+    
+    answer = search_data.get("answer", "")
+    results = search_data.get("results", [])
+    
+    # Формируем текст результатов для DeepSeek
+    results_text = ""
+    for i, r in enumerate(results[:5], 1):
+        title = r.get("title", "Без названия")
+        content = r.get("content", "")[:500]
+        url = r.get("url", "")
+        results_text += f"\n{i}. {title}\n   {content}\n   Источник: {url}\n"
+    
+    name_context = f"Ты общаешься с {user_name}." if user_name else ""
+    city_context = f"Пользователь из {user_city}." if user_city else ""
     
     prompt = f"""
-    Пользователь искал: "{original_query}"
+    Пользователь спросил: "{original_query}"
     
-    Вот что нашёл поисковик:
+    Вот что нашлось в интернете:
     {results_text}
     
-    Задача:
-    1. Проверь, есть ли среди результатов то, что искал пользователь
-    2. Если есть — напиши "НАШЁЛ" и дай краткую информацию
-    3. Если нет — напиши "НЕ НАШЁЛ" и предложи новый запрос для поиска
+    {name_context}
+    {city_context}
     
-    Формат ответа:
-    Если НАШЁЛ:
-    НАШЁЛ
-    [краткая информация]
-    
-    Если НЕ НАШЁЛ:
-    НЕ НАШЁЛ
-    Новый запрос: [новый поисковый запрос]
-    """
-    
-    try:
-        response = deepseek.chat.completions.create(
-            model="deepseek-v4-flash",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=200
-        )
-        result = response.choices[0].message.content.strip()
-        
-        if "НАШЁЛ" in result:
-            return {
-                "found": True,
-                "info": result.replace("НАШЁЛ", "").strip()
-            }
-        else:
-            match = re.search(r"Новый запрос:\s*(.+)", result)
-            new_query = match.group(1).strip() if match else None
-            return {
-                "found": False,
-                "new_query": new_query
-            }
-    except Exception as e:
-        print(f"❌ Ошибка проверки: {e}")
-        return {"found": False, "new_query": f"{original_query} официальный сайт"}
-
-def search_with_refinement(query, user_city=None, max_attempts=3):
-    current_query = query
-    attempt = 0
-    
-    while attempt < max_attempts:
-        attempt += 1
-        print(f"🔍 Попытка {attempt}: '{current_query}'")
-        
-        search_data = search_web(current_query)
-        
-        if not search_data or not search_data.get("results"):
-            print(f"❌ Попытка {attempt}: ничего не нашлось")
-            if attempt == 1:
-                current_query = f"{query} официальный сайт"
-            elif attempt == 2:
-                current_query = f"{query} информация"
-            continue
-        
-        verification = verify_search_results(search_data["results"], query, user_city)
-        
-        if verification.get("found"):
-            return format_found_result(verification, search_data, query)
-        
-        new_query = verification.get("new_query")
-        if new_query:
-            current_query = new_query
-            print(f"🔄 DeepSeek предложил новый запрос: '{current_query}'")
-        else:
-            if attempt == 1:
-                current_query = f"{query} официальный сайт"
-            elif attempt == 2:
-                current_query = f"{query} информация"
-            else:
-                current_query = f"{query} сайт"
-    
-    return "Не удалось найти достоверную информацию. Попробуй переформулировать вопрос 😊"
-
-def format_found_result(verification, search_data, original_query):
-    info = verification.get("info", "")
-    
-    results = search_data.get("results", [])
-    links = []
-    for r in results[:3]:
-        url = r.get("url", "")
-        title = r.get("title", "")
-        if url:
-            links.append(f"[{title}]({url})")
-    
-    links_text = "\n".join(links) if links else ""
-    
-    prompt = f"""
-    Пользователь искал: "{original_query}"
-    
-    Найдена информация:
-    {info}
-    
-    Источники:
-    {links_text}
-    
-    Задача: ответь пользователю КОРОТКО (2-3 предложения) с указанием источника.
+    Задача: ответь пользователю КОРОТКО (максимум 500 символов).
     
     Правила:
-    - Извлеки САМОЕ ВАЖНОЕ
-    - Укажи источник
+    - Извлеки САМОЕ ВАЖНОЕ из найденного
+    - Если есть ответ от Tavily (answer) — используй его
+    - Дай ссылку на источник
+    - Не перечисляй все результаты подряд
     - Говори как в обычном разговоре с другом
     - Используй эмодзи 😊🔥
     
@@ -611,11 +495,12 @@ def format_found_result(verification, search_data, original_query):
     """
     
     try:
+        print(f"🤖 DeepSeek (flash): форматирую поиск...")
         response = deepseek.chat.completions.create(
             model="deepseek-v4-flash",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
-            max_tokens=250
+            max_tokens=300
         )
         result = response.choices[0].message.content.strip()
         if result:
@@ -623,7 +508,16 @@ def format_found_result(verification, search_data, original_query):
     except Exception as e:
         print(f"❌ Ошибка форматирования: {e}")
     
-    return f"{info}\n\nИсточник: {links_text if links_text else 'не указан'}"
+    # Запасной вариант
+    if answer:
+        return f"Вот что я нашёл: {answer[:500]}"
+    
+    # Если есть результаты — показываем первый
+    if results:
+        first = results[0]
+        return f"Вот что я нашёл: {first.get('title', '')}\n\n{first.get('content', '')[:300]}\n\nИсточник: {first.get('url', '')}"
+    
+    return f"Ничего не нашёл по запросу '{original_query}'. Попробуй переформулировать вопрос 😊"
 
 # ============================================================
 # 7. ГИБРИДНЫЙ ПОИСК (ИСТОРИЯ + ИНТЕРНЕТ)
@@ -667,7 +561,6 @@ def format_results_to_human(results, original_query, search_word, time_filter, u
     - Используй эмодзи 😊🔥
     - Если ты НЕ УВЕРЕН, что это точно то, о чём спрашивают — скажи "Что-то я подзабыл"
     - НЕ придумывай то, чего нет в истории
-    - Имя пользователя используй ТОЛЬКО в начале разговора или для привлечения внимания
     
     Ответ:
     """
@@ -689,6 +582,10 @@ def format_results_to_human(results, original_query, search_word, time_filter, u
     return f"Мы говорили про {search_word}. Что именно тебя интересует? 😊"
 
 def hybrid_search_with_web(user_id, query, exclude_id=None, user_name=None, user_city=None):
+    """
+    Сначала ищет в истории, потом в интернете
+    """
+    # 1. Сначала ищем в истории
     topic, time_filter = understand_query_with_time(query, last_search_topic)
     
     if topic and len(topic) > 1:
@@ -702,85 +599,26 @@ def hybrid_search_with_web(user_id, query, exclude_id=None, user_name=None, user
             print(f"✅ Нашёл в истории: {len(results)} результатов")
             return format_results_to_human(results, query, topic, time_filter, user_name, user_city)
     
+    # 2. Если в истории не нашлось — ищем в интернете
     print(f"🌐 В истории не нашлось, ищу в интернете...")
     
+    # Формируем запрос для поиска
     search_query = query
     if user_city and any(word in query.lower() for word in ["найди", "покажи", "где", "адрес"]):
         search_query = f"{query} {user_city}"
         print(f"🌐 Добавляю город к поиску: '{user_city}'")
     
-    return search_with_refinement(search_query, user_city)
+    # 3. Ищем через Tavily
+    search_data = search_web(search_query)
+    
+    if search_data and search_data.get("results"):
+        return format_web_results(search_data, query, user_name, user_city)
+    
+    # 4. Если Tavily не дал результатов
+    return f"Не удалось найти информацию по запросу '{query}'. Попробуй переформулировать вопрос или поищи позже 😊"
 
 # ============================================================
-# 8. ОБРАБОТКА СПЕЦИАЛЬНЫХ ЗАПРОСОВ (ВРЕМЯ, КУРС, ПОГОДА, НОВОСТИ)
-# ============================================================
-
-def handle_special_queries(text, user_name=None, user_city=None, user_ip=None):
-    text_lower = text.lower()
-    
-    # ===== ВРЕМЯ И ДАТА =====
-    if any(word in text_lower for word in ["время", "сколько времени", "который час"]):
-        time_data = get_current_time()
-        return f"Сейчас **{time_data['time']}**, {time_data['date']} 😊"
-    
-    # ===== КУРС ВАЛЮТ =====
-    if "курс" in text_lower or "доллар" in text_lower or "евро" in text_lower:
-        currency = "USD" if "доллар" in text_lower else "EUR" if "евро" in text_lower else "USD"
-        rate_data = get_currency_rate(currency, "RUB")
-        if rate_data:
-            return f"Курс **{rate_data['from']}** к **{rate_data['to']}** — **{rate_data['rate']:.2f}** (на {rate_data['updated']}) 😊"
-        else:
-            return "Не удалось получить курс валют. Попробуй позже 😊"
-    
-    # ===== ПОГОДА =====
-    if "погода" in text_lower or "температура" in text_lower:
-        city = user_city
-        if not city:
-            # Пробуем определить по IP
-            if user_ip:
-                location = get_location_by_ip(user_ip)
-                if location:
-                    city = location.get("city")
-            if not city:
-                return "Скажи сначала, в каком городе узнать погоду. Напиши: 'Погода в Белово' 😊"
-        
-        # Извлекаем город из текста, если указан
-        match = re.search(r"в\s+([А-Яа-яёЁ\-]+)", text)
-        if match:
-            city = match.group(1).capitalize()
-        
-        weather = get_weather(city)
-        if weather:
-            return f"Погода в **{weather['city']}**: {weather['description']}, температура **{weather['temp']}°C** (ощущается как {weather['feels_like']}°C), влажность {weather['humidity']}%, ветер {weather['wind']} м/с 😊"
-        else:
-            return f"Не удалось получить погоду для города {city}. Проверь название 😊"
-    
-    # ===== НОВОСТИ =====
-    if "новости" in text_lower or "события" in text_lower or "в мире" in text_lower:
-        category = None
-        if "спорт" in text_lower:
-            category = "sports"
-        elif "технологии" in text_lower or "техно" in text_lower:
-            category = "technology"
-        elif "наука" in text_lower:
-            category = "science"
-        
-        articles = get_news("ru", category, 5)
-        if articles:
-            result = "📰 **Последние новости:**\n\n"
-            for i, article in enumerate(articles[:5], 1):
-                title = article.get("title", "Без названия")
-                source = article.get("source", {}).get("name", "")
-                url = article.get("url", "")
-                result += f"{i}. **{title}**\n   {source}\n   [Читать]({url})\n\n"
-            return result
-        else:
-            return "Не удалось получить новости. Попробуй позже 😊"
-    
-    return None
-
-# ============================================================
-# 9. РАСПОЗНАВАНИЕ ГОЛОСА (GROQ WHISPER)
+# 8. РАСПОЗНАВАНИЕ ГОЛОСА (GROQ WHISPER)
 # ============================================================
 
 def transcribe_audio(audio_url):
@@ -802,7 +640,7 @@ def transcribe_audio(audio_url):
         return None
 
 # ============================================================
-# 10. ОТПРАВКА СООБЩЕНИЙ С ИНДИКАТОРОМ "ПЕЧАТАЕТ..."
+# 9. ОТПРАВКА СООБЩЕНИЙ С ИНДИКАТОРОМ "ПЕЧАТАЕТ..."
 # ============================================================
 
 async def send_chat_action(chat_id, action="typing"):
@@ -824,12 +662,12 @@ async def send_message(chat_id, text):
         print(f"❌ Ошибка отправки сообщения: {e}")
 
 # ============================================================
-# 11. ОСНОВНАЯ ЛОГИКА (WEBHOOK)
+# 10. ОСНОВНАЯ ЛОГИКА (WEBHOOK)
 # ============================================================
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    global last_search_topic, last_location
+    global last_search_topic
     
     try:
         body = await request.json()
@@ -861,18 +699,6 @@ async def webhook(request: Request):
 
         # ===== СОХРАНЕНИЕ СООБЩЕНИЯ =====
         current_message_id = save_message(user_id, "user", text)
-
-        # ===== ОПРЕДЕЛЕНИЕ МЕСТОПОЛОЖЕНИЯ ПО IP =====
-        if not last_location:
-            try:
-                ip = request.client.host
-                if ip and ip != "127.0.0.1":
-                    location = get_location_by_ip(ip)
-                    if location and location.get("city"):
-                        last_location = location
-                        print(f"📍 Определён город по IP: {location.get('city')}")
-            except Exception as e:
-                print(f"❌ Ошибка определения IP: {e}")
 
         # ===== ОБРАБОТКА КОМАНД (ИМЯ, ГОРОД) =====
         name_reply = handle_set_name(text, user_id)
@@ -910,17 +736,57 @@ async def webhook(request: Request):
             await send_message(user_id, reply)
             return JSONResponse({"ok": True})
 
-        # ===== СПЕЦИАЛЬНЫЕ ЗАПРОСЫ (ВРЕМЯ, КУРС, ПОГОДА, НОВОСТИ) =====
-        if not user_city and last_location and last_location.get("city"):
-            user_city = last_location.get("city")
-            # Сохраняем в базу
-            save_fact(user_id, "city", user_city)
-            print(f"✅ Сохранён город из IP: {user_city}")
+        # ===== ОПРЕДЕЛЕНИЕ ГОРОДА ПО IP =====
+        if not user_city:
+            try:
+                ip = request.client.host
+                if ip and ip != "127.0.0.1":
+                    location = get_location_by_ip(ip)
+                    if location and location.get("city"):
+                        user_city = location.get("city")
+                        save_fact(user_id, "city", user_city)
+                        print(f"📍 Определён город по IP: {user_city}")
+            except Exception as e:
+                print(f"❌ Ошибка определения IP: {e}")
 
-        special_reply = handle_special_queries(text, user_name, user_city, request.client.host)
-        if special_reply:
-            save_message(user_id, "assistant", special_reply)
-            await send_message(user_id, special_reply)
+        # ===== ВРЕМЯ =====
+        if any(word in lower for word in ["время", "сколько времени", "который час"]):
+            time_data = get_current_time()
+            reply = f"Сейчас **{time_data['time']}**, {time_data['date']} 😊"
+            save_message(user_id, "assistant", reply)
+            await send_message(user_id, reply)
+            return JSONResponse({"ok": True})
+
+        # ===== КУРС ВАЛЮТ =====
+        if "курс" in lower or "доллар" in lower or "евро" in lower:
+            currency = "USD" if "доллар" in lower else "EUR" if "евро" in lower else "USD"
+            rate_data = get_currency_rate(currency, "RUB")
+            if rate_data:
+                reply = f"Курс **{rate_data['from']}** к **{rate_data['to']}** — **{rate_data['rate']:.2f}** (на {rate_data['updated']}) 😊"
+            else:
+                reply = "Не удалось получить курс валют. Попробуй позже 😊"
+            save_message(user_id, "assistant", reply)
+            await send_message(user_id, reply)
+            return JSONResponse({"ok": True})
+
+        # ===== ПОГОДА =====
+        if "погода" in lower or "температура" in lower:
+            city = user_city
+            # Извлекаем город из текста, если указан
+            match = re.search(r"в\s+([А-Яа-яёЁ\-]+)", text)
+            if match:
+                city = match.group(1).capitalize()
+            
+            if city:
+                weather = get_weather(city)
+                if weather:
+                    reply = f"Погода в **{weather['city']}**: {weather['description']}, температура **{weather['temp']}°C**, ветер {weather['wind']} м/с 😊"
+                else:
+                    reply = f"Не удалось получить погоду для города {city}. Проверь название 😊"
+            else:
+                reply = "Скажи, в каком городе узнать погоду. Например: 'Погода в Белово' 😊"
+            save_message(user_id, "assistant", reply)
+            await send_message(user_id, reply)
             return JSONResponse({"ok": True})
 
         # ===== ПОИСК В ИНТЕРНЕТЕ (ЕСЛИ НУЖНО) =====
@@ -936,11 +802,7 @@ async def webhook(request: Request):
         if should_search_history(text):
             topic, time_filter = understand_query_with_time(text, last_search_topic)
             
-            garbage_topics = ["говорили", "сказал", "писал", "правильно", "вспомнил", "давай", "неправильно", "запомнил", "про", "поговорим"]
-            if topic and topic.lower() not in garbage_topics:
-                last_search_topic = topic
-            
-            if topic and len(topic) > 1 and topic.lower() not in garbage_topics:
+            if topic and len(topic) > 1:
                 reply = hybrid_search_with_web(user_id, text, current_message_id, user_name, user_city)
                 
                 if reply:
@@ -953,15 +815,13 @@ async def webhook(request: Request):
                     await send_message(user_id, reply)
                     return JSONResponse({"ok": True})
 
-        # ===== ОСНОВНОЙ ДИАЛОГ (ЕСЛИ НЕ НУЖЕН ПОИСК) =====
+        # ===== ОСНОВНОЙ ДИАЛОГ =====
         history = get_recent_history(user_id, limit=15)
-        
+
         # ===== АВТОМАТИЧЕСКИЙ ПОИСК (ЕСЛИ ТЕМЫ НЕТ В КОНТЕКСТЕ) =====
         topic, time_filter = understand_query_with_time(text, last_search_topic)
         
-        garbage_topics = ["говорили", "сказал", "писал", "правильно", "вспомнил", "давай", "неправильно", "запомнил", "про", "поговорим"]
-        
-        if topic and len(topic) > 1 and topic.lower() not in garbage_topics:
+        if topic and len(topic) > 1:
             topic_found_in_context = any(
                 topic.lower() in msg.get('content', '').lower() 
                 for msg in history
@@ -999,13 +859,11 @@ async def webhook(request: Request):
 • Используй эмодзи 😊🔥😄
 • Говори как живой человек в мессенджере
 • Используй разговорные фразы: "ага", "окей", "класс", "бро"
-• Не будь сухим или роботизированным - ты дру
+• Не будь сухим или роботизированным - ты друг
 
 📌 ПРАВИЛА ИСПОЛЬЗОВАНИЯ ИМЕНИ:
 • Используй имя ТОЛЬКО в начале диалога или при обращении
 • НЕ начинай КАЖДЫЙ ответ с имени
-• Имя уместно: при приветствии, при прощании, для привлечения внимания
-• Имя НЕ уместно: в середине каждого сообщения, в каждом ответе подряд
 
 📌 ПРАВИЛА ЗНАКОМСТВА:
 • Если пользователь ещё не представился — мягко спроси имя
@@ -1019,16 +877,8 @@ async def webhook(request: Request):
 • Всю историю помнишь, если тебя спросят
 
 🌐 О ПОИСКЕ В ИНТЕРНЕТЕ:
-• Если не нашёл в истории — ищи в интернете
-• Проверяй информацию на достоверность
-• Если результаты плохие — уточняй запрос и ищи снова
+• Если не нашёл в истории — ищи в интернете через Tavily
 • Дай краткую выжимку с указанием источника
-
-📰 СПЕЦИАЛЬНЫЕ ВОЗМОЖНОСТИ:
-• Можешь сказать точное время и дату
-• Можешь показать курс валют
-• Можешь показать погоду в любом городе
-• Можешь показать свежие новости
 
 Ты общаешься с человеком, который хочет чувствовать себя комфортно. Будь таким. 😉"""
 
