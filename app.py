@@ -15,12 +15,12 @@ load_dotenv()
 # ===== КЛЮЧИ =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/anthropic"  # ← Anthropic API
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-print("🚀 БОТ — ФАСАД, ВСЁ ДЕЛАЕТ DEEPSEEK (ВКЛЮЧАЯ ПОИСК)")
+print("🚀 БОТ — ФАСАД, DEEPSEEK С WEB SEARCH (ANTHROPIC API)")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -150,7 +150,7 @@ async def send_message(chat_id, text):
         print(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# 4. DEEPSEEK — ВСЁ В ОДНОМ РУКЕ (С ВЕБ-ПОИСКОМ)
+# 4. DEEPSEEK — С WEB SEARCH
 # ============================================================
 
 def deepseek_process(user_id, text):
@@ -170,13 +170,13 @@ def deepseek_process(user_id, text):
 
 ТВОИ ВОЗМОЖНОСТИ:
 1. Отвечать на вопросы из своих знаний
-2. Искать в истории диалога — используй [HISTORY: запрос]
-3. Искать в интернете — используй [SEARCH: запрос] (глубокий поиск)
+2. Искать в интернете через web_search (используй tools)
+3. Искать в истории диалога — используй [HISTORY: запрос]
 4. Запоминать имя — [SAVE_NAME: имя]
 5. Запоминать город — [SAVE_CITY: город]
 
 ОТВЕЧАЙ КОРОТКО (2-3 предложения), ЖИВО, С ЭМОДЗИ.
-Если нужен поиск — используй [SEARCH: ...] с максимальной глубиной.
+Если нужно найти в интернете — используй web_search.
 """
     
     messages = [{"role": "system", "content": system_prompt}]
@@ -184,22 +184,24 @@ def deepseek_process(user_id, text):
         messages.append({"role": h["role"], "content": h["content"]})
     messages.append({"role": "user", "content": text})
 
-    print(f"🧠 DeepSeek: {text[:50]}...")
-    response = deepseek.chat.completions.create(
-        model="deepseek-v4-flash",
-        messages=messages,
-        temperature=0.8,
-        max_tokens=600,
-        # ВКЛЮЧАЕМ ВЕБ-ПОИСК
-        tools=[{"type": "web_search"}],
-        tool_choice="auto"
-    )
+    print(f"🧠 DeepSeek (с web_search): {text[:50]}...")
     
-    reply = response.choices[0].message.content
+    try:
+        response = deepseek.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=messages,
+            temperature=0.8,
+            max_tokens=600,
+            tools=[{"type": "web_search"}],      # ← ВКЛЮЧАЕТ ПОИСК
+            tool_choice="auto"
+        )
+        reply = response.choices[0].message.content
+    except Exception as e:
+        print(f"❌ Ошибка DeepSeek: {e}")
+        return "😅 Не удалось обработать запрос. Попробуй ещё раз."
 
-    # --- ОБРАБОТКА КОМАНД (ЕСЛИ DeepSeek ИХ ИСПОЛЬЗУЕТ) ---
+    # --- ОБРАБОТКА КОМАНД (история, имя, город) ---
     
-    # Поиск в истории
     history_match = re.search(r'\[HISTORY:\s*(.+?)\]', reply)
     if history_match:
         query = history_match.group(1).strip()
@@ -218,14 +220,12 @@ def deepseek_process(user_id, text):
         else:
             reply = "Ничего не нашёл в истории по этому запросу 😊"
 
-    # Сохранение имени
     name_match = re.search(r'\[SAVE_NAME:\s*(.+?)\]', reply)
     if name_match:
         name = name_match.group(1).strip()
         save_fact(user_id, "name", name)
         reply = f"Запомнил! Тебя зовут **{name}** 😊"
 
-    # Сохранение города
     city_match = re.search(r'\[SAVE_CITY:\s*(.+?)\]', reply)
     if city_match:
         city = city_match.group(1).strip()
