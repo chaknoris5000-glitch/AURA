@@ -22,7 +22,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-print("🚀 БОТ — ПРЯМОЙ МОСТ К DEEPSEEK С ПОИСКОМ В ИНТЕРНЕТЕ")
+print("🚀 БОТ — ФАСАД, ВСЁ РЕШАЕТ DEEPSEEK")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -38,7 +38,7 @@ groq = Groq(api_key=GROQ_API_KEY)
 app = FastAPI()
 
 # ============================================================
-# 1. РАБОТА С БАЗОЙ (ТОЛЬКО ДЛЯ ХРАНЕНИЯ)
+# 1. РАБОТА С БАЗОЙ
 # ============================================================
 
 def save_message(user_id, role, content):
@@ -70,21 +70,18 @@ def get_recent_history(user_id, limit=20):
         print(f"❌ Ошибка загрузки: {e}")
         return []
 
-def search_history(user_id, query, exclude_id=None):
+def search_history(user_id, query):
     if not supabase:
         return []
     try:
         res = supabase.table("history")\
-            .select("role, content, created_at, id")\
+            .select("role, content, created_at")\
             .eq("user_id", user_id)\
             .ilike("content", f"%{query}%")\
             .order("created_at", desc=True)\
-            .limit(30)\
+            .limit(10)\
             .execute()
-        results = res.data if res.data else []
-        if exclude_id:
-            results = [r for r in results if r.get('id') != exclude_id]
-        return results[:10]
+        return res.data if res.data else []
     except Exception as e:
         print(f"❌ Ошибка поиска: {e}")
         return []
@@ -119,11 +116,8 @@ def get_fact(user_id, key):
 
 def search_web(query, max_results=5):
     if not TAVILY_API_KEY:
-        print("❌ Tavily API ключ не найден")
         return None
-    
-    print(f"🌐 Бот ищет в интернете: '{query}'")
-    
+    print(f"🌐 Поиск: '{query}'")
     try:
         url = "https://api.tavily.com/search"
         payload = {
@@ -134,9 +128,7 @@ def search_web(query, max_results=5):
             "include_raw_content": False,
             "search_depth": "basic"
         }
-        
         response = requests.post(url, json=payload, timeout=30)
-        
         if response.status_code == 200:
             data = response.json()
             return {
@@ -149,58 +141,50 @@ def search_web(query, max_results=5):
     return None
 
 # ============================================================
-# 3. DEEPSEEK — МОЗГ (РЕШАЕТ И ОТВЕЧАЕТ)
+# 3. DEEPSEEK — ЕДИНЫЙ ОБРАБОТЧИК
 # ============================================================
 
-def get_deepseek_response(user_id, text, user_name=None):
-    """
-    Бот отправляет запрос DeepSeek, DeepSeek решает, что делать.
-    Если нужен поиск — бот ищет и отправляет результат обратно DeepSeek.
-    """
-    
-    # Загружаем историю
+def deepseek_process(user_id, text):
+    # Загружаем контекст
     history = get_recent_history(user_id, limit=20)
+    user_name = get_fact(user_id, "name")
+    
     history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
 
-    # Системный промт с инструкцией использовать поиск
-    system_prompt = f"""Ты — AURA, живой собеседник и друг.
-
-📌 ТВОЙ СТИЛЬ ОБЩЕНИЯ:
-• Отвечай коротко и по делу (2-3 предложения)
-• Используй эмодзи 😊🔥😄
-• Говори как живой человек в мессенджере
-• Используй разговорные фразы: "ага", "окей", "класс", "бро"
-• Не будь сухим или роботизированным - ты друг
-
-📌 ПРАВИЛА ИСПОЛЬЗОВАНИЯ ИМЕНИ:
-• Используй имя ТОЛЬКО в начале диалога или при обращении
-• НЕ начинай КАЖДЫЙ ответ с имени
-
-📌 О ПАМЯТИ:
-• Используй последние 20 сообщений для контекста
-• Всю историю помнишь, если тебя спросят
-
-📌 О ПОИСКЕ В ИНТЕРНЕТЕ:
-• Если тебе нужно найти информацию в интернете — используй Tavily
-• Для этого напиши в ответе: [SEARCH: запрос]
-• Бот выполнит поиск и вернёт результат
-• После получения результата — сформулируй ответ пользователю
-• Дай краткую выжимку с указанием источника
+    # Единый системный промт — DeepSeek сам решает что делать
+    system_prompt = f"""Ты — AURA, живой собеседник.
 
 Пользователь: {user_name or "Незнакомец"}
 
-История диалога:
+История:
 {history_text}
+
+ТВОИ ВОЗМОЖНОСТИ:
+1. Отвечать на вопросы из своих знаний
+2. Искать в истории диалога (ключевые слова)
+3. Искать в интернете через Tavily
+
+ДЛЯ ПОИСКА В ИНТЕРНЕТЕ используй команду:
+[SEARCH: запрос]
+
+ДЛЯ ПОИСКА В ИСТОРИИ используй команду:
+[HISTORY: запрос]
+
+ДЛЯ ЗАПОМИНАНИЯ ИМЕНИ используй команду:
+[SAVE_NAME: имя]
+
+ДЛЯ ЗАПОМИНАНИЯ ГОРОДА используй команду:
+[SAVE_CITY: город]
+
+ОТВЕЧАЙ КОРОТКО (2-3 предложения), ЖИВО, С ЭМОДЗИ.
 """
     
-    # Формируем сообщения
     messages = [{"role": "system", "content": system_prompt}]
     for h in history:
         messages.append({"role": h["role"], "content": h["content"]})
     messages.append({"role": "user", "content": text})
 
-    # Первый запрос к DeepSeek
-    print(f"🧠 Отправляю DeepSeek: {text[:50]}...")
+    print(f"🧠 DeepSeek: {text[:50]}...")
     response = deepseek.chat.completions.create(
         model="deepseek-v4-flash",
         messages=messages,
@@ -209,46 +193,61 @@ def get_deepseek_response(user_id, text, user_name=None):
     )
     reply = response.choices[0].message.content
 
-    # Проверяем, хочет ли DeepSeek выполнить поиск
+    # --- ОБРАБОТКА КОМАНД ---
+    
+    # Поиск в интернете
     search_match = re.search(r'\[SEARCH:\s*(.+?)\]', reply)
     if search_match:
-        search_query = search_match.group(1).strip()
-        print(f"🔍 DeepSeek запросил поиск: '{search_query}'")
-        
-        # Бот ищет в интернете
-        search_data = search_web(search_query)
-        
-        if search_data and search_data.get("results"):
-            # Формируем результат для DeepSeek
+        query = search_match.group(1).strip()
+        print(f"🔍 DeepSeek → поиск: '{query}'")
+        data = search_web(query)
+        if data and data.get("results"):
             results_text = ""
-            for i, r in enumerate(search_data.get("results", [])[:5], 1):
-                title = r.get("title", "Без названия")
-                content = r.get("content", "")[:400]
-                url = r.get("url", "")
-                results_text += f"\n{i}. {title}\n   {content}\n   Источник: {url}\n"
-            
-            # Отправляем результат DeepSeek
-            search_prompt = f"""
-Ты запросил поиск в интернете по запросу: "{search_query}"
-
-Вот что нашлось:
-{results_text}
-
-Ответь пользователю КОРОТКО (2-3 предложения) как в обычном разговоре.
-Используй найденную информацию.
-Дай ссылку на источник.
-Используй эмодзи 😊🔥
-"""
-            
-            search_response = deepseek.chat.completions.create(
+            for r in data.get("results", [])[:5]:
+                results_text += f"\n- {r.get('title')}: {r.get('content')[:300]}...\n  Источник: {r.get('url')}"
+            prompt = f"Вот что нашлось по запросу '{query}':\n{results_text}\n\nОтветь пользователю коротко, с эмодзи, дай ссылку."
+            final = deepseek.chat.completions.create(
                 model="deepseek-v4-flash",
-                messages=[{"role": "user", "content": search_prompt}],
+                messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
-                max_tokens=250
+                max_tokens=300
             )
-            reply = search_response.choices[0].message.content
+            reply = final.choices[0].message.content
         else:
-            reply = "Не удалось найти информацию в интернете по этому запросу. Попробуй переформулировать вопрос 😊"
+            reply = "Не удалось найти информацию в интернете. Попробуй переформулировать запрос 😊"
+
+    # Поиск в истории
+    history_match = re.search(r'\[HISTORY:\s*(.+?)\]', reply)
+    if history_match:
+        query = history_match.group(1).strip()
+        print(f"📚 DeepSeek → история: '{query}'")
+        results = search_history(user_id, query)
+        if results:
+            text_results = "\n".join([f"{r['role']}: {r['content']}" for r in results[:5]])
+            prompt = f"Вот что нашлось в истории по запросу '{query}':\n{text_results}\n\nОтветь пользователю коротко."
+            final = deepseek.chat.completions.create(
+                model="deepseek-v4-flash",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=300
+            )
+            reply = final.choices[0].message.content
+        else:
+            reply = "Ничего не нашёл в истории по этому запросу 😊"
+
+    # Сохранение имени
+    name_match = re.search(r'\[SAVE_NAME:\s*(.+?)\]', reply)
+    if name_match:
+        name = name_match.group(1).strip()
+        save_fact(user_id, "name", name)
+        reply = f"Запомнил! Тебя зовут **{name}** 😊"
+
+    # Сохранение города
+    city_match = re.search(r'\[SAVE_CITY:\s*(.+?)\]', reply)
+    if city_match:
+        city = city_match.group(1).strip()
+        save_fact(user_id, "city", city)
+        reply = f"Запомнил! Ты из **{city}** 😊"
 
     return reply
 
@@ -308,7 +307,6 @@ async def webhook(request: Request):
         user_id = str(msg["from"]["id"])
         text = None
 
-        # Голос
         if "voice" in msg:
             file_id = msg["voice"]["file_id"]
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
@@ -326,16 +324,10 @@ async def webhook(request: Request):
         if not text:
             return JSONResponse({"ok": True})
 
-        # Сохраняем сообщение
         save_message(user_id, "user", text)
 
-        # Получаем имя пользователя
-        user_name = get_fact(user_id, "name")
+        reply = deepseek_process(user_id, text)
 
-        # Получаем ответ от DeepSeek
-        reply = get_deepseek_response(user_id, text, user_name)
-
-        # Сохраняем и отправляем ответ
         save_message(user_id, "assistant", reply)
         await send_message(user_id, reply)
 
