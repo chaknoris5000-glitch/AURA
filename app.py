@@ -1,7 +1,7 @@
 import os
 import re
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from supabase import create_client
@@ -21,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-print("🚀 БОТ — ФАСАД, ПОИСК ЧЕРЕЗ TAVILY + ВРЕМЯ")
+print("🚀 БОТ — ФАСАД, ПОИСК ЧЕРЕЗ TAVILY + ВРЕМЯ С ЧАСОВЫМ ПОЯСОМ")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -110,12 +110,39 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ВРЕМЯ (НОВАЯ ФУНКЦИЯ)
+# 2. ВРЕМЯ С ЧАСОВЫМ ПОЯСОМ
 # ============================================================
 
-def get_current_time():
-    now = datetime.now()
-    return f"Сейчас **{now.strftime('%H:%M')}**, {now.strftime('%d.%m.%Y')} 😊"
+def get_current_time(city=None):
+    # Часовые пояса для городов (смещение от UTC)
+    timezones = {
+        "москва": 3,
+        "белово": 7,
+        "инской": 7,
+        "новосибирск": 7,
+        "красноярск": 7,
+        "иркутск": 8,
+        "владивосток": 10,
+        "кемерово": 7,
+        "барнаул": 7,
+        "омск": 6,
+        "екатеринбург": 5,
+        "казань": 3,
+        "санкт-петербург": 3,
+        "калининград": 2,
+        "ростов-на-дону": 3
+    }
+    
+    if city:
+        city_lower = city.lower()
+        offset = timezones.get(city_lower, 3)
+        # Если город не найден — используем Москву
+    else:
+        offset = 3
+    
+    now = datetime.utcnow() + timedelta(hours=offset)
+    city_text = f" в {city}" if city else ""
+    return f"Сейчас{city_text} **{now.strftime('%H:%M')}**, {now.strftime('%d.%m.%Y')} 😊"
 
 # ============================================================
 # 3. ПОИСК В ИНТЕРНЕТЕ (TAVILY)
@@ -194,14 +221,15 @@ async def send_message(chat_id, text):
 # ============================================================
 
 def deepseek_process(user_id, text):
+    user_name = get_fact(user_id, "name")
+    user_city = get_fact(user_id, "city")
+
     # === ПРОВЕРКА НА ВРЕМЯ ===
     text_lower = text.lower()
     if any(word in text_lower for word in ["время", "сколько времени", "который час", "какое сегодня число", "какой день"]):
-        return get_current_time()
+        return get_current_time(user_city)
 
     history = get_recent_history(user_id, limit=20)
-    user_name = get_fact(user_id, "name")
-    user_city = get_fact(user_id, "city")
     
     history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
 
