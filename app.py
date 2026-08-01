@@ -21,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-print("🚀 БОТ — ФАСАД, ПОИСК ЧЕРЕЗ TAVILY + ВРЕМЯ С ЧАСОВЫМ ПОЯСОМ")
+print("🚀 БОТ — ФАСАД, DEEPSEEK + TAVILY (ФИНАЛЬНАЯ ВЕРСИЯ)")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -110,11 +110,10 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ВРЕМЯ С ЧАСОВЫМ ПОЯСОМ
+# 2. ВРЕМЯ
 # ============================================================
 
 def get_current_time(city=None):
-    # Часовые пояса для городов (смещение от UTC)
     timezones = {
         "москва": 3,
         "белово": 7,
@@ -136,7 +135,6 @@ def get_current_time(city=None):
     if city:
         city_lower = city.lower()
         offset = timezones.get(city_lower, 3)
-        # Если город не найден — используем Москву
     else:
         offset = 3
     
@@ -217,43 +215,42 @@ async def send_message(chat_id, text):
         print(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# 6. DEEPSEEK + TAVILY
+# 6. DEEPSEEK + TAVILY (ФИНАЛЬНЫЙ ПРОМТ)
 # ============================================================
 
 def deepseek_process(user_id, text):
     user_name = get_fact(user_id, "name")
     user_city = get_fact(user_id, "city")
 
-    # === ПРОВЕРКА НА ВРЕМЯ ===
+    # === ВРЕМЯ ===
     text_lower = text.lower()
     if any(word in text_lower for word in ["время", "сколько времени", "который час", "какое сегодня число", "какой день"]):
         return get_current_time(user_city)
 
     history = get_recent_history(user_id, limit=20)
-    
     history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
 
-    system_prompt = f"""Ты — AURA, живой собеседник.
+    # === ФИНАЛЬНЫЙ СИСТЕМНЫЙ ПРОМТ ===
+    system_prompt = f"""Ты — AURA, живой собеседник и друг.
 
 Пользователь: {user_name or "Незнакомец"}
 Город: {user_city or "Неизвестен"}
 
-История:
+История диалога:
 {history_text}
 
-ЕСЛИ НУЖНА ИНФОРМАЦИЯ ИЗ ИНТЕРНЕТА — напиши команду:
-[SEARCH: запрос]
+ТВОИ ВОЗМОЖНОСТИ:
+1. Отвечать на вопросы из своих знаний
+2. Искать в интернете — команда [SEARCH: запрос]
+3. Искать в истории диалога — команда [HISTORY: запрос]
+4. Запоминать имя — команда [SAVE_NAME: имя]
+5. Запоминать город — команда [SAVE_CITY: город]
 
-ЕСЛИ НУЖНО НАЙТИ В ИСТОРИИ — напиши команду:
-[HISTORY: запрос]
-
-ДЛЯ ЗАПОМИНАНИЯ ИМЕНИ:
-[SAVE_NAME: имя]
-
-ДЛЯ ЗАПОМИНАНИЯ ГОРОДА:
-[SAVE_CITY: город]
-
-ОТВЕЧАЙ КОРОТКО (2-3 предложения), ЖИВО, С ЭМОДЗИ.
+ПРАВИЛА:
+- Отвечай коротко (2-3 предложения)
+- Используй эмодзи 😊🔥😄
+- Всегда давай осмысленный ответ, НЕ пиши "..."
+- Если нужна информация из интернета — используй [SEARCH: ...]
 """
     
     messages = [{"role": "system", "content": system_prompt}]
@@ -270,8 +267,9 @@ def deepseek_process(user_id, text):
     )
     reply = response.choices[0].message.content
 
-    # --- ОБРАБОТКА КОМАНД ---
+    # === ОБРАБОТКА КОМАНД ===
     
+    # Поиск в интернете
     search_match = re.search(r'\[SEARCH:\s*(.+?)\]', reply)
     if search_match:
         query = search_match.group(1).strip()
@@ -281,7 +279,7 @@ def deepseek_process(user_id, text):
             results_text = ""
             for r in data.get("results", [])[:5]:
                 results_text += f"\n- {r.get('title')}: {r.get('content')[:300]}...\n  Источник: {r.get('url')}"
-            prompt = f"Вот что нашлось по запросу '{query}':\n{results_text}\n\nОтветь пользователю коротко, с эмодзи, дай ссылку."
+            prompt = f"Вот что нашлось по запросу '{query}':\n{results_text}\n\nОтветь пользователю коротко, с эмодзи, дай ссылку на источник."
             final = deepseek.chat.completions.create(
                 model="deepseek-v4-flash",
                 messages=[{"role": "user", "content": prompt}],
@@ -292,6 +290,7 @@ def deepseek_process(user_id, text):
         else:
             reply = "Не удалось найти информацию в интернете. Попробуй переформулировать запрос 😊"
 
+    # Поиск в истории
     history_match = re.search(r'\[HISTORY:\s*(.+?)\]', reply)
     if history_match:
         query = history_match.group(1).strip()
@@ -299,7 +298,7 @@ def deepseek_process(user_id, text):
         results = search_history(user_id, query)
         if results:
             text_results = "\n".join([f"{r['role']}: {r['content']}" for r in results[:5]])
-            prompt = f"Вот что нашлось в истории по запросу '{query}':\n{text_results}\n\nОтветь пользователю коротко."
+            prompt = f"Вот что нашлось в истории по запросу '{query}':\n{text_results}\n\nОтветь пользователю коротко, с эмодзи."
             final = deepseek.chat.completions.create(
                 model="deepseek-v4-flash",
                 messages=[{"role": "user", "content": prompt}],
@@ -310,12 +309,14 @@ def deepseek_process(user_id, text):
         else:
             reply = "Ничего не нашёл в истории по этому запросу 😊"
 
+    # Сохранение имени
     name_match = re.search(r'\[SAVE_NAME:\s*(.+?)\]', reply)
     if name_match:
         name = name_match.group(1).strip()
         save_fact(user_id, "name", name)
         reply = f"Запомнил! Тебя зовут **{name}** 😊"
 
+    # Сохранение города
     city_match = re.search(r'\[SAVE_CITY:\s*(.+?)\]', reply)
     if city_match:
         city = city_match.group(1).strip()
