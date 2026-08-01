@@ -21,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # ===== ПОДКЛЮЧЕНИЯ =====
-print("🚀 БОТ ЗАПУЩЕН. ЧИСТОЕ ИЗВЛЕЧЕНИЕ ИМЕНИ И ГОРОДА")
+print("🚀 БОТ ЗАПУЩЕН. ЧИСТОЕ ИЗВЛЕЧЕНИЕ ИМЕНИ (ФИНАЛ)")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -166,25 +166,24 @@ def extract_name(text):
     НЕ сохраняет случайные слова!
     """
     # 1. "Меня зовут Вадим"
-    match = re.search(r"меня зовут\s*([А-Яа-яёЁ\-]+)", text, re.I)
+    match = re.search(r"меня зовут\s+([А-Яа-яёЁ\-]+)", text, re.I)
     if match:
         return match.group(1).capitalize()
     
-    # 2. "зовут Вадим"
-    match = re.search(r"зовут\s*([А-Яа-яёЁ\-]+)", text, re.I)
+    # 2. "зовут Вадим" — ТОЛЬКО если есть слово после!
+    match = re.search(r"зовут\s+([А-Яа-яёЁ\-]+)", text, re.I)
     if match:
         return match.group(1).capitalize()
     
     # 3. "Моё имя Вадим"
-    match = re.search(r"моё имя\s*([А-Яа-яёЁ\-]+)", text, re.I)
+    match = re.search(r"моё имя\s+([А-Яа-яёЁ\-]+)", text, re.I)
     if match:
         return match.group(1).capitalize()
     
-    # 4. "Я Вадим" — с проверкой, что это имя
-    match = re.search(r"я\s*([А-Яа-яёЁ\-]+)", text, re.I)
+    # 4. "Я Вадим" — ТОЛЬКО если есть слово после!
+    match = re.search(r"я\s+([А-Яа-яёЁ\-]+)", text, re.I)
     if match:
         name = match.group(1).capitalize()
-        # Проверяем, что это имя, а не служебное слово
         if len(name) > 1 and name not in ["Я", "Ты", "Он", "Она", "Мы", "Вы", "Они"]:
             return name
     
@@ -197,7 +196,6 @@ def extract_city(text):
     """
     text_lower = text.lower()
     
-    # Только явные маркеры города
     city_markers = [
         "живу в", "я из", "из города", "в городе", "посёлок", "город", 
         "живу в посёлке", "я из города", "родился в", "живу в городе"
@@ -206,7 +204,7 @@ def extract_city(text):
     if not any(marker in text_lower for marker in city_markers):
         return None
     
-    match = re.search(r"(?:из|в|живу в|живу)\s*([А-Яа-яёЁ\-]+)", text, re.I)
+    match = re.search(r"(?:из|в|живу в|живу)\s+([А-Яа-яёЁ\-]+)", text, re.I)
     if match:
         city = match.group(1).capitalize()
         if city.lower() in ["инской", "инского", "инском"]:
@@ -712,42 +710,4 @@ async def webhook(request: Request):
 
 Ты общаешься с человеком, который хочет чувствовать себя комфортно. Будь таким. 😉"""
 
-        if user_context:
-            system_prompt += "\n\n" + "\n".join(user_context)
-
-        messages = [{"role": "system", "content": system_prompt}]
-        
-        for h in history:
-            messages.append({"role": h["role"], "content": h["content"]})
-        messages.append({"role": "user", "content": text})
-
-        try:
-            print(f"🤖 DeepSeek (flash): основной диалог, {len(messages)} сообщений")
-            response = deepseek.chat.completions.create(
-                model="deepseek-v4-flash",
-                messages=messages,
-                temperature=0.8,
-                max_tokens=600
-            )
-            reply = response.choices[0].message.content
-
-            save_message(user_id, "assistant", reply)
-            await send_message(user_id, reply)
-
-        except Exception as e:
-            print(f"❌ Ошибка DeepSeek: {e}")
-            await send_message(user_id, "😅 Что-то пошло не так. Попробуй ещё раз.")
-
-        return JSONResponse({"ok": True})
-
-    except Exception as e:
-        print(f"❌ Ошибка вебхука: {e}")
-        return JSONResponse({"ok": False, "error": str(e)})
-
-@app.get("/")
-async def root():
-    return {"status": "AURA is alive"}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        if
