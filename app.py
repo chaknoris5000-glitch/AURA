@@ -15,12 +15,12 @@ load_dotenv()
 # ===== КЛЮЧИ =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")  # ← ОБЫЧНЫЙ ЭНДПОИНТ
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-print("🚀 БОТ — ФАСАД, DEEPSEEK С WEB SEARCH (extra_body)")
+print("🚀 БОТ — ФАСАД, DEEPSEEK C WEB SEARCH (ЧЕРЕЗ МОДЕЛЬ)")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -34,6 +34,10 @@ deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 groq = Groq(api_key=GROQ_API_KEY)
 
 app = FastAPI()
+
+# ============================================================
+# 1. БАЗА
+# ============================================================
 
 def save_message(user_id, role, content):
     if not supabase:
@@ -104,6 +108,10 @@ def get_fact(user_id, key):
     except:
         return None
 
+# ============================================================
+# 2. ГОЛОС
+# ============================================================
+
 def transcribe_audio(audio_url):
     try:
         resp = requests.get(audio_url, timeout=30)
@@ -122,6 +130,10 @@ def transcribe_audio(audio_url):
         print(f"❌ Ошибка распознавания: {e}")
         return None
 
+# ============================================================
+# 3. ОТПРАВКА
+# ============================================================
+
 async def send_chat_action(chat_id):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction"
     try:
@@ -136,6 +148,10 @@ async def send_message(chat_id, text):
         requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
     except Exception as e:
         print(f"❌ Ошибка отправки: {e}")
+
+# ============================================================
+# 4. DEEPSEEK — WEB SEARCH
+# ============================================================
 
 def deepseek_process(user_id, text):
     history = get_recent_history(user_id, limit=20)
@@ -152,12 +168,7 @@ def deepseek_process(user_id, text):
 История диалога:
 {history_text}
 
-ТВОИ ВОЗМОЖНОСТИ:
-1. Отвечать на вопросы из своих знаний
-2. Искать в интернете через web_search
-3. Искать в истории диалога — используй [HISTORY: запрос]
-4. Запоминать имя — [SAVE_NAME: имя]
-5. Запоминать город — [SAVE_CITY: город]
+ТЫ УМЕЕШЬ ИСКАТЬ В ИНТЕРНЕТЕ — ИСПОЛЬЗУЙ ЭТО, КОГДА НУЖНА АКТУАЛЬНАЯ ИНФОРМАЦИЯ.
 
 ОТВЕЧАЙ КОРОТКО (2-3 предложения), ЖИВО, С ЭМОДЗИ.
 """
@@ -171,22 +182,20 @@ def deepseek_process(user_id, text):
     
     try:
         response = deepseek.chat.completions.create(
-            model="deepseek-v4-flash",
+            model="deepseek-v4-flash-web-search",  # ← МОДЕЛЬ С ПОИСКОМ
             messages=messages,
             temperature=0.8,
-            max_tokens=600,
-            extra_body={"enable_web_search": True}  # ← ВКЛЮЧАЕТ ПОИСК!
+            max_tokens=600
         )
         reply = response.choices[0].message.content
     except Exception as e:
         print(f"❌ Ошибка DeepSeek: {e}")
         return "😅 Не удалось обработать запрос. Попробуй ещё раз."
 
-    # === ОБРАБОТКА КОМАНД ===
+    # === ОБРАБОТКА КОМАНД ДЛЯ ИСТОРИИ ===
     history_match = re.search(r'\[HISTORY:\s*(.+?)\]', reply)
     if history_match:
         query = history_match.group(1).strip()
-        print(f"📚 DeepSeek → история: '{query}'")
         results = search_history(user_id, query)
         if results:
             text_results = "\n".join([f"{r['role']}: {r['content']}" for r in results[:5]])
@@ -214,6 +223,10 @@ def deepseek_process(user_id, text):
         reply = f"Запомнил! Ты из **{city}** 😊"
 
     return reply
+
+# ============================================================
+# 5. WEBHOOK
+# ============================================================
 
 @app.post("/webhook")
 async def webhook(request: Request):
