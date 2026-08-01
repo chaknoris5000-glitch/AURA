@@ -21,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # ===== ПОДКЛЮЧЕНИЯ =====
-print("🚀 БОТ ЗАПУЩЕН. ЧИСТОЕ ИЗВЛЕЧЕНИЕ ИМЕНИ (ФИНАЛ)")
+print("🚀 БОТ ЗАПУЩЕН. ФИНАЛЬНАЯ ВЕРСИЯ (ПРОВЕРКА ПАДЕЖЕЙ)")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -158,42 +158,76 @@ def get_fact(user_id, key):
     except:
         return None
 
-# ===== ИЗВЛЕЧЕНИЕ ФАКТОВ (ЧИСТОЕ, БЕЗ МУСОРА) =====
+# ===== ИЗВЛЕЧЕНИЕ ФАКТОВ (С ПРОВЕРКОЙ ПАДЕЖЕЙ) =====
+
+def is_valid_name(word):
+    """Проверяет, что слово похоже на имя в именительном падеже"""
+    if not word or len(word) < 2:
+        return False
+    
+    # Предлоги и наречия
+    prepositions = ["На", "В", "За", "Под", "Над", "От", "К", "У", "О", "Об", 
+                    "Через", "Между", "С", "Из", "Без", "Для", "По", "А", "И"]
+    adverbs = ["Домой", "Вчера", "Сегодня", "Завтра", "Утром", "Вечером", "Днём", "Ночью",
+               "Быстро", "Медленно", "Хорошо", "Плохо", "Громко", "Тихо", "Поздно", "Рано"]
+    
+    if word in prepositions or word in adverbs:
+        return False
+    
+    # Имена обычно начинаются с заглавной
+    if not word[0].isupper():
+        return False
+    
+    # Проверяем окончания (именительный падеж)
+    last_char = word[-1]
+    # Женские имена: а, я
+    # Мужские имена: й, н, л, р, м, д, т, или гласная
+    male_endings = ['й', 'н', 'л', 'р', 'м', 'д', 'т']
+    female_endings = ['а', 'я']
+    
+    if last_char in male_endings + female_endings:
+        return True
+    
+    return False
 
 def extract_name(text):
-    """
-    Извлекает имя ТОЛЬКО из явных фраз.
-    НЕ сохраняет случайные слова!
-    """
+    """Извлекает имя ТОЛЬКО в именительном падеже"""
+    
     # 1. "Меня зовут Вадим"
     match = re.search(r"меня зовут\s+([А-Яа-яёЁ\-]+)", text, re.I)
     if match:
-        return match.group(1).capitalize()
+        name = match.group(1).capitalize()
+        if is_valid_name(name):
+            return name
+        return None
     
-    # 2. "зовут Вадим" — ТОЛЬКО если есть слово после!
+    # 2. "зовут Вадим"
     match = re.search(r"зовут\s+([А-Яа-яёЁ\-]+)", text, re.I)
     if match:
-        return match.group(1).capitalize()
+        name = match.group(1).capitalize()
+        if is_valid_name(name):
+            return name
+        return None
     
     # 3. "Моё имя Вадим"
     match = re.search(r"моё имя\s+([А-Яа-яёЁ\-]+)", text, re.I)
     if match:
-        return match.group(1).capitalize()
+        name = match.group(1).capitalize()
+        if is_valid_name(name):
+            return name
+        return None
     
-    # 4. "Я Вадим" — ТОЛЬКО если есть слово после!
+    # 4. "Я Вадим"
     match = re.search(r"я\s+([А-Яа-яёЁ\-]+)", text, re.I)
     if match:
         name = match.group(1).capitalize()
-        if len(name) > 1 and name not in ["Я", "Ты", "Он", "Она", "Мы", "Вы", "Они"]:
+        if is_valid_name(name):
             return name
     
     return None
 
 def extract_city(text):
-    """
-    Извлекает город ТОЛЬКО с явными маркерами.
-    НЕ сохраняет случайные слова!
-    """
+    """Извлекает город ТОЛЬКО с явными маркерами"""
     text_lower = text.lower()
     
     city_markers = [
@@ -404,16 +438,18 @@ def should_search_history(text):
         "работаю", "работа", "кем работаю", "где работаю", "моя работа",
         "кто я", "назови моё имя", "ты помнишь моё имя",
         "откуда я", "в каком городе", "где я живу",
-        "месяц", "неделю", "вчера", "сегодня", "год"
+        "месяц", "неделю", "вчера", "сегодня", "год",
+        "найди", "покажи", "где находится", "что есть"
     ]
     return any(trigger in text_lower for trigger in triggers)
 
 # ===== ФОРМАТИРОВАНИЕ ОТВЕТА =====
 
-def format_results_to_human(results, original_query, search_word, time_filter, user_name=None):
+def format_results_to_human(results, original_query, search_word, time_filter, user_name=None, user_city=None):
     if not results:
         time_text = f" {time_filter}" if time_filter else ""
-        return f"Что-то я подзабыл, что мы говорили про {search_word}{time_text}. Может, напомнишь? 😊"
+        city_text = f" в {user_city}" if user_city else ""
+        return f"Что-то я подзабыл, что мы говорили про {search_word}{time_text}{city_text}. Может, напомнишь? 😊"
     
     messages = []
     for r in results[:5]:
@@ -470,19 +506,25 @@ def format_results_to_human(results, original_query, search_word, time_filter, u
 
 # ===== ГИБРИДНЫЙ ПОИСК С ВРЕМЕНЕМ =====
 
-def hybrid_search_with_time(user_id, query, exclude_id=None, user_name=None):
+def hybrid_search_with_time(user_id, query, exclude_id=None, user_name=None, user_city=None):
     topic, time_filter = understand_query_with_time(query, last_search_topic)
     
     if not topic or len(topic) < 2:
         return None
     
-    print(f"🔍 Тема: '{topic}', Время: {time_filter if time_filter else 'всё время'}")
+    # Если есть город — добавляем его к запросу для поиска
+    search_topic = topic
+    if user_city:
+        search_topic = f"{topic} {user_city}"
+        print(f"🔍 Автоматически добавляю город: '{user_city}' к поиску")
     
-    results = search_history_with_time(user_id, topic, time_filter, exclude_id)
+    print(f"🔍 Тема: '{search_topic}', Время: {time_filter if time_filter else 'всё время'}")
+    
+    results = search_history_with_time(user_id, search_topic, time_filter, exclude_id)
     
     if results:
         print(f"✅ Бот нашёл: {len(results)} результатов")
-        return format_results_to_human(results, query, topic, time_filter, user_name)
+        return format_results_to_human(results, query, topic, time_filter, user_name, user_city)
     
     print(f"🔍 Бот не нашёл, пробую DeepSeek...")
     all_history = get_all_history(user_id, limit=1000)
@@ -499,6 +541,7 @@ def hybrid_search_with_time(user_id, query, exclude_id=None, user_name=None):
     prompt = f"""
     Найди в истории сообщения пользователя, которые относятся к теме "{topic}".
     {f'Особенно за период: {time_filter}' if time_filter else ''}
+    {f'И особенно в городе: {user_city}' if user_city else ''}
     
     История пользователя:
     {history_text}
@@ -583,7 +626,7 @@ async def webhook(request: Request):
 
         current_message_id = save_message(user_id, "user", text)
 
-        # ===== ИЗВЛЕЧЕНИЕ ФАКТОВ (ТОЛЬКО ЯВНЫЕ ФРАЗЫ) =====
+        # ===== ИЗВЛЕЧЕНИЕ ФАКТОВ (С ПРОВЕРКОЙ ПАДЕЖЕЙ) =====
         name = extract_name(text)
         if name:
             save_fact(user_id, "name", name)
@@ -633,7 +676,7 @@ async def webhook(request: Request):
                 last_search_topic = topic
             
             if topic and len(topic) > 1 and topic.lower() not in garbage_topics:
-                reply = hybrid_search_with_time(user_id, text, current_message_id, user_name)
+                reply = hybrid_search_with_time(user_id, text, current_message_id, user_name, user_city)
                 
                 if reply:
                     save_message(user_id, "assistant", reply)
@@ -661,7 +704,7 @@ async def webhook(request: Request):
             
             if not topic_found_in_context:
                 print(f"🔍 АВТОПОИСК: темы '{topic}' нет в контексте, ищу в Supabase...")
-                reply = hybrid_search_with_time(user_id, text, current_message_id, user_name)
+                reply = hybrid_search_with_time(user_id, text, current_message_id, user_name, user_city)
                 if reply:
                     print(f"✅ АВТОПОИСК: нашёл ответ в Supabase!")
                     save_message(user_id, "assistant", reply)
@@ -706,6 +749,7 @@ async def webhook(request: Request):
 • Используй последние 15 сообщений для контекста
 • Если темы нет в контексте — автоматически ищи в Supabase
 • Понимай время: "месяц назад", "вчера", "неделю назад"
+• Если знаешь город пользователя — используй его при поиске
 • Всю историю помнишь, если тебя спросят
 
 Ты общаешься с человеком, который хочет чувствовать себя комфортно. Будь таким. 😉"""
