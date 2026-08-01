@@ -1,7 +1,6 @@
 import os
 import re
 import tempfile
-import json
 from datetime import datetime
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -20,9 +19,8 @@ DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-print("🚀 БОТ — ФАСАД, ВСЁ РЕШАЕТ DEEPSEEK")
+print("🚀 БОТ — ФАСАД, ВСЁ ДЕЛАЕТ DEEPSEEK (ВКЛЮЧАЯ ПОИСК)")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -111,72 +109,74 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ПОИСК В ИНТЕРНЕТЕ (TAVILY)
+# 2. ГОЛОС (GROQ)
 # ============================================================
 
-def search_web(query, max_results=5):
-    if not TAVILY_API_KEY:
-        return None
-    print(f"🌐 Поиск: '{query}'")
+def transcribe_audio(audio_url):
     try:
-        url = "https://api.tavily.com/search"
-        payload = {
-            "api_key": TAVILY_API_KEY,
-            "query": query,
-            "max_results": max_results,
-            "include_answer": True,
-            "include_raw_content": False,
-            "search_depth": "basic"
-        }
-        response = requests.post(url, json=payload, timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            return {
-                "answer": data.get("answer", ""),
-                "results": data.get("results", []),
-                "query": query
-            }
+        resp = requests.get(audio_url, timeout=30)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp:
+            tmp.write(resp.content)
+            tmp_path = tmp.name
+        with open(tmp_path, "rb") as f:
+            result = groq.audio.transcriptions.create(
+                file=(tmp_path, f.read()),
+                model="whisper-large-v3-turbo",
+                language="ru"
+            )
+        os.unlink(tmp_path)
+        return result.text
     except Exception as e:
-        print(f"❌ Ошибка поиска: {e}")
-    return None
+        print(f"❌ Ошибка распознавания: {e}")
+        return None
 
 # ============================================================
-# 3. DEEPSEEK — ЕДИНЫЙ ОБРАБОТЧИК
+# 3. ОТПРАВКА
+# ============================================================
+
+async def send_chat_action(chat_id):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction"
+    try:
+        requests.post(url, json={"chat_id": chat_id, "action": "typing"})
+    except:
+        pass
+
+async def send_message(chat_id, text):
+    await send_chat_action(chat_id)
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
+    except Exception as e:
+        print(f"❌ Ошибка отправки: {e}")
+
+# ============================================================
+# 4. DEEPSEEK — ВСЁ В ОДНОМ РУКЕ (С ВЕБ-ПОИСКОМ)
 # ============================================================
 
 def deepseek_process(user_id, text):
-    # Загружаем контекст
     history = get_recent_history(user_id, limit=20)
     user_name = get_fact(user_id, "name")
+    user_city = get_fact(user_id, "city")
     
     history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
 
-    # Единый системный промт — DeepSeek сам решает что делать
-    system_prompt = f"""Ты — AURA, живой собеседник.
+    system_prompt = f"""Ты — AURA, живой собеседник и друг.
 
 Пользователь: {user_name or "Незнакомец"}
+Город: {user_city or "Неизвестен"}
 
-История:
+История диалога:
 {history_text}
 
 ТВОИ ВОЗМОЖНОСТИ:
 1. Отвечать на вопросы из своих знаний
-2. Искать в истории диалога (ключевые слова)
-3. Искать в интернете через Tavily
-
-ДЛЯ ПОИСКА В ИНТЕРНЕТЕ используй команду:
-[SEARCH: запрос]
-
-ДЛЯ ПОИСКА В ИСТОРИИ используй команду:
-[HISTORY: запрос]
-
-ДЛЯ ЗАПОМИНАНИЯ ИМЕНИ используй команду:
-[SAVE_NAME: имя]
-
-ДЛЯ ЗАПОМИНАНИЯ ГОРОДА используй команду:
-[SAVE_CITY: город]
+2. Искать в истории диалога — используй [HISTORY: запрос]
+3. Искать в интернете — используй [SEARCH: запрос] (глубокий поиск)
+4. Запоминать имя — [SAVE_NAME: имя]
+5. Запоминать город — [SAVE_CITY: город]
 
 ОТВЕЧАЙ КОРОТКО (2-3 предложения), ЖИВО, С ЭМОДЗИ.
+Если нужен поиск — используй [SEARCH: ...] с максимальной глубиной.
 """
     
     messages = [{"role": "system", "content": system_prompt}]
@@ -189,33 +189,16 @@ def deepseek_process(user_id, text):
         model="deepseek-v4-flash",
         messages=messages,
         temperature=0.8,
-        max_tokens=600
+        max_tokens=600,
+        # ВКЛЮЧАЕМ ВЕБ-ПОИСК
+        tools=[{"type": "web_search"}],
+        tool_choice="auto"
     )
+    
     reply = response.choices[0].message.content
 
-    # --- ОБРАБОТКА КОМАНД ---
+    # --- ОБРАБОТКА КОМАНД (ЕСЛИ DeepSeek ИХ ИСПОЛЬЗУЕТ) ---
     
-    # Поиск в интернете
-    search_match = re.search(r'\[SEARCH:\s*(.+?)\]', reply)
-    if search_match:
-        query = search_match.group(1).strip()
-        print(f"🔍 DeepSeek → поиск: '{query}'")
-        data = search_web(query)
-        if data and data.get("results"):
-            results_text = ""
-            for r in data.get("results", [])[:5]:
-                results_text += f"\n- {r.get('title')}: {r.get('content')[:300]}...\n  Источник: {r.get('url')}"
-            prompt = f"Вот что нашлось по запросу '{query}':\n{results_text}\n\nОтветь пользователю коротко, с эмодзи, дай ссылку."
-            final = deepseek.chat.completions.create(
-                model="deepseek-v4-flash",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_tokens=300
-            )
-            reply = final.choices[0].message.content
-        else:
-            reply = "Не удалось найти информацию в интернете. Попробуй переформулировать запрос 😊"
-
     # Поиск в истории
     history_match = re.search(r'\[HISTORY:\s*(.+?)\]', reply)
     if history_match:
@@ -224,7 +207,7 @@ def deepseek_process(user_id, text):
         results = search_history(user_id, query)
         if results:
             text_results = "\n".join([f"{r['role']}: {r['content']}" for r in results[:5]])
-            prompt = f"Вот что нашлось в истории по запросу '{query}':\n{text_results}\n\nОтветь пользователю коротко."
+            prompt = f"Вот что нашлось в истории по запросу '{query}':\n{text_results}\n\nОтветь пользователю коротко, с эмодзи."
             final = deepseek.chat.completions.create(
                 model="deepseek-v4-flash",
                 messages=[{"role": "user", "content": prompt}],
@@ -252,48 +235,7 @@ def deepseek_process(user_id, text):
     return reply
 
 # ============================================================
-# 4. ГОЛОС
-# ============================================================
-
-def transcribe_audio(audio_url):
-    try:
-        resp = requests.get(audio_url, timeout=30)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp:
-            tmp.write(resp.content)
-            tmp_path = tmp.name
-        with open(tmp_path, "rb") as f:
-            result = groq.audio.transcriptions.create(
-                file=(tmp_path, f.read()),
-                model="whisper-large-v3-turbo",
-                language="ru"
-            )
-        os.unlink(tmp_path)
-        return result.text
-    except Exception as e:
-        print(f"❌ Ошибка распознавания: {e}")
-        return None
-
-# ============================================================
-# 5. ОТПРАВКА
-# ============================================================
-
-async def send_chat_action(chat_id):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction"
-    try:
-        requests.post(url, json={"chat_id": chat_id, "action": "typing"})
-    except:
-        pass
-
-async def send_message(chat_id, text):
-    await send_chat_action(chat_id)
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try:
-        requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
-    except Exception as e:
-        print(f"❌ Ошибка отправки: {e}")
-
-# ============================================================
-# 6. WEBHOOK
+# 5. WEBHOOK
 # ============================================================
 
 @app.post("/webhook")
