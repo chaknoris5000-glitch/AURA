@@ -710,4 +710,42 @@ async def webhook(request: Request):
 
 Ты общаешься с человеком, который хочет чувствовать себя комфортно. Будь таким. 😉"""
 
-        if
+        if user_context:
+            system_prompt += "\n\n" + "\n".join(user_context)
+
+        messages = [{"role": "system", "content": system_prompt}]
+        
+        for h in history:
+            messages.append({"role": h["role"], "content": h["content"]})
+        messages.append({"role": "user", "content": text})
+
+        try:
+            print(f"🤖 DeepSeek (flash): основной диалог, {len(messages)} сообщений")
+            response = deepseek.chat.completions.create(
+                model="deepseek-v4-flash",
+                messages=messages,
+                temperature=0.8,
+                max_tokens=600
+            )
+            reply = response.choices[0].message.content
+
+            save_message(user_id, "assistant", reply)
+            await send_message(user_id, reply)
+
+        except Exception as e:
+            print(f"❌ Ошибка DeepSeek: {e}")
+            await send_message(user_id, "😅 Что-то пошло не так. Попробуй ещё раз.")
+
+        return JSONResponse({"ok": True})
+
+    except Exception as e:
+        print(f"❌ Ошибка вебхука: {e}")
+        return JSONResponse({"ok": False, "error": str(e)})
+
+@app.get("/")
+async def root():
+    return {"status": "AURA is alive"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
