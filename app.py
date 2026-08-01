@@ -21,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # ===== ПОДКЛЮЧЕНИЯ =====
-print("🚀 БОТ ЗАПУЩЕН. ВЕРСИЯ БЕЗ АВТОМАТИЧЕСКОГО ИЗВЛЕЧЕНИЯ ИМЁН И ГОРОДОВ")
+print("🚀 БОТ ЗАПУЩЕН. АРХИТЕКТУРА: Ты → Бот → DeepSeek → Supabase → Бот → Ты")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -38,9 +38,12 @@ app = FastAPI()
 
 last_search_topic = None
 
-# ===== РАБОТА С БАЗОЙ =====
+# ============================================================
+# 1. РАБОТА С БАЗОЙ ДАННЫХ (SUPABASE)
+# ============================================================
 
 def save_message(user_id, role, content):
+    """Сохраняет сообщение в историю"""
     if not supabase:
         return None
     try:
@@ -59,6 +62,7 @@ def save_message(user_id, role, content):
         return None
 
 def get_recent_history(user_id, limit=15):
+    """Загружает последние N сообщений (для контекста)"""
     if not supabase:
         return []
     try:
@@ -74,6 +78,7 @@ def get_recent_history(user_id, limit=15):
         return []
 
 def get_all_history(user_id, limit=1000):
+    """Загружает ВСЮ историю для поиска"""
     if not supabase:
         return []
     try:
@@ -89,6 +94,7 @@ def get_all_history(user_id, limit=1000):
         return []
 
 def search_history(user_id, query, exclude_id=None):
+    """Ищет в Supabase по ключевому слову"""
     if not supabase:
         return []
     try:
@@ -108,6 +114,7 @@ def search_history(user_id, query, exclude_id=None):
         return []
 
 def search_history_with_time(user_id, topic, time_filter=None, exclude_id=None):
+    """Ищет в Supabase с фильтром по времени"""
     if not supabase:
         return []
     
@@ -135,6 +142,7 @@ def search_history_with_time(user_id, topic, time_filter=None, exclude_id=None):
         return []
 
 def save_fact(user_id, key, value):
+    """Сохраняет факт (имя, город)"""
     if not supabase:
         return
     try:
@@ -150,6 +158,7 @@ def save_fact(user_id, key, value):
         print(f"❌ Ошибка сохранения факта: {e}")
 
 def get_fact(user_id, key):
+    """Читает факт (имя, город)"""
     if not supabase:
         return None
     try:
@@ -158,10 +167,12 @@ def get_fact(user_id, key):
     except:
         return None
 
-# ===== ЗАПОМИНАНИЕ ИМЕНИ И ГОРОДА (ТОЛЬКО ПО ЯВНЫМ КОМАНДАМ) =====
+# ============================================================
+# 2. ОБРАБОТКА ЯВНЫХ КОМАНД (ИМЯ, ГОРОД)
+# ============================================================
 
 def handle_set_name(text, user_id):
-    """Обрабатывает команду /setname или фразу 'Меня зовут'"""
+    """Обрабатывает команды для запоминания имени"""
     # /setname Вадим
     if text.lower().startswith("/setname"):
         parts = text.split(maxsplit=1)
@@ -183,7 +194,7 @@ def handle_set_name(text, user_id):
     return None
 
 def handle_set_city(text, user_id):
-    """Обрабатывает команду /setcity или фразу 'Я живу в'"""
+    """Обрабатывает команды для запоминания города"""
     # /setcity Белово
     if text.lower().startswith("/setcity"):
         parts = text.split(maxsplit=1)
@@ -204,9 +215,12 @@ def handle_set_city(text, user_id):
     
     return None
 
-# ===== ПОНИМАНИЕ ЗАПРОСА =====
+# ============================================================
+# 3. DEEPSEEK — ПОНИМАНИЕ СМЫСЛА (ПЕРВЫЙ ПРИОРИТЕТ)
+# ============================================================
 
 def parse_time_filter(time_text):
+    """Преобразует текстовое время в дату"""
     if not time_text:
         return None
     
@@ -231,17 +245,56 @@ def parse_time_filter(time_text):
     return None
 
 def understand_query_with_time(text, previous_topic=None):
+    """
+    DeepSeek понимает СМЫСЛ запроса.
+    Это ПЕРВЫЙ приоритет!
+    """
     print(f"🧠 Понимаю запрос: '{text}'")
     
+    # ===== 1. DEEPSEEK ПОНИМАЕТ СМЫСЛ (ГЛАВНЫЙ ПРИОРИТЕТ) =====
+    try:
+        print(f"🤖 DeepSeek (flash): анализирую СМЫСЛ запроса...")
+        prompt = f"""
+        Пользователь спросил: "{text}"
+        
+        Извлеки ОСНОВНУЮ СУТЬ вопроса (2-3 слова).
+        Это должна быть ТЕМА, по которой нужно искать в истории.
+        
+        Примеры:
+        "Поговорим о другом. Скажи, ты запомнишь всё, что я тебе говорю?" → память
+        "Найди пиццерию" → пиццерия
+        "Что мы говорили про работу?" → работа
+        "Как меня зовут?" → имя
+        "Где я живу?" → город
+        "Найди адрес, который я просил запомнить месяц назад" → адрес
+        
+        Ответь ТОЛЬКО темой (одно слово):
+        """
+        
+        response = deepseek.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=20
+        )
+        result = response.choices[0].message.content.strip()
+        
+        if result and len(result) > 1:
+            print(f"🧠 DeepSeek понял суть: '{result}'")
+            return result, None
+            
+    except Exception as e:
+        print(f"❌ Ошибка DeepSeek: {e}")
+    
+    # ===== 2. ЗАПАСНОЙ ВАРИАНТ (местоимения, триггеры) =====
     garbage_topics = ["говорили", "сказал", "писал", "правильно", "вспомнил", "говорил", 
-                      "напомни", "вспомни", "неправильно", "давай", "запомнил", "про"]
+                      "напомни", "вспомни", "неправильно", "давай", "запомнил", "про",
+                      "поговорим", "другом", "о другом", "другое", "забудь", "не надо"]
     
     if previous_topic and any(word in text.lower() for word in ["него", "это", "них", "ней", "его", "этом"]):
         if previous_topic.lower() not in garbage_topics:
             print(f"🧠 Заметил местоимение, подставляю тему: '{previous_topic}'")
             return previous_topic, None
-        else:
-            print(f"🧠 Заметил местоимение, но тема '{previous_topic}' мусорная — игнорирую")
     
     text_lower = text.lower()
     topic_triggers = {
@@ -258,65 +311,12 @@ def understand_query_with_time(text, previous_topic=None):
                 print(f"🧠 Нашёл тему '{topic}' по ключевому слову '{keyword}'")
                 return topic, None
     
-    try:
-        print(f"🤖 DeepSeek (flash): анализирую запрос...")
-        prompt = f"""
-        Пользователь спросил: "{text}"
-        
-        Извлеки:
-        1. ТЕМУ (о чём спрашивают) — одно слово в именительном падеже
-        2. ВРЕМЯ (когда) — если указано ("вчера", "месяц назад", "неделю назад", "летом")
-        
-        Примеры:
-        "Что я говорил про работу месяц назад?" → ТЕМА: работа, ВРЕМЯ: месяц назад
-        "Напомни про загадки" → ТЕМА: загадки, ВРЕМЯ: всё время
-        "Что мы обсуждали вчера?" → ТЕМА: обсуждали, ВРЕМЯ: вчера
-        "Где я живу?" → ТЕМА: город, ВРЕМЯ: всё время
-        "Кто я?" → ТЕМА: имя, ВРЕМЯ: всё время
-        
-        Ответ строго в формате:
-        ТЕМА: <слово>
-        ВРЕМЯ: <время>
-        """
-        
-        response = deepseek.chat.completions.create(
-            model="deepseek-v4-flash",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=50
-        )
-        result = response.choices[0].message.content.strip()
-        print(f"🧠 DeepSeek понял: {result}")
-        
-        topic = None
-        time_filter = None
-        
-        for line in result.split('\n'):
-            if 'ТЕМА:' in line:
-                topic = line.replace('ТЕМА:', '').strip()
-            elif 'ВРЕМЯ:' in line:
-                time_filter = line.replace('ВРЕМЯ:', '').strip()
-                if time_filter.lower() in ["всё время", "всегда", "любое"]:
-                    time_filter = None
-        
-        if topic:
-            return topic, time_filter
-            
-    except Exception as e:
-        print(f"❌ Ошибка DeepSeek: {e}")
-    
+    # ===== 3. ПОСЛЕДНЯЯ ПОПЫТКА (извлечение слова) =====
     words = re.findall(r'[а-яА-ЯёЁa-zA-Z]{3,}', text)
-    
     stop_words = ["какую", "первую", "тебе", "как", "что", "где", "когда", "почему", 
                   "зачем", "кто", "какой", "такой", "так", "вот", "да", "нет", "уже",
                   "ещё", "тоже", "только", "очень", "было", "была", "мою", "твою",
-                  "свою", "нашу", "вашу", "эту", "ту", "этот", "тот", "все", "сам",
-                  "говорил", "сказал", "писал", "рассказывал", "спросил", "ответил",
-                  "загадал", "спросил", "напомни", "вспомни", "вчера", "сегодня", "завтра",
-                  "говорили", "правильно", "вспомнил", "вспомнила", "помнишь", "помню",
-                  "делал", "сделал", "ходил", "ездил", "смотрел", "читал", "видел",
-                  "упоминал", "обсуждали", "вспомни", "напомни", "давай", "давайте",
-                  "пожалуйста", "спасибо", "неправильно", "запомнил", "про"]
+                  "свою", "нашу", "вашу", "эту", "ту", "этот", "тот", "все", "сам"]
     
     for word in words:
         if word[0].isupper() and word.lower() not in stop_words:
@@ -338,6 +338,7 @@ def understand_query_with_time(text, previous_topic=None):
     return None, None
 
 def should_search_history(text):
+    """Определяет, нужно ли искать в истории"""
     text_lower = text.lower()
     triggers = [
         "напомни", "что я говорил", "где я говорил", "найди в истории", "вспомни", 
@@ -353,9 +354,12 @@ def should_search_history(text):
     ]
     return any(trigger in text_lower for trigger in triggers)
 
-# ===== ФОРМАТИРОВАНИЕ ОТВЕТА =====
+# ============================================================
+# 4. DEEPSEEK — ФОРМАТИРОВАНИЕ ОТВЕТА
+# ============================================================
 
 def format_results_to_human(results, original_query, search_word, time_filter, user_name=None, user_city=None):
+    """DeepSeek форматирует найденное в человеческий ответ"""
     if not results:
         time_text = f" {time_filter}" if time_filter else ""
         city_text = f" в {user_city}" if user_city else ""
@@ -414,28 +418,43 @@ def format_results_to_human(results, original_query, search_word, time_filter, u
     
     return f"Мы говорили про {search_word}. Что именно тебя интересует? 😊"
 
-# ===== ГИБРИДНЫЙ ПОИСК С ВРЕМЕНЕМ =====
+# ============================================================
+# 5. БОТ — ПОИСК В SUPABASE (ПО КОМАНДЕ DEEPSEEK)
+# ============================================================
 
 def hybrid_search_with_time(user_id, query, exclude_id=None, user_name=None, user_city=None):
+    """
+    Бот ищет в Supabase по команде от DeepSeek
+    """
+    # 1. DeepSeek понимает, что искать
     topic, time_filter = understand_query_with_time(query, last_search_topic)
     
     if not topic or len(topic) < 2:
         return None
     
-    # Если есть город — добавляем его к запросу для поиска
+    # 2. Если есть город — добавляем для поиска (только если явно ищет место)
+    place_triggers = ["найди", "покажи", "где находится", "что есть", "где", "адрес", "рядом"]
+    is_place_search = any(trigger in query.lower() for trigger in place_triggers)
+    
     search_topic = topic
-    if user_city:
+    if user_city and is_place_search:
         search_topic = f"{topic} {user_city}"
         print(f"🔍 Автоматически добавляю город: '{user_city}' к поиску")
+    else:
+        if user_city:
+            print(f"🔍 Поиск без города (тема: '{topic}'), город не используется")
+        else:
+            print(f"🔍 Тема: '{topic}', Время: {time_filter if time_filter else 'всё время'}")
     
-    print(f"🔍 Тема: '{search_topic}', Время: {time_filter if time_filter else 'всё время'}")
-    
+    # 3. Бот ищет в Supabase
     results = search_history_with_time(user_id, search_topic, time_filter, exclude_id)
     
     if results:
         print(f"✅ Бот нашёл: {len(results)} результатов")
+        # 4. DeepSeek форматирует ответ
         return format_results_to_human(results, query, topic, time_filter, user_name, user_city)
     
+    # 5. Если не нашёл — пробуем DeepSeek умный поиск
     print(f"🔍 Бот не нашёл, пробую DeepSeek...")
     all_history = get_all_history(user_id, limit=1000)
     
@@ -476,7 +495,9 @@ def hybrid_search_with_time(user_id, query, exclude_id=None, user_name=None, use
     
     return None
 
-# ===== РАСПОЗНАВАНИЕ ГОЛОСА =====
+# ============================================================
+# 6. РАСПОЗНАВАНИЕ ГОЛОСА (GROQ WHISPER)
+# ============================================================
 
 def transcribe_audio(audio_url):
     try:
@@ -501,7 +522,9 @@ async def send_message(chat_id, text):
     data = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     requests.post(url, json=data)
 
-# ===== ОСНОВНАЯ ЛОГИКА =====
+# ============================================================
+# 7. ОСНОВНАЯ ЛОГИКА (WEBHOOK)
+# ============================================================
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -517,6 +540,7 @@ async def webhook(request: Request):
         text = None
         current_message_id = None
 
+        # ===== ОБРАБОТКА ГОЛОСОВЫХ =====
         if "voice" in msg:
             file_id = msg["voice"]["file_id"]
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
@@ -534,9 +558,10 @@ async def webhook(request: Request):
         if not text:
             return JSONResponse({"ok": True})
 
+        # ===== БОТ СОХРАНЯЕТ СООБЩЕНИЕ В SUPABASE =====
         current_message_id = save_message(user_id, "user", text)
 
-        # ===== ОБРАБОТКА ЯВНЫХ КОМАНД ДЛЯ ИМЕНИ И ГОРОДА =====
+        # ===== ОБРАБОТКА КОМАНД (ИМЯ, ГОРОД) =====
         name_reply = handle_set_name(text, user_id)
         if name_reply:
             save_message(user_id, "assistant", name_reply)
@@ -553,7 +578,7 @@ async def webhook(request: Request):
         user_name = get_fact(user_id, "name")
         user_city = get_fact(user_id, "city")
 
-        # ===== ПРЯМЫЕ ЗАПРОСЫ =====
+        # ===== ПРЯМЫЕ ЗАПРОСЫ (ИЗ user_memory) =====
         if "как меня зовут" in lower or "моё имя" in lower or "как зовут" in lower or "кто я" in lower or "напомни моё имя" in lower:
             if user_name:
                 reply = f"Тебя зовут **{user_name}**."
@@ -572,11 +597,11 @@ async def webhook(request: Request):
             await send_message(user_id, reply)
             return JSONResponse({"ok": True})
 
-        # ===== ПОИСК С ЧЕЛОВЕЧЕСКИМ ОТВЕТОМ =====
+        # ===== ПОИСК В ИСТОРИИ (ЕСЛИ НУЖНО) =====
         if should_search_history(text):
             topic, time_filter = understand_query_with_time(text, last_search_topic)
             
-            garbage_topics = ["говорили", "сказал", "писал", "правильно", "вспомнил", "давай", "неправильно", "запомнил", "про"]
+            garbage_topics = ["говорили", "сказал", "писал", "правильно", "вспомнил", "давай", "неправильно", "запомнил", "про", "поговорим"]
             if topic and topic.lower() not in garbage_topics:
                 last_search_topic = topic
             
@@ -593,13 +618,13 @@ async def webhook(request: Request):
                     await send_message(user_id, reply)
                     return JSONResponse({"ok": True})
 
-        # ===== ОСНОВНОЙ ДИАЛОГ =====
+        # ===== ОСНОВНОЙ ДИАЛОГ (ЕСЛИ НЕ НУЖЕН ПОИСК) =====
         history = get_recent_history(user_id, limit=15)
         
-        # ===== АВТОМАТИЧЕСКИЙ ПОИСК =====
+        # ===== АВТОМАТИЧЕСКИЙ ПОИСК (ЕСЛИ ТЕМЫ НЕТ В КОНТЕКСТЕ) =====
         topic, time_filter = understand_query_with_time(text, last_search_topic)
         
-        garbage_topics = ["говорили", "сказал", "писал", "правильно", "вспомнил", "давай", "неправильно", "запомнил", "про"]
+        garbage_topics = ["говорили", "сказал", "писал", "правильно", "вспомнил", "давай", "неправильно", "запомнил", "про", "поговорим"]
         
         if topic and len(topic) > 1 and topic.lower() not in garbage_topics:
             topic_found_in_context = any(
@@ -620,6 +645,7 @@ async def webhook(request: Request):
             else:
                 print(f"✅ АВТОПОИСК: тема '{topic}' есть в контексте, поиск не требуется")
 
+        # ===== ОСНОВНОЙ ДИАЛОГ (СИСТЕМНЫЙ ПРОМТ) =====
         user_context = []
         if user_name:
             user_context.append(f"Тебя зовут {user_name}.")
@@ -654,7 +680,7 @@ async def webhook(request: Request):
 • Используй последние 15 сообщений для контекста
 • Если темы нет в контексте — автоматически ищи в Supabase
 • Понимай время: "месяц назад", "вчера", "неделю назад"
-• Если знаешь город пользователя — используй его при поиске
+• Если знаешь город пользователя — используй его при поиске мест
 • Всю историю помнишь, если тебя спросят
 
 Ты общаешься с человеком, который хочет чувствовать себя комфортно. Будь таким. 😉"""
