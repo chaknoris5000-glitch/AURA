@@ -21,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-print("🚀 БОТ — ФАСАД, DEEPSEEK + TAVILY (ФИНАЛЬНАЯ ВЕРСИЯ)")
+print("🚀 БОТ — ФАСАД, DEEPSEEK САМ РЕШАЕТ")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -215,7 +215,7 @@ async def send_message(chat_id, text):
         print(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# 6. DEEPSEEK + TAVILY (ФИНАЛЬНЫЙ ПРОМТ)
+# 6. DEEPSEEK — МОЗГ (САМ РЕШАЕТ)
 # ============================================================
 
 def deepseek_process(user_id, text):
@@ -230,27 +230,21 @@ def deepseek_process(user_id, text):
     history = get_recent_history(user_id, limit=20)
     history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
 
-    # === ФИНАЛЬНЫЙ СИСТЕМНЫЙ ПРОМТ ===
-    system_prompt = f"""Ты — AURA, живой собеседник и друг.
+    # === ПРОМТ — БЕЗ ЖЁСТКИХ ПРАВИЛ ===
+    system_prompt = f"""Ты — AURA, живой собеседник.
 
 Пользователь: {user_name or "Незнакомец"}
 Город: {user_city or "Неизвестен"}
 
-История диалога:
+История:
 {history_text}
 
-ТВОИ ВОЗМОЖНОСТИ:
-1. Отвечать на вопросы из своих знаний
-2. Искать в интернете — команда [SEARCH: запрос]
-3. Искать в истории диалога — команда [HISTORY: запрос]
-4. Запоминать имя — команда [SAVE_NAME: имя]
-5. Запоминать город — команда [SAVE_CITY: город]
+У тебя есть доступ к интернет-поиску. Если тебе не хватает знаний — используй его.
+Просто напиши: [SEARCH: запрос]
 
-ПРАВИЛА:
-- Отвечай коротко (2-3 предложения)
-- Используй эмодзи 😊🔥😄
-- Всегда давай осмысленный ответ, НЕ пиши "..."
-- Если нужна информация из интернета — используй [SEARCH: ...]
+Ты также можешь искать в истории диалога: [HISTORY: запрос]
+
+Отвечай коротко (2-3 предложения), с эмодзи. Всегда осмысленно.
 """
     
     messages = [{"role": "system", "content": system_prompt}]
@@ -267,7 +261,7 @@ def deepseek_process(user_id, text):
     )
     reply = response.choices[0].message.content
 
-    # === ОБРАБОТКА КОМАНД ===
+    # === БОТ ВЫПОЛНЯЕТ КОМАНДЫ DEEPSEEK ===
     
     # Поиск в интернете
     search_match = re.search(r'\[SEARCH:\s*(.+?)\]', reply)
