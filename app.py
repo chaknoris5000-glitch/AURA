@@ -189,7 +189,7 @@ async def send_message(chat_id, text):
         print(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# 6. DEEPSEEK — ВСЁ РЕШАЕТ САМ
+# 6. DEEPSEEK — ВСЁ РЕШАЕТ
 # ============================================================
 
 def deepseek_process(user_id, text):
@@ -202,7 +202,6 @@ def deepseek_process(user_id, text):
         if any(word in text_lower for word in ["время", "сколько времени", "который час", "какое сегодня число", "какой день"]):
             return get_current_time()
 
-        # === ЗАГРУЖАЕМ 15 ПОСЛЕДНИХ СООБЩЕНИЙ ===
         history = get_recent_history(user_id, limit=15)
         history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
 
@@ -228,7 +227,6 @@ def deepseek_process(user_id, text):
 Общайся естественно, как человек.
 """
         
-        # === ФОРМИРУЕМ СООБЩЕНИЯ С ИСТОРИЕЙ ===
         messages = [{"role": "system", "content": system_prompt}]
         for h in history:
             messages.append({"role": h["role"], "content": h["content"]})
@@ -243,7 +241,7 @@ def deepseek_process(user_id, text):
         )
         reply = response.choices[0].message.content
 
-        # === БОТ ВЫПОЛНЯЕТ КОМАНДЫ ===
+        # === БОТ ВЫПОЛНЯЕТ КОМАНДЫ DEEPSEEK ===
 
         # 1. Поиск в интернете
         search_match = re.search(r'\[SEARCH:\s*(.+?)\]', reply)
@@ -262,9 +260,9 @@ def deepseek_process(user_id, text):
                     temperature=0.7,
                     max_tokens=300
                 )
-                reply = final.choices[0].message.content
+                return final.choices[0].message.content
             else:
-                reply = "Не удалось найти информацию в интернете. Попробуй переформулировать запрос 😊"
+                return "Не удалось найти информацию в интернете. Попробуй переформулировать запрос 😊"
 
         # 2. Поиск в истории
         history_match = re.search(r'\[HISTORY:\s*(.+?)\]', reply)
@@ -281,24 +279,25 @@ def deepseek_process(user_id, text):
                     temperature=0.7,
                     max_tokens=300
                 )
-                reply = final.choices[0].message.content
+                return final.choices[0].message.content
             else:
-                reply = "Ничего не нашёл в истории по этому запросу 😊"
+                return "Ничего не нашёл в истории по этому запросу 😊"
 
         # 3. Сохранение имени
         name_match = re.search(r'\[SAVE_NAME:\s*(.+?)\]', reply)
         if name_match:
             name = name_match.group(1).strip()
             save_fact(user_id, "name", name)
-            reply = f"Запомнил! Тебя зовут **{name}** 😊"
+            return f"Запомнил! Тебя зовут **{name}** 😊"
 
         # 4. Сохранение города
         city_match = re.search(r'\[SAVE_CITY:\s*(.+?)\]', reply)
         if city_match:
             city = city_match.group(1).strip()
             save_fact(user_id, "city", city)
-            reply = f"Запомнил! Ты из **{city}** 😊"
+            return f"Запомнил! Ты из **{city}** 😊"
 
+        # === ЕСЛИ НЕТ КОМАНД — ВОЗВРАЩАЕМ ОТВЕТ DEEPSEEK ===
         if not reply or reply.strip() in ["", "...", "…"]:
             return "Что-то пошло не так. Попробуй переформулировать вопрос 😊"
         
