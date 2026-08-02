@@ -37,7 +37,7 @@ groq = Groq(api_key=GROQ_API_KEY)
 app = FastAPI()
 
 # ============================================================
-# 1. РАБОТА С БАЗОЙ
+# 1. БАЗА ДАННЫХ
 # ============================================================
 
 def save_message(user_id, role, content):
@@ -114,7 +114,6 @@ def get_fact(user_id, key):
 # ============================================================
 
 def get_current_time():
-    # Белово — UTC+7
     now = datetime.utcnow() + timedelta(hours=7)
     return f"Сейчас **{now.strftime('%H:%M')}**, {now.strftime('%d.%m.%Y')} 😊"
 
@@ -150,7 +149,7 @@ def search_web(query, max_results=5):
     return None
 
 # ============================================================
-# 4. ГОЛОС
+# 4. ГОЛОС (GROQ WHISPER)
 # ============================================================
 
 def transcribe_audio(audio_url):
@@ -172,7 +171,7 @@ def transcribe_audio(audio_url):
         return None
 
 # ============================================================
-# 5. ОТПРАВКА
+# 5. ОТПРАВКА В TELEGRAM
 # ============================================================
 
 async def send_chat_action(chat_id):
@@ -191,7 +190,7 @@ async def send_message(chat_id, text):
         print(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# 6. DEEPSEEK — МОЗГ (ПОЛЬЗОВАТЕЛЬ ОБЩАЕТСЯ С НИМ)
+# 6. DEEPSEEK — МОЗГ (ВСЯ ЛОГИКА)
 # ============================================================
 
 def deepseek_process(user_id, text):
@@ -206,31 +205,22 @@ def deepseek_process(user_id, text):
     history = get_recent_history(user_id, limit=20)
     history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
 
-    # === ПОЛНЫЙ ПРОМТ С ЛИЧНОСТЬЮ ===
-    system_prompt = f"""Ты — AURA, живой, дружелюбный и умный собеседник. Ты общаешься с человеком через Telegram-бота, который является просто фасадом. Все твои ответы идут напрямую пользователю.
-
-Твоя задача — общаться как живой человек. Отвечай коротко (2-3 предложения), с душой, используй эмодзи 😊🔥❤️.
-
-Ты умеешь:
-1. Отвечать на вопросы из своих знаний
-2. Искать в интернете через [SEARCH: запрос]
-3. Искать в истории диалога через [HISTORY: запрос]
-4. Запоминать имя пользователя через [SAVE_NAME: имя]
-5. Запоминать город пользователя через [SAVE_CITY: город]
-
-Правила:
-- Если пользователь сказал "Меня зовут ..." или представился — запомни имя через [SAVE_NAME]
-- Если пользователь сказал "Я живу в ..." или назвал город — запомни город через [SAVE_CITY]
-- Если не знаешь ответ — используй поиск в интернете
-- Всегда проверяй информацию, которую даёшь
-- Никогда не отвечай пустотой или "..."
-- Будь живым, естественным, как в переписке с другом
+    # === СИСТЕМНЫЙ ПРОМТ ===
+    system_prompt = f"""Ты — AURA, живой, дружелюбный собеседник. Ты общаешься с пользователем через бота. Все твои ответы проходят через бота.
 
 Пользователь: {user_name or "Незнакомец"}
 Город: {user_city or "Неизвестен"}
 
-История диалога:
+История:
 {history_text}
+
+Твои команды для бота:
+- [SEARCH: запрос] — бот найдёт в интернете
+- [HISTORY: запрос] — бот найдёт в истории
+- [SAVE_NAME: имя] — бот запомнит имя
+- [SAVE_CITY: город] — бот запомнит город
+
+Отвечай коротко (2-3 предложения), с эмодзи. Никогда не отвечай пустотой.
 """
     
     messages = [{"role": "system", "content": system_prompt}]
@@ -247,22 +237,22 @@ def deepseek_process(user_id, text):
     )
     reply = response.choices[0].message.content
 
-    # === БОТ ВЫПОЛНЯЕТ КОМАНДЫ DEEPSEEK ===
-    
-    # Поиск в интернете
+    # === ОБРАБОТКА КОМАНД DEEPSEEK ===
+
+    # 1. Поиск в интернете
     search_match = re.search(r'\[SEARCH:\s*(.+?)\]', reply)
     if search_match:
         query = search_match.group(1).strip()
-        print(f"🔍 Поиск в интернете: '{query}'")
+        print(f"🔍 Бот ищет в интернете: '{query}'")
         data = search_web(query)
         if data and data.get("results"):
             results_text = ""
             for r in data.get("results", [])[:5]:
                 results_text += f"\n- {r.get('title')}: {r.get('content')[:300]}...\n  Источник: {r.get('url')}"
-            prompt = f"Вот что нашлось по запросу '{query}':\n{results_text}\n\nОтветь пользователю коротко, с эмодзи, дай ссылку на источник."
+            format_prompt = f"Вот что нашлось по запросу '{query}':\n{results_text}\n\nОтветь пользователю коротко, с эмодзи, дай ссылку на источник."
             final = deepseek.chat.completions.create(
                 model="deepseek-v4-flash",
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": format_prompt}],
                 temperature=0.7,
                 max_tokens=300
             )
@@ -270,18 +260,18 @@ def deepseek_process(user_id, text):
         else:
             reply = "Не удалось найти информацию в интернете. Попробуй переформулировать запрос 😊"
 
-    # Поиск в истории
+    # 2. Поиск в истории
     history_match = re.search(r'\[HISTORY:\s*(.+?)\]', reply)
     if history_match:
         query = history_match.group(1).strip()
-        print(f"📚 История: '{query}'")
+        print(f"📚 Бот ищет в истории: '{query}'")
         results = search_history(user_id, query)
         if results:
             text_results = "\n".join([f"{r['role']}: {r['content']}" for r in results[:5]])
-            prompt = f"Вот что нашлось в истории по запросу '{query}':\n{text_results}\n\nОтветь пользователю коротко, с эмодзи."
+            format_prompt = f"Вот что нашлось в истории по запросу '{query}':\n{text_results}\n\nОтветь пользователю коротко, с эмодзи."
             final = deepseek.chat.completions.create(
                 model="deepseek-v4-flash",
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": format_prompt}],
                 temperature=0.7,
                 max_tokens=300
             )
@@ -289,14 +279,14 @@ def deepseek_process(user_id, text):
         else:
             reply = "Ничего не нашёл в истории по этому запросу 😊"
 
-    # Сохранение имени
+    # 3. Сохранение имени
     name_match = re.search(r'\[SAVE_NAME:\s*(.+?)\]', reply)
     if name_match:
         name = name_match.group(1).strip()
         save_fact(user_id, "name", name)
         reply = f"Запомнил! Тебя зовут **{name}** 😊"
 
-    # Сохранение города
+    # 4. Сохранение города
     city_match = re.search(r'\[SAVE_CITY:\s*(.+?)\]', reply)
     if city_match:
         city = city_match.group(1).strip()
