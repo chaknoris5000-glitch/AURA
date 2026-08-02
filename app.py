@@ -1,3 +1,5 @@
+В этом коде как было?
+
 import os
 import re
 import tempfile
@@ -24,7 +26,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-logger.info("🚀 БОТ — ПОЛНЫЙ КОНТЕКСТ + ЖИВЫЕ ОТВЕТЫ (ИСПРАВЛЕННЫЙ)")
+logger.info("🚀 БОТ — ТОЛЬКО РАБОЧИЕ ССЫЛКИ")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -57,7 +59,7 @@ def save_message(user_id, role, content):
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения: {e}")
 
-def get_recent_history(user_id, limit=30):
+def get_recent_history(user_id, limit=15):
     if not supabase:
         return []
     try:
@@ -134,17 +136,17 @@ def search_web(query, max_results=5):
     return None
 
 def check_link(url, query):
-    """DeepSeek проверяет ссылку (смягчённая проверка)"""
+    """DeepSeek проверяет ссылку"""
     try:
-        # Проверяем, что ссылка жива
+        # Сначала проверяем, что ссылка жива
         head = requests.head(url, timeout=5)
         if head.status_code >= 400:
             return False
         
         # DeepSeek проверяет релевантность
         prompt = f"""Ссылка: {url}
-Пользователь искал: "{query}"
-Эта ссылка ведёт на сайт, который может помочь пользователю?
+Вопрос: "{query}"
+Эта ссылка ведёт на сайт, который отвечает на вопрос?
 Ответь ТОЛЬКО ДА или НЕТ.
 """
         response = deepseek.chat.completions.create(
@@ -159,6 +161,7 @@ def check_link(url, query):
         return False
 
 def get_good_links(query, user_city=None):
+    """Бот ищет, DeepSeek проверяет"""
     if user_city:
         query = f"{query} {user_city}"
         logger.info(f"🔍 Добавил город: '{user_city}'")
@@ -172,8 +175,11 @@ def get_good_links(query, user_city=None):
         url = r.get("url")
         title = r.get("title", "")
         content = r.get("content", "")
+        
         if not url:
             continue
+        
+        # Проверяем ссылку
         logger.info(f"🔍 Проверяю: {url}")
         if check_link(url, query):
             good_links.append({
@@ -242,6 +248,7 @@ async def send_message(chat_id, text):
 # ============================================================
 
 def process_search(query, user_city=None):
+    """Поиск с проверкой ссылок"""
     good_links = get_good_links(query, user_city)
     if not good_links:
         return None
@@ -250,6 +257,7 @@ def process_search(query, user_city=None):
         link = good_links[0]
         return f"Нашёл! 🎯\n\n**{link['title']}**\n[Ссылка]({link['url']})"
     
+    # Если несколько ссылок
     response = "Нашёл! 🎯\n\n"
     for i, link in enumerate(good_links, 1):
         response += f"{i}. **{link['title']}**\n[Ссылка]({link['url']})\n\n"
@@ -273,8 +281,8 @@ def deepseek_process(user_id, text):
                 return result
             return "Не нашёл рабочие ссылки. Попробуй переформулировать запрос 😊"
         
-        # === ОСНОВНОЙ ДИАЛОГ С БОЛЬШИМ КОНТЕКСТОМ ===
-        history = get_recent_history(user_id, limit=30)
+        # === ОБЫЧНЫЙ ДИАЛОГ ===
+        history = get_recent_history(user_id, limit=15)
         history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
         
         system_prompt = f"""Ты — AURA. Ты живой собеседник.
@@ -282,17 +290,10 @@ def deepseek_process(user_id, text):
 Пользователь: {user_name or "Незнакомец"}
 Город: {user_city or "Неизвестен"}
 
-История (последние 30 сообщений):
+История:
 {history_text}
 
-ПРАВИЛА ОТВЕТОВ:
-1. Используй КОНТЕКСТ из истории. Если пользователь уже говорил "ищи на Авито" — помни это!
-2. Отвечай ЖИВО и ЕСТЕСТВЕННО, как человек в переписке.
-3. Пиши 2-4 предложения, не обрывай мысль.
-4. Используй эмодзи, но не перебарщивай.
-5. Если пользователь уточняет запрос — учитывай предыдущие уточнения.
-
-Ты — друг, а не робот. Будь собой.
+Отвечай коротко, как человек. Будь собой.
 """
         
         messages = [{"role": "system", "content": system_prompt}]
@@ -304,8 +305,8 @@ def deepseek_process(user_id, text):
         response = deepseek.chat.completions.create(
             model="deepseek-v4-flash",
             messages=messages,
-            temperature=0.95,
-            max_tokens=800,
+            temperature=0.85,
+            max_tokens=400,
             timeout=30
         )
         reply = response.choices[0].message.content
