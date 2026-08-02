@@ -24,7 +24,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-logger.info("🚀 AURA — ФИНАЛЬНАЯ ВЕРСИЯ")
+logger.info("🚀 БОТ — ПОИСК + DEEPSEEK ФОРМАТИРОВАНИЕ")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -109,7 +109,7 @@ def get_current_time():
 # 3. ПОИСК (TAVILY)
 # ============================================================
 
-def search_web(query, max_results=3):
+def search_web(query, max_results=5):
     if not TAVILY_API_KEY:
         return None
     logger.info(f"🌐 Поиск: '{query}'")
@@ -185,10 +185,75 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# 6. ОБРАБОТКА КОМАНД
+# 6. ПОИСК + DEEPSEEK ФОРМАТИРОВАНИЕ
 # ============================================================
 
-def process_history_command(query, user_id, user_name=None):
+def process_search(query, user_city=None, user_name=None):
+    """Бот ищет, DeepSeek проверяет и форматирует"""
+    
+    # Добавляем город если есть
+    search_query = query
+    if user_city:
+        search_query = f"{query} {user_city}"
+        logger.info(f"🔍 Добавил город: '{user_city}'")
+    
+    # Бот ищет в интернете
+    data = search_web(search_query)
+    if not data or not data.get("results"):
+        return None
+    
+    results = data.get("results", [])
+    answer = data.get("answer", "")
+    
+    # Берём первые 3 результата
+    formatted_results = ""
+    for r in results[:3]:
+        title = r.get("title", "Без названия")
+        content = r.get("content", "")[:200]
+        url = r.get("url", "")
+        if url:
+            formatted_results += f"\n**{title}**\n{content}...\n[Источник]({url})\n"
+    
+    # DeepSeek проверяет и форматирует
+    prompt = f"""Пользователь искал: "{query}"
+Город: {user_city or "Не указан"}
+
+Вот что нашлось в интернете:
+{formatted_results}
+
+Если есть ответ (answer) — используй его: {answer}
+
+Задача: ответь пользователю КОРОТКО (2-3 предложения).
+Дай только самую важную информацию и ОДНУ ссылку на источник.
+Ответ должен быть красивым, живым, с эмодзи.
+"""
+    
+    try:
+        final = deepseek.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=200,
+            timeout=30
+        )
+        reply = final.choices[0].message.content
+        if reply and reply.strip() not in ["", "...", "…"]:
+            return reply
+    except Exception as e:
+        logger.error(f"❌ Ошибка форматирования: {e}")
+    
+    # Запасной вариант — просто ссылка
+    if results:
+        first = results[0]
+        url = first.get("url", "")
+        title = first.get("title", "")
+        if url:
+            return f"Нашёл! 🎯\n\n**{title}**\n[Ссылка]({url})"
+    
+    return None
+
+def process_history(query, user_id):
+    """Бот ищет в истории, DeepSeek форматирует"""
     results = search_history(user_id, query)
     if not results:
         return None
@@ -198,7 +263,7 @@ def process_history_command(query, user_id, user_name=None):
     prompt = f"""Вот что нашлось в истории по запросу '{query}':
 {text_results}
 
-Ответь пользователю как живой человек, коротко (2-3 предложения). 
+Ответь пользователю коротко (2-3 предложения) как живой человек.
 Если это он сам писал — скажи "ты говорил", если бот — "я отвечал".
 """
     try:
@@ -217,53 +282,6 @@ def process_history_command(query, user_id, user_name=None):
         logger.error(f"❌ Ошибка форматирования истории: {e}")
         return f"В истории нашлось:\n{text_results[:300]}"
 
-def process_search_command(query, user_city=None, user_name=None):
-    if user_city:
-        query = f"{query} {user_city}"
-        logger.info(f"🔍 Добавил город: '{user_city}'")
-    
-    data = search_web(query)
-    if not data or not data.get("results"):
-        return None
-    
-    results = data.get("results", [])[:3]
-    answer = data.get("answer", "")
-    
-    results_text = ""
-    for r in results:
-        title = r.get("title", "Без названия")
-        content = r.get("content", "")[:300]
-        url = r.get("url", "")
-        results_text += f"\n**{title}**\n{content}...\n[Источник]({url})\n"
-    
-    prompt = f"""Вот что нашлось в интернете по запросу '{query}':
-{results_text}
-
-Ответь пользователю как живой человек, коротко (2-3 предложения). 
-Дай самую важную информацию и ссылку на источник.
-Если есть ответ (answer) — используй его.
-"""
-    try:
-        final = deepseek.chat.completions.create(
-            model="deepseek-v4-flash",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=250,
-            timeout=30
-        )
-        reply = final.choices[0].message.content
-        if reply and reply.strip() not in ["", "...", "…"]:
-            return reply
-    except Exception as e:
-        logger.error(f"❌ Ошибка форматирования поиска: {e}")
-    
-    if answer:
-        return f"Нашёл! 🎯\n\n{answer[:300]}"
-    if results:
-        first = results[0]
-        return f"Нашёл! 🎯\n\n**{first.get('title')}**\n[Источник]({first.get('url')})"
-    return None
-
 # ============================================================
 # 7. ГЛАВНАЯ ЛОГИКА
 # ============================================================
@@ -277,11 +295,27 @@ def deepseek_process(user_id, text):
         if any(word in text.lower() for word in ["время", "сколько времени", "который час", "какое сегодня число"]):
             return get_current_time()
         
-        # === КОНТЕКСТ ===
+        # === ПРЯМОЙ ПОИСК ===
+        search_triggers = ["найди", "поищи", "найти", "покажи", "где", "сайт", "фильм", "клиника", "адрес", "маршрут", "ссылка"]
+        if any(word in text.lower() for word in search_triggers):
+            logger.info(f"🔍 Бот ищет: '{text}'")
+            
+            # Сначала ищем в интернете
+            result = process_search(text, user_city, user_name)
+            if result:
+                return result
+            
+            # Если в интернете нет — ищем в истории
+            history_result = process_history(text, user_id)
+            if history_result:
+                return history_result
+            
+            return "Ничего не нашёл. Попробуй переформулировать запрос 😊"
+        
+        # === ОБЫЧНЫЙ ДИАЛОГ ===
         history = get_recent_history(user_id, limit=15)
         history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
         
-        # === ПРОМТ С ПРИМЕРАМИ ===
         system_prompt = f"""Ты — AURA. Ты живой собеседник.
 
 Пользователь: {user_name or "Незнакомец"}
@@ -290,15 +324,7 @@ def deepseek_process(user_id, text):
 История:
 {history_text}
 
-ЕСЛИ НУЖЕН ПОИСК → [SEARCH: запрос]
-ЕСЛИ НУЖНА ИСТОРИЯ → [HISTORY: запрос]
-
-ПРИМЕРЫ:
-- Пользователь: "Найди фильм Матрица" → [SEARCH: фильм Матрица смотреть онлайн]
-- Пользователь: "Что мы говорили про работу?" → [HISTORY: работа]
-- Пользователь: "Дай ссылку на клинику" → [SEARCH: клиника Белово]
-
-Отвечай коротко. Будь собой.
+Отвечай коротко, как человек. Будь собой.
 """
         
         messages = [{"role": "system", "content": system_prompt}]
@@ -315,41 +341,7 @@ def deepseek_process(user_id, text):
             timeout=30
         )
         reply = response.choices[0].message.content
-        logger.info(f"🧠 DeepSeek ответил: {reply[:50]}...")
         
-        # === БОТ ВЫПОЛНЯЕТ КОМАНДЫ ===
-        
-        # 1. Поиск в истории
-        history_match = re.search(r'\[HISTORY:\s*(.+?)\]', reply)
-        if history_match:
-            query = history_match.group(1).strip()
-            logger.info(f"📚 Бот ищет в истории: '{query}'")
-            result = process_history_command(query, user_id, user_name)
-            if result:
-                return result
-            # Если в истории нет — пробуем интернет
-            logger.info(f"📚 В истории не нашлось, ищу в интернете...")
-            search_result = process_search_command(query, user_city, user_name)
-            if search_result:
-                return search_result
-            return "Ничего не нашёл. Попробуй переформулировать запрос 😊"
-        
-        # 2. Поиск в интернете
-        search_match = re.search(r'\[SEARCH:\s*(.+?)\]', reply)
-        if search_match:
-            query = search_match.group(1).strip()
-            logger.info(f"🔍 Бот ищет в интернете: '{query}'")
-            result = process_search_command(query, user_city, user_name)
-            if result:
-                return result
-            # Если в интернете нет — пробуем историю
-            logger.info(f"🔍 В интернете не нашлось, ищу в истории...")
-            history_result = process_history_command(query, user_id, user_name)
-            if history_result:
-                return history_result
-            return "Ничего не нашёл. Попробуй переформулировать запрос 😊"
-        
-        # 3. Если нет команд — возвращаем ответ DeepSeek
         if not reply or reply.strip() in ["", "...", "…"]:
             return "Что-то пошло не так. Попробуй переформулировать вопрос 😊"
         
