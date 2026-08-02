@@ -21,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-print("🚀 БОТ — ФАСАД, DEEPSEEK САМ РЕШАЕТ")
+print("🚀 БОТ — ФАСАД, ПОЛЬЗОВАТЕЛЬ ОБЩАЕТСЯ С DEEPSEEK")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -37,7 +37,7 @@ groq = Groq(api_key=GROQ_API_KEY)
 app = FastAPI()
 
 # ============================================================
-# 1. БАЗА
+# 1. РАБОТА С БАЗОЙ
 # ============================================================
 
 def save_message(user_id, role, content):
@@ -110,37 +110,13 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ВРЕМЯ
+# 2. ВРЕМЯ (UTC+7 ДЛЯ БЕЛОВО)
 # ============================================================
 
-def get_current_time(city=None):
-    timezones = {
-        "москва": 3,
-        "белово": 7,
-        "инской": 7,
-        "новосибирск": 7,
-        "красноярск": 7,
-        "иркутск": 8,
-        "владивосток": 10,
-        "кемерово": 7,
-        "барнаул": 7,
-        "омск": 6,
-        "екатеринбург": 5,
-        "казань": 3,
-        "санкт-петербург": 3,
-        "калининград": 2,
-        "ростов-на-дону": 3
-    }
-    
-    if city:
-        city_lower = city.lower()
-        offset = timezones.get(city_lower, 3)
-    else:
-        offset = 3
-    
-    now = datetime.utcnow() + timedelta(hours=offset)
-    city_text = f" в {city}" if city else ""
-    return f"Сейчас{city_text} **{now.strftime('%H:%M')}**, {now.strftime('%d.%m.%Y')} 😊"
+def get_current_time():
+    # Белово — UTC+7
+    now = datetime.utcnow() + timedelta(hours=7)
+    return f"Сейчас **{now.strftime('%H:%M')}**, {now.strftime('%d.%m.%Y')} 😊"
 
 # ============================================================
 # 3. ПОИСК В ИНТЕРНЕТЕ (TAVILY)
@@ -215,7 +191,7 @@ async def send_message(chat_id, text):
         print(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# 6. DEEPSEEK — МОЗГ (САМ РЕШАЕТ)
+# 6. DEEPSEEK — МОЗГ (ПОЛЬЗОВАТЕЛЬ ОБЩАЕТСЯ С НИМ)
 # ============================================================
 
 def deepseek_process(user_id, text):
@@ -225,26 +201,36 @@ def deepseek_process(user_id, text):
     # === ВРЕМЯ ===
     text_lower = text.lower()
     if any(word in text_lower for word in ["время", "сколько времени", "который час", "какое сегодня число", "какой день"]):
-        return get_current_time(user_city)
+        return get_current_time()
 
     history = get_recent_history(user_id, limit=20)
     history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
 
-    # === ПРОМТ — БЕЗ ЖЁСТКИХ ПРАВИЛ ===
-    system_prompt = f"""Ты — AURA, живой собеседник.
+    # === ПОЛНЫЙ ПРОМТ С ЛИЧНОСТЬЮ ===
+    system_prompt = f"""Ты — AURA, живой, дружелюбный и умный собеседник. Ты общаешься с человеком через Telegram-бота, который является просто фасадом. Все твои ответы идут напрямую пользователю.
+
+Твоя задача — общаться как живой человек. Отвечай коротко (2-3 предложения), с душой, используй эмодзи 😊🔥❤️.
+
+Ты умеешь:
+1. Отвечать на вопросы из своих знаний
+2. Искать в интернете через [SEARCH: запрос]
+3. Искать в истории диалога через [HISTORY: запрос]
+4. Запоминать имя пользователя через [SAVE_NAME: имя]
+5. Запоминать город пользователя через [SAVE_CITY: город]
+
+Правила:
+- Если пользователь сказал "Меня зовут ..." или представился — запомни имя через [SAVE_NAME]
+- Если пользователь сказал "Я живу в ..." или назвал город — запомни город через [SAVE_CITY]
+- Если не знаешь ответ — используй поиск в интернете
+- Всегда проверяй информацию, которую даёшь
+- Никогда не отвечай пустотой или "..."
+- Будь живым, естественным, как в переписке с другом
 
 Пользователь: {user_name or "Незнакомец"}
 Город: {user_city or "Неизвестен"}
 
-История:
+История диалога:
 {history_text}
-
-У тебя есть доступ к интернет-поиску. Если тебе не хватает знаний — используй его.
-Просто напиши: [SEARCH: запрос]
-
-Ты также можешь искать в истории диалога: [HISTORY: запрос]
-
-Отвечай коротко (2-3 предложения), с эмодзи. Всегда осмысленно.
 """
     
     messages = [{"role": "system", "content": system_prompt}]
@@ -256,7 +242,7 @@ def deepseek_process(user_id, text):
     response = deepseek.chat.completions.create(
         model="deepseek-v4-flash",
         messages=messages,
-        temperature=0.8,
+        temperature=0.85,
         max_tokens=600
     )
     reply = response.choices[0].message.content
