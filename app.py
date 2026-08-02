@@ -25,7 +25,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-logger.info("🚀 AURA — ТЫ ОБЩАЕШЬСЯ С DEEPSEEK ЧЕРЕЗ ТЕЛЕГРАМ")
+logger.info("🚀 БОТ ЗАПУЩЕН")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -41,7 +41,7 @@ groq = Groq(api_key=GROQ_API_KEY)
 app = FastAPI()
 
 # ============================================================
-# 1. БАЗА ДАННЫХ
+# 1. БАЗА
 # ============================================================
 
 def save_message(user_id, role, content):
@@ -107,7 +107,7 @@ def get_current_time():
     return f"Сейчас **{now.strftime('%H:%M')}**, {now.strftime('%d.%m.%Y')} 😊"
 
 # ============================================================
-# 3. ПОИСК В ИНТЕРНЕТЕ (TAVILY)
+# 3. ПОИСК (TAVILY)
 # ============================================================
 
 def search_web(query, max_results=5):
@@ -135,7 +135,7 @@ def search_web(query, max_results=5):
     return None
 
 # ============================================================
-# 4. ГОЛОС (GROQ WHISPER)
+# 4. ГОЛОС
 # ============================================================
 
 def transcribe_audio(audio_url):
@@ -186,11 +186,10 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# 6. ОБРАБОТКА КОМАНД DEEPSEEK
+# 6. ОБРАБОТКА ПОИСКА
 # ============================================================
 
 def process_search_command(query, user_city=None):
-    """Бот выполняет поиск по команде DeepSeek"""
     if user_city:
         query = f"{query} {user_city}"
         logger.info(f"🔍 Добавил город: '{user_city}'")
@@ -207,8 +206,8 @@ def process_search_command(query, user_city=None):
         url = r.get("url", "")
         results_text += f"\n**{title}**\n{content}...\n[Источник]({url})\n"
     
-    # Отправляем результаты DeepSeek для проверки и форматирования
-    format_prompt = f"Вот что нашлось:\n{results_text}\n\nОтветь пользователю как живой человек, коротко, дай ссылку."
+    # DeepSeek проверяет и форматирует результаты
+    format_prompt = f"Вот что нашлось:\n{results_text}\n\nОтветь пользователю как живой человек, коротко, дай ссылку на проверенный источник."
     try:
         final = deepseek.chat.completions.create(
             model="deepseek-v4-flash",
@@ -226,7 +225,6 @@ def process_search_command(query, user_city=None):
         return f"Нашёл информацию:\n\n{results_text}"
 
 def process_history_command(query, user_id):
-    """Бот выполняет поиск в истории по команде DeepSeek"""
     results = search_history(user_id, query)
     if not results:
         return "Ничего не нашёл в истории по этому запросу 😊"
@@ -255,7 +253,6 @@ def process_history_command(query, user_id):
 
 def deepseek_process(user_id, text):
     try:
-        # Получаем данные пользователя (если есть)
         user_name = get_fact(user_id, "name")
         user_city = get_fact(user_id, "city")
         
@@ -267,7 +264,7 @@ def deepseek_process(user_id, text):
         history = get_recent_history(user_id, limit=15)
         history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
         
-        # === ПРОМТ ДЛЯ DEEPSEEK ===
+        # === ПРОМТ С ЖЁСТКИМИ ПРАВИЛАМИ ===
         system_prompt = f"""Ты — AURA. Ты живой собеседник.
 
 Пользователь: {user_name or "Незнакомец"}
@@ -276,16 +273,22 @@ def deepseek_process(user_id, text):
 История диалога (последние 15 сообщений):
 {history_text}
 
-Ты — мозг. Бот — твои руки.
-
-Если нужно найти информацию в интернете — напиши:
+ТВОИ КОМАНДЫ ДЛЯ БОТА:
+1. Если пользователь просит найти что-то в интернете (адрес, сайт, новости, картинки, видео, фильм, рецепт) — ОБЯЗАТЕЛЬНО напиши:
 [SEARCH: запрос]
 
-Если нужно найти в истории — напиши:
+2. Если пользователь спрашивает о прошлом (что мы говорили, что я писал) — напиши:
 [HISTORY: запрос]
 
-Общайся как человек. Коротко, с душой, с эмодзи.
-Будь собой.
+3. Если пользователь просто общается — отвечай как человек.
+
+ПРИМЕРЫ:
+- Пользователь: "Найди клинику Калашникова" → Ты: [SEARCH: клиника Калашникова]
+- Пользователь: "Дай рецепт лазаньи" → Ты: [SEARCH: рецепт лазаньи]
+- Пользователь: "Найди фильм Форсаж" → Ты: [SEARCH: Форсаж смотреть онлайн]
+- Пользователь: "Что мы говорили про работу?" → Ты: [HISTORY: работа]
+
+Общайся как человек. Будь собой.
 """
         
         messages = [{"role": "system", "content": system_prompt}]
@@ -304,7 +307,7 @@ def deepseek_process(user_id, text):
         reply = response.choices[0].message.content
         logger.info(f"🧠 DeepSeek ответил: {reply[:50]}...")
         
-        # === БОТ ВЫПОЛНЯЕТ КОМАНДЫ DEEPSEEK ===
+        # === БОТ ВЫПОЛНЯЕТ КОМАНДЫ ===
         
         # 1. Поиск в интернете
         search_match = re.search(r'\[SEARCH:\s*(.+?)\]', reply)
@@ -345,7 +348,6 @@ async def webhook(request: Request):
         user_id = str(msg["from"]["id"])
         text = None
         
-        # === ГОЛОС ===
         if "voice" in msg:
             file_id = msg["voice"]["file_id"]
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
@@ -362,14 +364,12 @@ async def webhook(request: Request):
                 await send_message(user_id, "⚠️ Ошибка обработки голоса.")
                 return JSONResponse({"ok": True})
         
-        # === ТЕКСТ ===
         if "text" in msg:
             text = msg["text"].strip()
         
         if not text:
             return JSONResponse({"ok": True})
         
-        # === БОТ ПЕРЕДАЁТ ЗАПРОС DEEPSEEK ===
         save_message(user_id, "user", text)
         reply = deepseek_process(user_id, text)
         save_message(user_id, "assistant", reply)
