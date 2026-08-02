@@ -163,15 +163,12 @@ def search_web(query, max_results=5):
             logger.error(f"❌ Ошибка Tavily: {response.status_code}")
             return None
             
-    except requests.exceptions.Timeout:
-        logger.error("❌ Таймаут Tavily")
-        return None
     except Exception as e:
         logger.error(f"❌ Ошибка поиска: {e}")
         return None
 
 # ============================================================
-# 4. ГОЛОС (GROQ WHISPER)
+# 4. ГОЛОС
 # ============================================================
 
 def transcribe_audio(audio_url):
@@ -198,7 +195,7 @@ def transcribe_audio(audio_url):
         return None
 
 # ============================================================
-# 5. ОТПРАВКА В TELEGRAM
+# 5. ОТПРАВКА
 # ============================================================
 
 async def send_chat_action(chat_id):
@@ -212,7 +209,6 @@ async def send_message(chat_id, text):
     await send_chat_action(chat_id)
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     
-    # Обрезаем слишком длинные сообщения
     if len(text) > 4000:
         text = text[:3997] + "..."
     
@@ -225,7 +221,6 @@ async def send_message(chat_id, text):
         
         if response.status_code != 200:
             logger.error(f"❌ Ошибка отправки: {response.status_code}")
-            # Пробуем отправить без Markdown
             requests.post(url, json={
                 "chat_id": chat_id,
                 "text": text
@@ -239,20 +234,16 @@ async def send_message(chat_id, text):
 # ============================================================
 
 def extract_name_from_text(text):
-    """Извлекает имя из текста"""
     text_lower = text.lower()
     
-    # Проверяем на "меня зовут"
     match = re.search(r"меня зовут\s+([А-Яа-яёЁ\-]+)", text, re.I)
     if match:
         return match.group(1).capitalize()
     
-    # Проверяем на "зовут"
     match = re.search(r"зовут\s+([А-Яа-яёЁ\-]+)", text, re.I)
     if match:
         return match.group(1).capitalize()
     
-    # Проверяем на "я"
     match = re.search(r"я\s+([А-Яа-яёЁ\-]+)", text, re.I)
     if match:
         name = match.group(1).capitalize()
@@ -262,10 +253,8 @@ def extract_name_from_text(text):
     return None
 
 def extract_city_from_text(text):
-    """Извлекает город из текста"""
     text_lower = text.lower()
     
-    # Маркеры города
     markers = ["живу в", "я из", "из города", "в городе", "посёлок", "город"]
     if not any(marker in text_lower for marker in markers):
         return None
@@ -279,57 +268,49 @@ def extract_city_from_text(text):
     return None
 
 # ============================================================
-# 7. DEEPSEEK — ОБРАБОТКА ЗАПРОСА
+# 7. DEEPSEEK — ЕСТЕСТВЕННЫЙ ДИАЛОГ
 # ============================================================
 
 def deepseek_process(user_id, text):
     try:
-        # Получаем данные пользователя
         user_name = get_fact(user_id, "name")
         user_city = get_fact(user_id, "city")
         
-        # ===== ПРОВЕРКА НА ВРЕМЯ =====
+        # === ВРЕМЯ ===
         text_lower = text.lower()
         if any(word in text_lower for word in ["время", "сколько времени", "который час", "какое сегодня число", "какой день"]):
             return get_current_time()
         
-        # ===== ПРОВЕРКА НА ИМЯ =====
+        # === ИМЯ ===
         extracted_name = extract_name_from_text(text)
         if extracted_name:
             save_fact(user_id, "name", extracted_name)
             return f"Запомнил! Тебя зовут **{extracted_name}** 😊"
         
-        # ===== ПРОВЕРКА НА ГОРОД =====
+        # === ГОРОД ===
         extracted_city = extract_city_from_text(text)
         if extracted_city:
             save_fact(user_id, "city", extracted_city)
             return f"Запомнил! Ты из **{extracted_city}** 😊"
         
-        # ===== ОСНОВНОЙ ДИАЛОГ С DEEPSEEK =====
+        # === ОСНОВНОЙ ДИАЛОГ ===
         history = get_recent_history(user_id, limit=15)
         history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
         
-        # ===== ЖЁСТКИЙ ПРОМТ =====
-        system_prompt = f"""Ты — AURA, живой собеседник.
+        # === ЕСТЕСТВЕННЫЙ ПРОМТ ===
+        system_prompt = f"""Ты — AURA. Ты живой собеседник, друг.
 
 Пользователь: {user_name or "Незнакомец"}
 Город: {user_city or "Неизвестен"}
 
-История (последние 15 сообщений):
+Вот что вы обсуждали раньше:
 {history_text}
 
-ПРАВИЛА:
-1. Если пользователь просит найти что-то в интернете (адрес, сайт, новости, картинки, видео, погода, курс, фильмы) — ОБЯЗАТЕЛЬНО используй [SEARCH: запрос]
-2. Если пользователь спрашивает о прошлом или истории — используй [HISTORY: запрос]
-3. Если пользователь просто общается — отвечай естественно, как человек, коротко (2-3 предложения), с эмодзи
+Общайся как человек. Отвечай коротко, по-дружески, с душой. Используй эмодзи, шути, если к месту.
 
-ПРИМЕРЫ:
-- Пользователь: "Найди клинику Калашникова" → Ты: [SEARCH: клиника Калашникова]
-- Пользователь: "Что мы говорили про работу?" → Ты: [HISTORY: работа]
-- Пользователь: "Привет!" → Ты: Привет! 😊 Как дела?
+Если нужно найти что-то в интернете — просто напиши [SEARCH: запрос], и я поищу.
 
-НИКОГДА НЕ ОТВЕЧАЙ ПУСТОТОЙ.
-ЕСЛИ НЕ ЗНАЕШЬ — ИСПОЛЬЗУЙ [SEARCH].
+Будь собой.
 """
         
         messages = [{"role": "system", "content": system_prompt}]
@@ -339,12 +320,11 @@ def deepseek_process(user_id, text):
         
         logger.info(f"🧠 DeepSeek запрос: {text[:50]}...")
         
-        # ===== ЗАПРОС К DEEPSEEK =====
         try:
             response = deepseek.chat.completions.create(
                 model="deepseek-v4-flash",
                 messages=messages,
-                temperature=0.85,
+                temperature=0.9,
                 max_tokens=600,
                 timeout=30
             )
@@ -354,7 +334,7 @@ def deepseek_process(user_id, text):
             logger.error(f"❌ Ошибка DeepSeek: {e}")
             return "😅 Не удалось связаться с DeepSeek. Попробуй ещё раз."
         
-        # ===== ОБРАБОТКА КОМАНД =====
+        # === ОБРАБОТКА КОМАНД ===
         
         # 1. Поиск в интернете
         search_match = re.search(r'\[SEARCH:\s*(.+?)\]', reply)
@@ -362,7 +342,6 @@ def deepseek_process(user_id, text):
             query = search_match.group(1).strip()
             logger.info(f"🔍 Поиск в интернете: '{query}'")
             
-            # Добавляем город если есть
             if user_city and not any(word in query.lower() for word in ["белово", "инской", "кемерово"]):
                 query = f"{query} {user_city}"
                 logger.info(f"🔍 Добавил город: '{user_city}'")
@@ -378,13 +357,13 @@ def deepseek_process(user_id, text):
                     url = r.get("url", "")
                     results_text += f"\n- {title}: {content}...\n  Источник: {url}\n"
                 
-                format_prompt = f"Вот что нашлось по запросу '{query}':\n{results_text}\n\nОтветь пользователю коротко, с эмодзи, дай ссылку на источник."
+                format_prompt = f"Вот что нашлось по запросу '{query}':\n{results_text}\n\nОтветь пользователю как живой человек, коротко, дай ссылку."
                 
                 try:
                     final = deepseek.chat.completions.create(
                         model="deepseek-v4-flash",
                         messages=[{"role": "user", "content": format_prompt}],
-                        temperature=0.7,
+                        temperature=0.8,
                         max_tokens=300,
                         timeout=30
                     )
@@ -393,7 +372,6 @@ def deepseek_process(user_id, text):
                     if result_text and result_text.strip() not in ["", "...", "…"]:
                         return result_text
                     else:
-                        # Если DeepSeek вернул пустоту — отдаём сырые данные
                         return f"Нашёл информацию по запросу '{query}':\n\n{results_text}"
                         
                 except Exception as e:
@@ -412,13 +390,13 @@ def deepseek_process(user_id, text):
             
             if results:
                 text_results = "\n".join([f"{r['role']}: {r['content']}" for r in results[:5]])
-                format_prompt = f"Вот что нашлось в истории по запросу '{query}':\n{text_results}\n\nОтветь пользователю коротко, с эмодзи."
+                format_prompt = f"Вот что нашлось в истории по запросу '{query}':\n{text_results}\n\nОтветь пользователю как живой человек, коротко."
                 
                 try:
                     final = deepseek.chat.completions.create(
                         model="deepseek-v4-flash",
                         messages=[{"role": "user", "content": format_prompt}],
-                        temperature=0.7,
+                        temperature=0.8,
                         max_tokens=300,
                         timeout=30
                     )
@@ -460,7 +438,6 @@ async def webhook(request: Request):
         user_id = str(msg["from"]["id"])
         text = None
         
-        # === ГОЛОС ===
         if "voice" in msg:
             file_id = msg["voice"]["file_id"]
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
@@ -478,23 +455,17 @@ async def webhook(request: Request):
                 await send_message(user_id, "⚠️ Ошибка обработки голоса.")
                 return JSONResponse({"ok": True})
         
-        # === ТЕКСТ ===
         if "text" in msg:
             text = msg["text"].strip()
         
         if not text:
             return JSONResponse({"ok": True})
         
-        # Сохраняем сообщение пользователя
         save_message(user_id, "user", text)
         
-        # Обрабатываем запрос
         reply = deepseek_process(user_id, text)
         
-        # Сохраняем ответ
         save_message(user_id, "assistant", reply)
-        
-        # Отправляем пользователю
         await send_message(user_id, reply)
         
         return JSONResponse({"ok": True})
