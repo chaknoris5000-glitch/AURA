@@ -24,7 +24,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-logger.info("🚀 БОТ — ПОИСК + DEEPSEEK ФОРМАТИРОВАНИЕ")
+logger.info("🚀 БОТ — ПОИСК + DEEPSEEK ФОРМАТИРОВАНИЕ (БЕЗ ПРОВЕРКИ)")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -185,19 +185,17 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# 6. ПОИСК + DEEPSEEK ФОРМАТИРОВАНИЕ
+# 6. ПОИСК + DEEPSEEK ФОРМАТИРОВАНИЕ (БЕЗ ПРОВЕРКИ)
 # ============================================================
 
 def process_search(query, user_city=None, user_name=None):
-    """Бот ищет, DeepSeek проверяет и форматирует"""
+    """Бот ищет, DeepSeek форматирует (без проверки)"""
     
-    # Добавляем город если есть
     search_query = query
     if user_city:
         search_query = f"{query} {user_city}"
         logger.info(f"🔍 Добавил город: '{user_city}'")
     
-    # Бот ищет в интернете
     data = search_web(search_query)
     if not data or not data.get("results"):
         return None
@@ -205,7 +203,6 @@ def process_search(query, user_city=None, user_name=None):
     results = data.get("results", [])
     answer = data.get("answer", "")
     
-    # Берём первые 3 результата
     formatted_results = ""
     for r in results[:3]:
         title = r.get("title", "Без названия")
@@ -214,7 +211,6 @@ def process_search(query, user_city=None, user_name=None):
         if url:
             formatted_results += f"\n**{title}**\n{content}...\n[Источник]({url})\n"
     
-    # DeepSeek проверяет и форматирует
     prompt = f"""Пользователь искал: "{query}"
 Город: {user_city or "Не указан"}
 
@@ -242,7 +238,6 @@ def process_search(query, user_city=None, user_name=None):
     except Exception as e:
         logger.error(f"❌ Ошибка форматирования: {e}")
     
-    # Запасной вариант — просто ссылка
     if results:
         first = results[0]
         url = first.get("url", "")
@@ -253,7 +248,6 @@ def process_search(query, user_city=None, user_name=None):
     return None
 
 def process_history(query, user_id):
-    """Бот ищет в истории, DeepSeek форматирует"""
     results = search_history(user_id, query)
     if not results:
         return None
@@ -291,28 +285,23 @@ def deepseek_process(user_id, text):
         user_name = get_fact(user_id, "name")
         user_city = get_fact(user_id, "city")
         
-        # === ВРЕМЯ ===
         if any(word in text.lower() for word in ["время", "сколько времени", "который час", "какое сегодня число"]):
             return get_current_time()
         
-        # === ПРЯМОЙ ПОИСК ===
         search_triggers = ["найди", "поищи", "найти", "покажи", "где", "сайт", "фильм", "клиника", "адрес", "маршрут", "ссылка"]
         if any(word in text.lower() for word in search_triggers):
             logger.info(f"🔍 Бот ищет: '{text}'")
             
-            # Сначала ищем в интернете
             result = process_search(text, user_city, user_name)
             if result:
                 return result
             
-            # Если в интернете нет — ищем в истории
             history_result = process_history(text, user_id)
             if history_result:
                 return history_result
             
             return "Ничего не нашёл. Попробуй переформулировать запрос 😊"
         
-        # === ОБЫЧНЫЙ ДИАЛОГ ===
         history = get_recent_history(user_id, limit=15)
         history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
         
