@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# ===== КЛЮЧИ =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
@@ -113,7 +112,7 @@ def get_current_time():
 def search_web(query, max_results=5):
     if not TAVILY_API_KEY:
         return None
-    logger.info(f"🌐 Поиск в интернете: '{query}'")
+    logger.info(f"🌐 Поиск: '{query}'")
     try:
         response = requests.post(
             "https://api.tavily.com/search",
@@ -206,23 +205,26 @@ def process_search_command(query, user_city=None):
         url = r.get("url", "")
         results_text += f"\n**{title}**\n{content}...\n[Источник]({url})\n"
     
-    # DeepSeek проверяет и форматирует результаты
-    format_prompt = f"Вот что нашлось:\n{results_text}\n\nОтветь пользователю как живой человек, коротко, дай ссылку на проверенный источник."
+    # DeepSeek проверяет и форматирует результаты КОРОТКО
+    format_prompt = f"Вот что нашлось:\n{results_text}\n\nОтветь пользователю КОРОТКО (2-3 предложения). Дай только самую важную информацию и ссылку. Не копируй весь текст."
     try:
         final = deepseek.chat.completions.create(
             model="deepseek-v4-flash",
             messages=[{"role": "user", "content": format_prompt}],
-            temperature=0.8,
-            max_tokens=300,
+            temperature=0.7,
+            max_tokens=200,
             timeout=30
         )
         reply = final.choices[0].message.content
         if reply and reply.strip() not in ["", "...", "…"]:
             return reply
-        return f"Нашёл информацию:\n\n{results_text}"
+        # Если DeepSeek вернул пустоту — отдаём минимальную информацию
+        first_result = results[0]
+        return f"Вот что нашёл: {first_result.get('title')}\n{first_result.get('url')}"
     except Exception as e:
         logger.error(f"❌ Ошибка форматирования: {e}")
-        return f"Нашёл информацию:\n\n{results_text}"
+        first_result = results[0]
+        return f"Вот что нашёл: {first_result.get('title')}\n{first_result.get('url')}"
 
 def process_history_command(query, user_id):
     results = search_history(user_id, query)
@@ -230,22 +232,22 @@ def process_history_command(query, user_id):
         return "Ничего не нашёл в истории по этому запросу 😊"
     
     text_results = "\n".join([f"{r['role']}: {r['content']}" for r in results[:5]])
-    format_prompt = f"Вот что нашлось в истории:\n{text_results}\n\nОтветь пользователю как живой человек, коротко."
+    format_prompt = f"Вот что нашлось в истории:\n{text_results}\n\nОтветь пользователю коротко (2-3 предложения)."
     try:
         final = deepseek.chat.completions.create(
             model="deepseek-v4-flash",
             messages=[{"role": "user", "content": format_prompt}],
-            temperature=0.8,
-            max_tokens=300,
+            temperature=0.7,
+            max_tokens=200,
             timeout=30
         )
         reply = final.choices[0].message.content
         if reply and reply.strip() not in ["", "...", "…"]:
             return reply
-        return f"В истории нашлось:\n\n{text_results}"
+        return f"В истории нашлось:\n{text_results[:200]}"
     except Exception as e:
         logger.error(f"❌ Ошибка форматирования: {e}")
-        return f"В истории нашлось:\n\n{text_results}"
+        return f"В истории нашлось:\n{text_results[:200]}"
 
 # ============================================================
 # 7. DEEPSEEK — МОЗГ
@@ -264,7 +266,7 @@ def deepseek_process(user_id, text):
         history = get_recent_history(user_id, limit=15)
         history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
         
-        # === ПРОМТ С ЖЁСТКИМИ ПРАВИЛАМИ ===
+        # === ПРОМТ С КОРОТКИМИ ОТВЕТАМИ ===
         system_prompt = f"""Ты — AURA. Ты живой собеседник.
 
 Пользователь: {user_name or "Незнакомец"}
@@ -274,21 +276,22 @@ def deepseek_process(user_id, text):
 {history_text}
 
 ТВОИ КОМАНДЫ ДЛЯ БОТА:
-1. Если пользователь просит найти что-то в интернете (адрес, сайт, новости, картинки, видео, фильм, рецепт) — ОБЯЗАТЕЛЬНО напиши:
+1. Если пользователь просит найти что-то в интернете — напиши:
 [SEARCH: запрос]
 
-2. Если пользователь спрашивает о прошлом (что мы говорили, что я писал) — напиши:
+2. Если пользователь спрашивает о прошлом — напиши:
 [HISTORY: запрос]
 
-3. Если пользователь просто общается — отвечай как человек.
+3. Если пользователь просто общается — отвечай как человек, КОРОТКО (2-3 предложения).
 
-ПРИМЕРЫ:
-- Пользователь: "Найди клинику Калашникова" → Ты: [SEARCH: клиника Калашникова]
-- Пользователь: "Дай рецепт лазаньи" → Ты: [SEARCH: рецепт лазаньи]
-- Пользователь: "Найди фильм Форсаж" → Ты: [SEARCH: Форсаж смотреть онлайн]
-- Пользователь: "Что мы говорили про работу?" → Ты: [HISTORY: работа]
+ПРАВИЛА ОТВЕТОВ:
+- Отвечай КОРОТКО (2-3 предложения)
+- Дай только САМОЕ ВАЖНОЕ
+- Если даёшь ссылку — только одну, самую полезную
+- Не копируй длинные тексты с сайтов
+- Будь живым, с эмодзи, но без простынь
 
-Общайся как человек. Будь собой.
+Будь собой.
 """
         
         messages = [{"role": "system", "content": system_prompt}]
@@ -300,8 +303,8 @@ def deepseek_process(user_id, text):
         response = deepseek.chat.completions.create(
             model="deepseek-v4-flash",
             messages=messages,
-            temperature=0.9,
-            max_tokens=600,
+            temperature=0.85,
+            max_tokens=400,
             timeout=30
         )
         reply = response.choices[0].message.content
