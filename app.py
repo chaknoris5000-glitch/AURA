@@ -21,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-print("🚀 БОТ — ФАСАД, DEEPSEEK РЕШАЕТ, БОТ ИЩЕТ")
+print("🚀 БОТ — ФАСАД, DEEPSEEK ВСЁ РЕШАЕТ")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -54,7 +54,7 @@ def save_message(user_id, role, content):
     except Exception as e:
         print(f"❌ Ошибка сохранения: {e}")
 
-def get_recent_history(user_id, limit=20):
+def get_recent_history(user_id, limit=15):
     if not supabase:
         return []
     try:
@@ -189,7 +189,7 @@ async def send_message(chat_id, text):
         print(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# 6. DEEPSEEK + БОТ (ПРАВИЛЬНАЯ АРХИТЕКТУРА)
+# 6. DEEPSEEK — ВСЁ РЕШАЕТ САМ
 # ============================================================
 
 def deepseek_process(user_id, text):
@@ -202,24 +202,21 @@ def deepseek_process(user_id, text):
         if any(word in text_lower for word in ["время", "сколько времени", "который час", "какое сегодня число", "какой день"]):
             return get_current_time()
 
-        history = get_recent_history(user_id, limit=20)
+        # === ЗАГРУЖАЕМ 15 ПОСЛЕДНИХ СООБЩЕНИЙ ===
+        history = get_recent_history(user_id, limit=15)
         history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
 
-        # === ПРОМТ С ПРИМЕРОМ ===
+        # === МИНИМАЛЬНЫЙ ПРОМТ ===
         system_prompt = f"""Ты — AURA, живой собеседник.
 
 Пользователь: {user_name or "Незнакомец"}
 Город: {user_city or "Неизвестен"}
 
-История:
+История (последние 15 сообщений):
 {history_text}
 
-Если нужна информация из интернета — напиши:
+Если нужно найти информацию в интернете — напиши:
 [SEARCH: запрос]
-
-Пример:
-Пользователь: "Найди клинику Калашникова"
-Ты: [SEARCH: клиника Калашникова]
 
 Для поиска в истории:
 [HISTORY: запрос]
@@ -228,9 +225,10 @@ def deepseek_process(user_id, text):
 [SAVE_NAME: имя]
 [SAVE_CITY: город]
 
-Общайся естественно.
+Общайся естественно, как человек.
 """
         
+        # === ФОРМИРУЕМ СООБЩЕНИЯ С ИСТОРИЕЙ ===
         messages = [{"role": "system", "content": system_prompt}]
         for h in history:
             messages.append({"role": h["role"], "content": h["content"]})
@@ -245,7 +243,7 @@ def deepseek_process(user_id, text):
         )
         reply = response.choices[0].message.content
 
-        # === БОТ ОБРАБАТЫВАЕТ КОМАНДЫ ===
+        # === БОТ ВЫПОЛНЯЕТ КОМАНДЫ ===
 
         # 1. Поиск в интернете
         search_match = re.search(r'\[SEARCH:\s*(.+?)\]', reply)
@@ -257,8 +255,6 @@ def deepseek_process(user_id, text):
                 results_text = ""
                 for r in data.get("results", [])[:5]:
                     results_text += f"\n- {r.get('title')}: {r.get('content')[:300]}...\n  Источник: {r.get('url')}"
-                
-                # Бот отправляет результат DeepSeek для форматирования
                 format_prompt = f"Вот что нашлось по запросу '{query}':\n{results_text}\n\nОтветь пользователю коротко, с эмодзи, дай ссылку на источник."
                 final = deepseek.chat.completions.create(
                     model="deepseek-v4-flash",
