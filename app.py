@@ -10,7 +10,6 @@ from groq import Groq
 from dotenv import load_dotenv
 import requests
 import logging
-import time
 
 # ===== ЛОГИРОВАНИЕ =====
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -27,7 +26,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-logger.info("🚀 БОТ ЗАПУСКАЕТСЯ...")
+logger.info("🚀 БОТ ЗАПУЩЕН")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -43,12 +42,12 @@ groq = Groq(api_key=GROQ_API_KEY)
 app = FastAPI()
 
 # ============================================================
-# 1. БАЗА ДАННЫХ
+# 1. БАЗА
 # ============================================================
 
 def save_message(user_id, role, content):
     if not supabase:
-        return False
+        return
     try:
         supabase.table("history").insert({
             "user_id": user_id,
@@ -57,10 +56,8 @@ def save_message(user_id, role, content):
             "created_at": datetime.now().isoformat()
         }).execute()
         logger.info(f"💾 {role}: {content[:30]}...")
-        return True
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения: {e}")
-        return False
 
 def get_recent_history(user_id, limit=15):
     if not supabase:
@@ -95,7 +92,7 @@ def search_history(user_id, query):
 
 def save_fact(user_id, key, value):
     if not supabase:
-        return False
+        return
     try:
         supabase.table("user_memory").delete().eq("user_id", user_id).eq("key", key).execute()
         supabase.table("user_memory").insert({
@@ -105,10 +102,8 @@ def save_fact(user_id, key, value):
             "created_at": datetime.now().isoformat()
         }).execute()
         logger.info(f"💾 Сохранён факт: {key} = {value}")
-        return True
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения факта: {e}")
-        return False
 
 def get_fact(user_id, key):
     if not supabase:
@@ -136,7 +131,7 @@ def search_web(query, max_results=5):
         logger.error("❌ Tavily API ключ не найден")
         return None
     
-    logger.info(f"🌐 Tavily запрос: '{query}'")
+    logger.info(f"🌐 Tavily: '{query}'")
     
     try:
         url = "https://api.tavily.com/search"
@@ -153,7 +148,7 @@ def search_web(query, max_results=5):
         
         if response.status_code == 200:
             data = response.json()
-            logger.info(f"✅ Tavily: найдено {len(data.get('results', []))} результатов")
+            logger.info(f"✅ Tavily: {len(data.get('results', []))} результатов")
             return {
                 "answer": data.get("answer", ""),
                 "results": data.get("results", []),
@@ -175,7 +170,6 @@ def transcribe_audio(audio_url):
     try:
         resp = requests.get(audio_url, timeout=30)
         if resp.status_code != 200:
-            logger.error(f"❌ Ошибка загрузки аудио: {resp.status_code}")
             return None
             
         with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp:
@@ -220,7 +214,6 @@ async def send_message(chat_id, text):
         }, timeout=30)
         
         if response.status_code != 200:
-            logger.error(f"❌ Ошибка отправки: {response.status_code}")
             requests.post(url, json={
                 "chat_id": chat_id,
                 "text": text
@@ -230,12 +223,10 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# 6. ИЗВЛЕЧЕНИЕ ИМЕНИ И ГОРОДА
+# 6. ГЛАВНАЯ ЛОГИКА
 # ============================================================
 
 def extract_name_from_text(text):
-    text_lower = text.lower()
-    
     match = re.search(r"меня зовут\s+([А-Яа-яёЁ\-]+)", text, re.I)
     if match:
         return match.group(1).capitalize()
@@ -267,10 +258,6 @@ def extract_city_from_text(text):
     
     return None
 
-# ============================================================
-# 7. DEEPSEEK — ЕСТЕСТВЕННЫЙ ДИАЛОГ
-# ============================================================
-
 def deepseek_process(user_id, text):
     try:
         user_name = get_fact(user_id, "name")
@@ -282,33 +269,32 @@ def deepseek_process(user_id, text):
             return get_current_time()
         
         # === ИМЯ ===
-        extracted_name = extract_name_from_text(text)
-        if extracted_name:
-            save_fact(user_id, "name", extracted_name)
-            return f"Запомнил! Тебя зовут **{extracted_name}** 😊"
+        name = extract_name_from_text(text)
+        if name:
+            save_fact(user_id, "name", name)
+            return f"Запомнил! Тебя зовут **{name}** 😊"
         
         # === ГОРОД ===
-        extracted_city = extract_city_from_text(text)
-        if extracted_city:
-            save_fact(user_id, "city", extracted_city)
-            return f"Запомнил! Ты из **{extracted_city}** 😊"
+        city = extract_city_from_text(text)
+        if city:
+            save_fact(user_id, "city", city)
+            return f"Запомнил! Ты из **{city}** 😊"
         
         # === ОСНОВНОЙ ДИАЛОГ ===
         history = get_recent_history(user_id, limit=15)
         history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
         
-        # === ЕСТЕСТВЕННЫЙ ПРОМТ ===
         system_prompt = f"""Ты — AURA. Ты живой собеседник, друг.
 
 Пользователь: {user_name or "Незнакомец"}
 Город: {user_city or "Неизвестен"}
 
-Вот что вы обсуждали раньше:
+История:
 {history_text}
 
-Общайся как человек. Отвечай коротко, по-дружески, с душой. Используй эмодзи, шути, если к месту.
+Общайся как человек. Коротко, с душой, с эмодзи.
 
-Если нужно найти что-то в интернете — просто напиши [SEARCH: запрос], и я поищу.
+Если нужно найти информацию — напиши [SEARCH: запрос]
 
 Будь собой.
 """
@@ -318,7 +304,7 @@ def deepseek_process(user_id, text):
             messages.append({"role": h["role"], "content": h["content"]})
         messages.append({"role": "user", "content": text})
         
-        logger.info(f"🧠 DeepSeek запрос: {text[:50]}...")
+        logger.info(f"🧠 DeepSeek: {text[:50]}...")
         
         try:
             response = deepseek.chat.completions.create(
@@ -334,13 +320,11 @@ def deepseek_process(user_id, text):
             logger.error(f"❌ Ошибка DeepSeek: {e}")
             return "😅 Не удалось связаться с DeepSeek. Попробуй ещё раз."
         
-        # === ОБРАБОТКА КОМАНД ===
-        
-        # 1. Поиск в интернете
+        # === ПОИСК В ИНТЕРНЕТЕ ===
         search_match = re.search(r'\[SEARCH:\s*(.+?)\]', reply)
         if search_match:
             query = search_match.group(1).strip()
-            logger.info(f"🔍 Поиск в интернете: '{query}'")
+            logger.info(f"🔍 Поиск: '{query}'")
             
             if user_city and not any(word in query.lower() for word in ["белово", "инской", "кемерово"]):
                 query = f"{query} {user_city}"
@@ -355,7 +339,7 @@ def deepseek_process(user_id, text):
                     title = r.get("title", "Без названия")
                     content = r.get("content", "")[:300]
                     url = r.get("url", "")
-                    results_text += f"\n- {title}: {content}...\n  Источник: {url}\n"
+                    results_text += f"\n**{title}**\n{content}...\n[Источник]({url})\n"
                 
                 format_prompt = f"Вот что нашлось по запросу '{query}':\n{results_text}\n\nОтветь пользователю как живой человек, коротко, дай ссылку."
                 
@@ -380,11 +364,11 @@ def deepseek_process(user_id, text):
             else:
                 return f"Не удалось найти информацию по запросу '{query}'. Попробуй переформулировать запрос 😊"
         
-        # 2. Поиск в истории
+        # === ПОИСК В ИСТОРИИ ===
         history_match = re.search(r'\[HISTORY:\s*(.+?)\]', reply)
         if history_match:
             query = history_match.group(1).strip()
-            logger.info(f"📚 Поиск в истории: '{query}'")
+            logger.info(f"📚 История: '{query}'")
             
             results = search_history(user_id, query)
             
@@ -413,18 +397,18 @@ def deepseek_process(user_id, text):
             else:
                 return "Ничего не нашёл в истории по этому запросу 😊"
         
-        # 3. Если нет команд — возвращаем ответ DeepSeek
+        # === ЕСЛИ НЕТ КОМАНД ===
         if not reply or reply.strip() in ["", "...", "…"]:
             return "Что-то пошло не так. Попробуй переформулировать вопрос 😊"
         
         return reply
         
     except Exception as e:
-        logger.error(f"❌ Ошибка в deepseek_process: {e}")
+        logger.error(f"❌ Ошибка: {e}")
         return "😅 Произошла ошибка. Попробуй ещё раз."
 
 # ============================================================
-# 8. WEBHOOK
+# 7. WEBHOOK
 # ============================================================
 
 @app.post("/webhook")
@@ -451,7 +435,7 @@ async def webhook(request: Request):
                         await send_message(user_id, "⚠️ Не удалось распознать голос.")
                         return JSONResponse({"ok": True})
             except Exception as e:
-                logger.error(f"❌ Ошибка обработки голоса: {e}")
+                logger.error(f"❌ Ошибка голоса: {e}")
                 await send_message(user_id, "⚠️ Ошибка обработки голоса.")
                 return JSONResponse({"ok": True})
         
@@ -471,7 +455,7 @@ async def webhook(request: Request):
         return JSONResponse({"ok": True})
         
     except Exception as e:
-        logger.error(f"❌ Ошибка в webhook: {e}")
+        logger.error(f"❌ Ошибка webhook: {e}")
         try:
             await send_message(user_id, "😅 Что-то пошло не так. Попробуй ещё раз.")
         except:
