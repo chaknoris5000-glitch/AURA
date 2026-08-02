@@ -40,7 +40,7 @@ groq = Groq(api_key=GROQ_API_KEY)
 app = FastAPI()
 
 # ============================================================
-# БАЗА
+# 1. БАЗА
 # ============================================================
 
 def save_message(user_id, role, content):
@@ -98,7 +98,7 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# ВРЕМЯ
+# 2. ВРЕМЯ
 # ============================================================
 
 def get_current_time():
@@ -106,7 +106,7 @@ def get_current_time():
     return f"Сейчас **{now.strftime('%H:%M')}**, {now.strftime('%d.%m.%Y')} 😊"
 
 # ============================================================
-# ПОИСК (TAVILY)
+# 3. ПОИСК (TAVILY)
 # ============================================================
 
 def search_web(query, max_results=3):
@@ -134,7 +134,7 @@ def search_web(query, max_results=3):
     return None
 
 # ============================================================
-# ГОЛОС
+# 4. ГОЛОС
 # ============================================================
 
 def transcribe_audio(audio_url):
@@ -158,7 +158,7 @@ def transcribe_audio(audio_url):
         return None
 
 # ============================================================
-# ОТПРАВКА
+# 5. ОТПРАВКА
 # ============================================================
 
 async def send_chat_action(chat_id):
@@ -185,11 +185,10 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОБРАБОТКА КОМАНД
+# 6. ОБРАБОТКА КОМАНД
 # ============================================================
 
 def process_history_command(query, user_id, user_name=None):
-    """Поиск в истории Supabase"""
     results = search_history(user_id, query)
     if not results:
         return None
@@ -219,7 +218,6 @@ def process_history_command(query, user_id, user_name=None):
         return f"В истории нашлось:\n{text_results[:300]}"
 
 def process_search_command(query, user_city=None, user_name=None):
-    """Поиск в интернете через Tavily"""
     if user_city:
         query = f"{query} {user_city}"
         logger.info(f"🔍 Добавил город: '{user_city}'")
@@ -231,7 +229,6 @@ def process_search_command(query, user_city=None, user_name=None):
     results = data.get("results", [])[:3]
     answer = data.get("answer", "")
     
-    # Формируем текст для DeepSeek
     results_text = ""
     for r in results:
         title = r.get("title", "Без названия")
@@ -260,7 +257,6 @@ def process_search_command(query, user_city=None, user_name=None):
     except Exception as e:
         logger.error(f"❌ Ошибка форматирования поиска: {e}")
     
-    # Запасной вариант
     if answer:
         return f"Нашёл! 🎯\n\n{answer[:300]}"
     if results:
@@ -269,7 +265,7 @@ def process_search_command(query, user_city=None, user_name=None):
     return None
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА — ИЕРАРХИЯ: КОНТЕКСТ → ИСТОРИЯ → ИНТЕРНЕТ
+# 7. ГЛАВНАЯ ЛОГИКА
 # ============================================================
 
 def deepseek_process(user_id, text):
@@ -281,35 +277,28 @@ def deepseek_process(user_id, text):
         if any(word in text.lower() for word in ["время", "сколько времени", "который час", "какое сегодня число"]):
             return get_current_time()
         
-        # === КОНТЕКСТ (15 сообщений) ===
+        # === КОНТЕКСТ ===
         history = get_recent_history(user_id, limit=15)
         history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
         
-        # === ПРОМТ С ПРАВИЛЬНОЙ ИЕРАРХИЕЙ ===
+        # === ПРОМТ С ПРИМЕРАМИ ===
         system_prompt = f"""Ты — AURA. Ты живой собеседник.
 
 Пользователь: {user_name or "Незнакомец"}
 Город: {user_city or "Неизвестен"}
 
-История (последние 15 сообщений):
+История:
 {history_text}
 
-ТЫ ДОЛЖЕН ПОНИМАТЬ КОНТЕКСТ И ИСПОЛЬЗОВАТЬ ЕГО!
-
-Если вопрос касается того, что вы обсуждали раньше — используй историю.
-
-Если нужен поиск в истории (Supabase) — напиши:
-[HISTORY: запрос]
-
-Если нужен поиск в интернете — напиши:
-[SEARCH: запрос]
+ЕСЛИ НУЖЕН ПОИСК → [SEARCH: запрос]
+ЕСЛИ НУЖНА ИСТОРИЯ → [HISTORY: запрос]
 
 ПРИМЕРЫ:
+- Пользователь: "Найди фильм Матрица" → [SEARCH: фильм Матрица смотреть онлайн]
 - Пользователь: "Что мы говорили про работу?" → [HISTORY: работа]
-- Пользователь: "Найди клинику" → [SEARCH: клиника]
-- Пользователь: "Дай ссылку на фильм" → [SEARCH: фильм]
+- Пользователь: "Дай ссылку на клинику" → [SEARCH: клиника Белово]
 
-Отвечай коротко, как человек. Будь собой.
+Отвечай коротко. Будь собой.
 """
         
         messages = [{"role": "system", "content": system_prompt}]
@@ -330,7 +319,7 @@ def deepseek_process(user_id, text):
         
         # === БОТ ВЫПОЛНЯЕТ КОМАНДЫ ===
         
-        # 1. Поиск в истории (Supabase)
+        # 1. Поиск в истории
         history_match = re.search(r'\[HISTORY:\s*(.+?)\]', reply)
         if history_match:
             query = history_match.group(1).strip()
@@ -338,13 +327,12 @@ def deepseek_process(user_id, text):
             result = process_history_command(query, user_id, user_name)
             if result:
                 return result
-            else:
-                # Если в истории не нашлось — пробуем интернет
-                logger.info(f"📚 В истории не нашлось, ищу в интернете...")
-                search_result = process_search_command(query, user_city, user_name)
-                if search_result:
-                    return search_result
-                return "Ничего не нашёл в истории и в интернете. Попробуй переформулировать запрос 😊"
+            # Если в истории нет — пробуем интернет
+            logger.info(f"📚 В истории не нашлось, ищу в интернете...")
+            search_result = process_search_command(query, user_city, user_name)
+            if search_result:
+                return search_result
+            return "Ничего не нашёл. Попробуй переформулировать запрос 😊"
         
         # 2. Поиск в интернете
         search_match = re.search(r'\[SEARCH:\s*(.+?)\]', reply)
@@ -354,13 +342,12 @@ def deepseek_process(user_id, text):
             result = process_search_command(query, user_city, user_name)
             if result:
                 return result
-            else:
-                # Если в интернете не нашлось — пробуем историю
-                logger.info(f"🔍 В интернете не нашлось, ищу в истории...")
-                history_result = process_history_command(query, user_id, user_name)
-                if history_result:
-                    return history_result
-                return "Ничего не нашёл в интернете и в истории. Попробуй переформулировать запрос 😊"
+            # Если в интернете нет — пробуем историю
+            logger.info(f"🔍 В интернете не нашлось, ищу в истории...")
+            history_result = process_history_command(query, user_id, user_name)
+            if history_result:
+                return history_result
+            return "Ничего не нашёл. Попробуй переформулировать запрос 😊"
         
         # 3. Если нет команд — возвращаем ответ DeepSeek
         if not reply or reply.strip() in ["", "...", "…"]:
@@ -373,7 +360,7 @@ def deepseek_process(user_id, text):
         return "😅 Произошла ошибка. Попробуй ещё раз."
 
 # ============================================================
-# WEBHOOK
+# 8. WEBHOOK
 # ============================================================
 
 @app.post("/webhook")
