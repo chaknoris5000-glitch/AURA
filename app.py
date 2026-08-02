@@ -10,6 +10,7 @@ from groq import Groq
 from dotenv import load_dotenv
 import requests
 import logging
+import time
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -24,7 +25,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-logger.info("🚀 БОТ — ПОИСК + DEEPSEEK ФОРМАТИРОВАНИЕ (БЕЗ ПРОВЕРКИ)")
+logger.info("🚀 AURA — ПРЕМИУМ БОТ")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -57,7 +58,7 @@ def save_message(user_id, role, content):
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения: {e}")
 
-def get_recent_history(user_id, limit=15):
+def get_recent_history(user_id, limit=30):
     if not supabase:
         return []
     try:
@@ -133,6 +134,40 @@ def search_web(query, max_results=5):
         logger.error(f"❌ Ошибка поиска: {e}")
     return None
 
+def get_working_links(query, user_city=None):
+    """Ищет и проверяет ссылки"""
+    if user_city:
+        query = f"{query} {user_city}"
+        logger.info(f"🔍 Добавил город: '{user_city}'")
+    
+    data = search_web(query)
+    if not data or not data.get("results"):
+        return None
+    
+    working_links = []
+    for r in data.get("results", []):
+        url = r.get("url")
+        title = r.get("title", "")
+        content = r.get("content", "")
+        if not url:
+            continue
+        
+        # Проверяем, что ссылка жива
+        try:
+            head = requests.head(url, timeout=5)
+            if head.status_code < 400:
+                working_links.append({
+                    "url": url,
+                    "title": title,
+                    "content": content
+                })
+                if len(working_links) >= 3:
+                    break
+        except:
+            continue
+    
+    return working_links
+
 # ============================================================
 # 4. ГОЛОС
 # ============================================================
@@ -185,127 +220,54 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# 6. ПОИСК + DEEPSEEK ФОРМАТИРОВАНИЕ (БЕЗ ПРОВЕРКИ)
+# 6. ОСНОВНАЯ ЛОГИКА
 # ============================================================
 
-def process_search(query, user_city=None, user_name=None):
-    """Бот ищет, DeepSeek форматирует (без проверки)"""
-    
-    search_query = query
-    if user_city:
-        search_query = f"{query} {user_city}"
-        logger.info(f"🔍 Добавил город: '{user_city}'")
-    
-    data = search_web(search_query)
-    if not data or not data.get("results"):
+def process_search(query, user_city=None):
+    """Поиск с проверкой ссылок"""
+    links = get_working_links(query, user_city)
+    if not links:
         return None
     
-    results = data.get("results", [])
-    answer = data.get("answer", "")
+    if len(links) == 1:
+        link = links[0]
+        return f"Нашёл! 🎯\n\n**{link['title']}**\n[Ссылка]({link['url']})"
     
-    formatted_results = ""
-    for r in results[:3]:
-        title = r.get("title", "Без названия")
-        content = r.get("content", "")[:200]
-        url = r.get("url", "")
-        if url:
-            formatted_results += f"\n**{title}**\n{content}...\n[Источник]({url})\n"
-    
-    prompt = f"""Пользователь искал: "{query}"
-Город: {user_city or "Не указан"}
-
-Вот что нашлось в интернете:
-{formatted_results}
-
-Если есть ответ (answer) — используй его: {answer}
-
-Задача: ответь пользователю КОРОТКО (2-3 предложения).
-Дай только самую важную информацию и ОДНУ ссылку на источник.
-Ответ должен быть красивым, живым, с эмодзи.
-"""
-    
-    try:
-        final = deepseek.chat.completions.create(
-            model="deepseek-v4-flash",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=200,
-            timeout=30
-        )
-        reply = final.choices[0].message.content
-        if reply and reply.strip() not in ["", "...", "…"]:
-            return reply
-    except Exception as e:
-        logger.error(f"❌ Ошибка форматирования: {e}")
-    
-    if results:
-        first = results[0]
-        url = first.get("url", "")
-        title = first.get("title", "")
-        if url:
-            return f"Нашёл! 🎯\n\n**{title}**\n[Ссылка]({url})"
-    
-    return None
-
-def process_history(query, user_id):
-    results = search_history(user_id, query)
-    if not results:
-        return None
-    
-    text_results = "\n".join([f"{r['role']}: {r['content']}" for r in results[:5]])
-    
-    prompt = f"""Вот что нашлось в истории по запросу '{query}':
-{text_results}
-
-Ответь пользователю коротко (2-3 предложения) как живой человек.
-Если это он сам писал — скажи "ты говорил", если бот — "я отвечал".
-"""
-    try:
-        final = deepseek.chat.completions.create(
-            model="deepseek-v4-flash",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=200,
-            timeout=30
-        )
-        reply = final.choices[0].message.content
-        if reply and reply.strip() not in ["", "...", "…"]:
-            return reply
-        return f"В истории нашлось:\n{text_results[:300]}"
-    except Exception as e:
-        logger.error(f"❌ Ошибка форматирования истории: {e}")
-        return f"В истории нашлось:\n{text_results[:300]}"
-
-# ============================================================
-# 7. ГЛАВНАЯ ЛОГИКА
-# ============================================================
+    response = "Нашёл! 🎯\n\n"
+    for i, link in enumerate(links, 1):
+        response += f"{i}. **{link['title']}**\n[Ссылка]({link['url']})\n\n"
+    return response
 
 def deepseek_process(user_id, text):
     try:
         user_name = get_fact(user_id, "name")
         user_city = get_fact(user_id, "city")
         
+        # === ВРЕМЯ ===
         if any(word in text.lower() for word in ["время", "сколько времени", "который час", "какое сегодня число"]):
             return get_current_time()
         
-        search_triggers = ["найди", "поищи", "найти", "покажи", "где", "сайт", "фильм", "клиника", "адрес", "маршрут", "ссылка"]
+        # === ПОИСК ===
+        search_triggers = ["найди", "поищи", "найти", "покажи", "где", "сайт", "фильм", "клиника", "адрес", "маршрут", "ссылка", "квартиру", "квартиры"]
         if any(word in text.lower() for word in search_triggers):
-            logger.info(f"🔍 Бот ищет: '{text}'")
-            
-            result = process_search(text, user_city, user_name)
+            logger.info(f"🔍 Поиск: '{text}'")
+            result = process_search(text, user_city)
             if result:
                 return result
             
-            history_result = process_history(text, user_id)
-            if history_result:
-                return history_result
+            # Если в интернете нет — ищем в истории
+            history_results = search_history(user_id, text)
+            if history_results:
+                hist_text = "\n".join([f"{h['role']}: {h['content']}" for h in history_results[:3]])
+                return f"В истории нашлось:\n\n{hist_text}"
             
             return "Ничего не нашёл. Попробуй переформулировать запрос 😊"
         
-        history = get_recent_history(user_id, limit=15)
+        # === ОСНОВНОЙ ДИАЛОГ ===
+        history = get_recent_history(user_id, limit=30)
         history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
         
-        system_prompt = f"""Ты — AURA. Ты живой собеседник.
+        system_prompt = f"""Ты — AURA. Ты живой собеседник и друг.
 
 Пользователь: {user_name or "Незнакомец"}
 Город: {user_city or "Неизвестен"}
@@ -313,7 +275,14 @@ def deepseek_process(user_id, text):
 История:
 {history_text}
 
-Отвечай коротко, как человек. Будь собой.
+ПРАВИЛА:
+1. Отвечай КОРОТКО (2-3 предложения), но ЖИВО и ЕСТЕСТВЕННО
+2. Используй эмодзи 😊🔥😄
+3. Если пользователь уточняет — УЧИТЫВАЙ КОНТЕКСТ
+4. Если не знаешь — скажи честно
+5. Будь ДРУЖЕЛЮБНЫМ
+
+Ты — друг, а не робот. Будь собой.
 """
         
         messages = [{"role": "system", "content": system_prompt}]
@@ -325,8 +294,8 @@ def deepseek_process(user_id, text):
         response = deepseek.chat.completions.create(
             model="deepseek-v4-flash",
             messages=messages,
-            temperature=0.85,
-            max_tokens=400,
+            temperature=0.95,
+            max_tokens=600,
             timeout=30
         )
         reply = response.choices[0].message.content
@@ -341,7 +310,7 @@ def deepseek_process(user_id, text):
         return "😅 Произошла ошибка. Попробуй ещё раз."
 
 # ============================================================
-# 8. WEBHOOK
+# 7. WEBHOOK
 # ============================================================
 
 @app.post("/webhook")
