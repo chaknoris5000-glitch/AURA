@@ -24,7 +24,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-logger.info("🚀 БОТ — ПОЛНЫЙ КОНТЕКСТ + ЖИВЫЕ ОТВЕТЫ")
+logger.info("🚀 БОТ — ПОЛНЫЙ КОНТЕКСТ + ЖИВЫЕ ОТВЕТЫ (ИСПРАВЛЕННЫЙ)")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -134,13 +134,17 @@ def search_web(query, max_results=5):
     return None
 
 def check_link(url, query):
+    """DeepSeek проверяет ссылку (смягчённая проверка)"""
     try:
+        # Проверяем, что ссылка жива
         head = requests.head(url, timeout=5)
         if head.status_code >= 400:
             return False
+        
+        # DeepSeek проверяет релевантность
         prompt = f"""Ссылка: {url}
-Вопрос: "{query}"
-Эта ссылка ведёт на сайт, который отвечает на вопрос?
+Пользователь искал: "{query}"
+Эта ссылка ведёт на сайт, который может помочь пользователю?
 Ответь ТОЛЬКО ДА или НЕТ.
 """
         response = deepseek.chat.completions.create(
