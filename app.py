@@ -9,6 +9,7 @@ from openai import OpenAI
 from groq import Groq
 from dotenv import load_dotenv
 import requests
+import time
 
 load_dotenv()
 
@@ -123,7 +124,6 @@ def get_current_time():
 
 def search_web(query, max_results=5):
     if not TAVILY_API_KEY:
-        print("❌ Tavily API ключ не найден")
         return None
     print(f"🌐 Tavily: '{query}'")
     try:
@@ -194,19 +194,20 @@ async def send_message(chat_id, text):
 # ============================================================
 
 def deepseek_process(user_id, text):
-    user_name = get_fact(user_id, "name")
-    user_city = get_fact(user_id, "city")
+    try:
+        user_name = get_fact(user_id, "name")
+        user_city = get_fact(user_id, "city")
 
-    # === ВРЕМЯ ===
-    text_lower = text.lower()
-    if any(word in text_lower for word in ["время", "сколько времени", "который час", "какое сегодня число", "какой день"]):
-        return get_current_time()
+        # === ВРЕМЯ ===
+        text_lower = text.lower()
+        if any(word in text_lower for word in ["время", "сколько времени", "который час", "какое сегодня число", "какой день"]):
+            return get_current_time()
 
-    history = get_recent_history(user_id, limit=20)
-    history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
+        history = get_recent_history(user_id, limit=20)
+        history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
 
-    # === СИСТЕМНЫЙ ПРОМТ ===
-    system_prompt = f"""Ты — AURA, живой, дружелюбный собеседник. Ты общаешься с пользователем через бота. Все твои ответы проходят через бота.
+        # === СИСТЕМНЫЙ ПРОМТ ===
+        system_prompt = f"""Ты — AURA, живой, дружелюбный собеседник. Ты общаешься с пользователем через бота. Все твои ответы проходят через бота.
 
 Пользователь: {user_name or "Незнакомец"}
 Город: {user_city or "Неизвестен"}
@@ -222,78 +223,86 @@ def deepseek_process(user_id, text):
 
 Отвечай коротко (2-3 предложения), с эмодзи. Никогда не отвечай пустотой.
 """
-    
-    messages = [{"role": "system", "content": system_prompt}]
-    for h in history:
-        messages.append({"role": h["role"], "content": h["content"]})
-    messages.append({"role": "user", "content": text})
+        
+        messages = [{"role": "system", "content": system_prompt}]
+        for h in history:
+            messages.append({"role": h["role"], "content": h["content"]})
+        messages.append({"role": "user", "content": text})
 
-    print(f"🧠 DeepSeek: {text[:50]}...")
-    response = deepseek.chat.completions.create(
-        model="deepseek-v4-flash",
-        messages=messages,
-        temperature=0.85,
-        max_tokens=600
-    )
-    reply = response.choices[0].message.content
+        print(f"🧠 DeepSeek: {text[:50]}...")
+        response = deepseek.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=messages,
+            temperature=0.85,
+            max_tokens=600
+        )
+        reply = response.choices[0].message.content
 
-    # === ОБРАБОТКА КОМАНД DEEPSEEK ===
+        # === ОБРАБОТКА КОМАНД DEEPSEEK ===
 
-    # 1. Поиск в интернете
-    search_match = re.search(r'\[SEARCH:\s*(.+?)\]', reply)
-    if search_match:
-        query = search_match.group(1).strip()
-        print(f"🔍 Бот ищет в интернете: '{query}'")
-        data = search_web(query)
-        if data and data.get("results"):
-            results_text = ""
-            for r in data.get("results", [])[:5]:
-                results_text += f"\n- {r.get('title')}: {r.get('content')[:300]}...\n  Источник: {r.get('url')}"
-            format_prompt = f"Вот что нашлось по запросу '{query}':\n{results_text}\n\nОтветь пользователю коротко, с эмодзи, дай ссылку на источник."
-            final = deepseek.chat.completions.create(
-                model="deepseek-v4-flash",
-                messages=[{"role": "user", "content": format_prompt}],
-                temperature=0.7,
-                max_tokens=300
-            )
-            reply = final.choices[0].message.content
-        else:
-            reply = "Не удалось найти информацию в интернете. Попробуй переформулировать запрос 😊"
+        # 1. Поиск в интернете
+        search_match = re.search(r'\[SEARCH:\s*(.+?)\]', reply)
+        if search_match:
+            query = search_match.group(1).strip()
+            print(f"🔍 Бот ищет в интернете: '{query}'")
+            data = search_web(query)
+            if data and data.get("results"):
+                results_text = ""
+                for r in data.get("results", [])[:5]:
+                    results_text += f"\n- {r.get('title')}: {r.get('content')[:300]}...\n  Источник: {r.get('url')}"
+                format_prompt = f"Вот что нашлось по запросу '{query}':\n{results_text}\n\nОтветь пользователю коротко, с эмодзи, дай ссылку на источник."
+                final = deepseek.chat.completions.create(
+                    model="deepseek-v4-flash",
+                    messages=[{"role": "user", "content": format_prompt}],
+                    temperature=0.7,
+                    max_tokens=300
+                )
+                reply = final.choices[0].message.content
+            else:
+                reply = "Не удалось найти информацию в интернете. Попробуй переформулировать запрос 😊"
 
-    # 2. Поиск в истории
-    history_match = re.search(r'\[HISTORY:\s*(.+?)\]', reply)
-    if history_match:
-        query = history_match.group(1).strip()
-        print(f"📚 Бот ищет в истории: '{query}'")
-        results = search_history(user_id, query)
-        if results:
-            text_results = "\n".join([f"{r['role']}: {r['content']}" for r in results[:5]])
-            format_prompt = f"Вот что нашлось в истории по запросу '{query}':\n{text_results}\n\nОтветь пользователю коротко, с эмодзи."
-            final = deepseek.chat.completions.create(
-                model="deepseek-v4-flash",
-                messages=[{"role": "user", "content": format_prompt}],
-                temperature=0.7,
-                max_tokens=300
-            )
-            reply = final.choices[0].message.content
-        else:
-            reply = "Ничего не нашёл в истории по этому запросу 😊"
+        # 2. Поиск в истории
+        history_match = re.search(r'\[HISTORY:\s*(.+?)\]', reply)
+        if history_match:
+            query = history_match.group(1).strip()
+            print(f"📚 Бот ищет в истории: '{query}'")
+            results = search_history(user_id, query)
+            if results:
+                text_results = "\n".join([f"{r['role']}: {r['content']}" for r in results[:5]])
+                format_prompt = f"Вот что нашлось в истории по запросу '{query}':\n{text_results}\n\nОтветь пользователю коротко, с эмодзи."
+                final = deepseek.chat.completions.create(
+                    model="deepseek-v4-flash",
+                    messages=[{"role": "user", "content": format_prompt}],
+                    temperature=0.7,
+                    max_tokens=300
+                )
+                reply = final.choices[0].message.content
+            else:
+                reply = "Ничего не нашёл в истории по этому запросу 😊"
 
-    # 3. Сохранение имени
-    name_match = re.search(r'\[SAVE_NAME:\s*(.+?)\]', reply)
-    if name_match:
-        name = name_match.group(1).strip()
-        save_fact(user_id, "name", name)
-        reply = f"Запомнил! Тебя зовут **{name}** 😊"
+        # 3. Сохранение имени
+        name_match = re.search(r'\[SAVE_NAME:\s*(.+?)\]', reply)
+        if name_match:
+            name = name_match.group(1).strip()
+            save_fact(user_id, "name", name)
+            reply = f"Запомнил! Тебя зовут **{name}** 😊"
 
-    # 4. Сохранение города
-    city_match = re.search(r'\[SAVE_CITY:\s*(.+?)\]', reply)
-    if city_match:
-        city = city_match.group(1).strip()
-        save_fact(user_id, "city", city)
-        reply = f"Запомнил! Ты из **{city}** 😊"
+        # 4. Сохранение города
+        city_match = re.search(r'\[SAVE_CITY:\s*(.+?)\]', reply)
+        if city_match:
+            city = city_match.group(1).strip()
+            save_fact(user_id, "city", city)
+            reply = f"Запомнил! Ты из **{city}** 😊"
 
-    return reply
+        # === ГАРАНТИРОВАННЫЙ ВОЗВРАТ ===
+        if not reply or reply.strip() in ["", "...", "…"]:
+            return "Что-то пошло не так. Попробуй переформулировать вопрос или напиши позже 😊"
+        
+        return reply
+
+    except Exception as e:
+        print(f"❌ Ошибка в deepseek_process: {e}")
+        return "😅 Произошла ошибка. Попробуй ещё раз."
 
 # ============================================================
 # 7. WEBHOOK
@@ -337,7 +346,7 @@ async def webhook(request: Request):
         return JSONResponse({"ok": True})
 
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
+        print(f"❌ Ошибка в webhook: {e}")
         try:
             await send_message(user_id, "😅 Что-то пошло не так. Попробуй ещё раз.")
         except:
