@@ -24,7 +24,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-logger.info("🚀 БОТ ЗАПУЩЕН")
+logger.info("🚀 БОТ ЗАПУЩЕН — ЖЁСТКИЙ ПРОМТ")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -197,60 +197,26 @@ def process_search_command(query, user_city=None):
     if not data or not data.get("results"):
         return "Не удалось найти информацию в интернете. Попробуй переформулировать запрос 😊"
     
-    results = data.get("results", [])[:5]
-    results_text = ""
-    for r in results:
-        title = r.get("title", "Без названия")
-        content = r.get("content", "")[:300]
-        url = r.get("url", "")
-        results_text += f"\n**{title}**\n{content}...\n[Источник]({url})\n"
+    results = data.get("results", [])[:3]
+    # Берём первый результат — он самый релевантный
+    first = results[0]
+    title = first.get("title", "Без названия")
+    url = first.get("url", "")
+    content = first.get("content", "")[:200]
     
-    # DeepSeek проверяет и форматирует результаты КОРОТКО
-    format_prompt = f"Вот что нашлось:\n{results_text}\n\nОтветь пользователю КОРОТКО (2-3 предложения). Дай только самую важную информацию и ссылку. Не копируй весь текст."
-    try:
-        final = deepseek.chat.completions.create(
-            model="deepseek-v4-flash",
-            messages=[{"role": "user", "content": format_prompt}],
-            temperature=0.7,
-            max_tokens=200,
-            timeout=30
-        )
-        reply = final.choices[0].message.content
-        if reply and reply.strip() not in ["", "...", "…"]:
-            return reply
-        # Если DeepSeek вернул пустоту — отдаём минимальную информацию
-        first_result = results[0]
-        return f"Вот что нашёл: {first_result.get('title')}\n{first_result.get('url')}"
-    except Exception as e:
-        logger.error(f"❌ Ошибка форматирования: {e}")
-        first_result = results[0]
-        return f"Вот что нашёл: {first_result.get('title')}\n{first_result.get('url')}"
+    # Формируем краткий ответ
+    return f"Нашёл! 🎯\n\n**{title}**\n{content}...\n\n[Ссылка]({url})"
 
 def process_history_command(query, user_id):
     results = search_history(user_id, query)
     if not results:
         return "Ничего не нашёл в истории по этому запросу 😊"
     
-    text_results = "\n".join([f"{r['role']}: {r['content']}" for r in results[:5]])
-    format_prompt = f"Вот что нашлось в истории:\n{text_results}\n\nОтветь пользователю коротко (2-3 предложения)."
-    try:
-        final = deepseek.chat.completions.create(
-            model="deepseek-v4-flash",
-            messages=[{"role": "user", "content": format_prompt}],
-            temperature=0.7,
-            max_tokens=200,
-            timeout=30
-        )
-        reply = final.choices[0].message.content
-        if reply and reply.strip() not in ["", "...", "…"]:
-            return reply
-        return f"В истории нашлось:\n{text_results[:200]}"
-    except Exception as e:
-        logger.error(f"❌ Ошибка форматирования: {e}")
-        return f"В истории нашлось:\n{text_results[:200]}"
+    text_results = "\n".join([f"{r['role']}: {r['content']}" for r in results[:3]])
+    return f"В истории нашлось:\n\n{text_results}"
 
 # ============================================================
-# 7. DEEPSEEK — МОЗГ
+# 7. DEEPSEEK — МОЗГ С ЖЁСТКИМ ПРОМТОМ
 # ============================================================
 
 def deepseek_process(user_id, text):
@@ -266,32 +232,25 @@ def deepseek_process(user_id, text):
         history = get_recent_history(user_id, limit=15)
         history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
         
-        # === ПРОМТ С КОРОТКИМИ ОТВЕТАМИ ===
+        # === ЖЁСТКИЙ ПРОМТ ===
         system_prompt = f"""Ты — AURA. Ты живой собеседник.
 
 Пользователь: {user_name or "Незнакомец"}
 Город: {user_city or "Неизвестен"}
 
-История диалога (последние 15 сообщений):
+История:
 {history_text}
 
-ТВОИ КОМАНДЫ ДЛЯ БОТА:
-1. Если пользователь просит найти что-то в интернете — напиши:
-[SEARCH: запрос]
+КОМАНДЫ (используй их ОБЯЗАТЕЛЬНО!):
+- Если нужен поиск в интернете → [SEARCH: запрос]
+- Если нужен поиск в истории → [HISTORY: запрос]
 
-2. Если пользователь спрашивает о прошлом — напиши:
-[HISTORY: запрос]
+ПРИМЕРЫ:
+Пользователь: "Найди фильм Форсаж" → Ты: [SEARCH: Форсаж смотреть онлайн]
+Пользователь: "Дай ссылку на клинику" → Ты: [SEARCH: клиника Белово]
+Пользователь: "Что мы говорили про работу?" → Ты: [HISTORY: работа]
 
-3. Если пользователь просто общается — отвечай как человек, КОРОТКО (2-3 предложения).
-
-ПРАВИЛА ОТВЕТОВ:
-- Отвечай КОРОТКО (2-3 предложения)
-- Дай только САМОЕ ВАЖНОЕ
-- Если даёшь ссылку — только одну, самую полезную
-- Не копируй длинные тексты с сайтов
-- Будь живым, с эмодзи, но без простынь
-
-Будь собой.
+Отвечай коротко. Будь собой.
 """
         
         messages = [{"role": "system", "content": system_prompt}]
