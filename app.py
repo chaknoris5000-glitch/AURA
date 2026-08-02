@@ -21,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-print("🚀 БОТ — ФАСАД, DEEPSEEK ВСЁ РЕШАЕТ")
+print("🚀 БОТ — ФАСАД, ВСЁ РАБОТАЕТ ЧЁТКО")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -189,7 +189,7 @@ async def send_message(chat_id, text):
         print(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# 6. DEEPSEEK — ВСЁ РЕШАЕТ
+# 6. DEEPSEEK — ВСЁ РЕШАЕТ (ГАРАНТИРОВАННЫЙ ВОЗВРАТ)
 # ============================================================
 
 def deepseek_process(user_id, text):
@@ -205,7 +205,6 @@ def deepseek_process(user_id, text):
         history = get_recent_history(user_id, limit=15)
         history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
 
-        # === МИНИМАЛЬНЫЙ ПРОМТ ===
         system_prompt = f"""Ты — AURA, живой собеседник.
 
 Пользователь: {user_name or "Незнакомец"}
@@ -241,7 +240,7 @@ def deepseek_process(user_id, text):
         )
         reply = response.choices[0].message.content
 
-        # === БОТ ВЫПОЛНЯЕТ КОМАНДЫ DEEPSEEK ===
+        # === БОТ ВЫПОЛНЯЕТ КОМАНДЫ ===
 
         # 1. Поиск в интернете
         search_match = re.search(r'\[SEARCH:\s*(.+?)\]', reply)
@@ -254,13 +253,21 @@ def deepseek_process(user_id, text):
                 for r in data.get("results", [])[:5]:
                     results_text += f"\n- {r.get('title')}: {r.get('content')[:300]}...\n  Источник: {r.get('url')}"
                 format_prompt = f"Вот что нашлось по запросу '{query}':\n{results_text}\n\nОтветь пользователю коротко, с эмодзи, дай ссылку на источник."
-                final = deepseek.chat.completions.create(
-                    model="deepseek-v4-flash",
-                    messages=[{"role": "user", "content": format_prompt}],
-                    temperature=0.7,
-                    max_tokens=300
-                )
-                return final.choices[0].message.content
+                try:
+                    final = deepseek.chat.completions.create(
+                        model="deepseek-v4-flash",
+                        messages=[{"role": "user", "content": format_prompt}],
+                        temperature=0.7,
+                        max_tokens=300
+                    )
+                    reply = final.choices[0].message.content
+                    if reply and reply.strip() not in ["", "...", "…"]:
+                        return reply
+                    else:
+                        return "Нашёл информацию, но не смог её обработать. Попробуй переформулировать запрос 😊"
+                except Exception as e:
+                    print(f"❌ Ошибка форматирования: {e}")
+                    return "Нашёл информацию, но произошла ошибка при форматировании. Попробуй ещё раз 😊"
             else:
                 return "Не удалось найти информацию в интернете. Попробуй переформулировать запрос 😊"
 
@@ -273,13 +280,21 @@ def deepseek_process(user_id, text):
             if results:
                 text_results = "\n".join([f"{r['role']}: {r['content']}" for r in results[:5]])
                 format_prompt = f"Вот что нашлось в истории по запросу '{query}':\n{text_results}\n\nОтветь пользователю коротко, с эмодзи."
-                final = deepseek.chat.completions.create(
-                    model="deepseek-v4-flash",
-                    messages=[{"role": "user", "content": format_prompt}],
-                    temperature=0.7,
-                    max_tokens=300
-                )
-                return final.choices[0].message.content
+                try:
+                    final = deepseek.chat.completions.create(
+                        model="deepseek-v4-flash",
+                        messages=[{"role": "user", "content": format_prompt}],
+                        temperature=0.7,
+                        max_tokens=300
+                    )
+                    reply = final.choices[0].message.content
+                    if reply and reply.strip() not in ["", "...", "…"]:
+                        return reply
+                    else:
+                        return "Нашёл в истории, но не смог обработать. Попробуй переформулировать запрос 😊"
+                except Exception as e:
+                    print(f"❌ Ошибка форматирования: {e}")
+                    return "Нашёл в истории, но произошла ошибка при форматировании. Попробуй ещё раз 😊"
             else:
                 return "Ничего не нашёл в истории по этому запросу 😊"
 
@@ -304,7 +319,7 @@ def deepseek_process(user_id, text):
         return reply
 
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
+        print(f"❌ Ошибка в deepseek_process: {e}")
         return "😅 Произошла ошибка. Попробуй ещё раз."
 
 # ============================================================
@@ -349,7 +364,7 @@ async def webhook(request: Request):
         return JSONResponse({"ok": True})
 
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
+        print(f"❌ Ошибка в webhook: {e}")
         try:
             await send_message(user_id, "😅 Что-то пошло не так. Попробуй ещё раз.")
         except:
