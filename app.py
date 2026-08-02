@@ -24,7 +24,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-logger.info("🚀 БОТ — ПОИСК + DEEPSEEK ФОРМАТИРОВАНИЕ")
+logger.info("🚀 БОТ — ТОЛЬКО РАБОЧИЕ ССЫЛКИ")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -133,6 +133,63 @@ def search_web(query, max_results=5):
         logger.error(f"❌ Ошибка поиска: {e}")
     return None
 
+def check_link(url, query):
+    """DeepSeek проверяет ссылку"""
+    try:
+        # Сначала проверяем, что ссылка жива
+        head = requests.head(url, timeout=5)
+        if head.status_code >= 400:
+            return False
+        
+        # DeepSeek проверяет релевантность
+        prompt = f"""Ссылка: {url}
+Вопрос: "{query}"
+Эта ссылка ведёт на сайт, который отвечает на вопрос?
+Ответь ТОЛЬКО ДА или НЕТ.
+"""
+        response = deepseek.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=5
+        )
+        result = response.choices[0].message.content.strip().lower()
+        return "да" in result
+    except:
+        return False
+
+def get_good_links(query, user_city=None):
+    """Бот ищет, DeepSeek проверяет"""
+    if user_city:
+        query = f"{query} {user_city}"
+        logger.info(f"🔍 Добавил город: '{user_city}'")
+    
+    data = search_web(query)
+    if not data or not data.get("results"):
+        return None
+    
+    good_links = []
+    for r in data.get("results", []):
+        url = r.get("url")
+        title = r.get("title", "")
+        content = r.get("content", "")
+        
+        if not url:
+            continue
+        
+        # Проверяем ссылку
+        logger.info(f"🔍 Проверяю: {url}")
+        if check_link(url, query):
+            good_links.append({
+                "url": url,
+                "title": title,
+                "content": content
+            })
+            if len(good_links) >= 2:
+                break
+    
+    return good_links
+
 # ============================================================
 # 4. ГОЛОС
 # ============================================================
@@ -185,106 +242,24 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# 6. ПОИСК + DEEPSEEK ФОРМАТИРОВАНИЕ
+# 6. ОСНОВНАЯ ЛОГИКА
 # ============================================================
 
-def process_search(query, user_city=None, user_name=None):
-    """Бот ищет, DeepSeek проверяет и форматирует"""
-    
-    # Добавляем город если есть
-    search_query = query
-    if user_city:
-        search_query = f"{query} {user_city}"
-        logger.info(f"🔍 Добавил город: '{user_city}'")
-    
-    # Бот ищет в интернете
-    data = search_web(search_query)
-    if not data or not data.get("results"):
+def process_search(query, user_city=None):
+    """Поиск с проверкой ссылок"""
+    good_links = get_good_links(query, user_city)
+    if not good_links:
         return None
     
-    results = data.get("results", [])
-    answer = data.get("answer", "")
+    if len(good_links) == 1:
+        link = good_links[0]
+        return f"Нашёл! 🎯\n\n**{link['title']}**\n[Ссылка]({link['url']})"
     
-    # Берём первые 3 результата
-    formatted_results = ""
-    for r in results[:3]:
-        title = r.get("title", "Без названия")
-        content = r.get("content", "")[:200]
-        url = r.get("url", "")
-        if url:
-            formatted_results += f"\n**{title}**\n{content}...\n[Источник]({url})\n"
-    
-    # DeepSeek проверяет и форматирует
-    prompt = f"""Пользователь искал: "{query}"
-Город: {user_city or "Не указан"}
-
-Вот что нашлось в интернете:
-{formatted_results}
-
-Если есть ответ (answer) — используй его: {answer}
-
-Задача: ответь пользователю КОРОТКО (2-3 предложения).
-Дай только самую важную информацию и ОДНУ ссылку на источник.
-Ответ должен быть красивым, живым, с эмодзи.
-"""
-    
-    try:
-        final = deepseek.chat.completions.create(
-            model="deepseek-v4-flash",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=200,
-            timeout=30
-        )
-        reply = final.choices[0].message.content
-        if reply and reply.strip() not in ["", "...", "…"]:
-            return reply
-    except Exception as e:
-        logger.error(f"❌ Ошибка форматирования: {e}")
-    
-    # Запасной вариант — просто ссылка
-    if results:
-        first = results[0]
-        url = first.get("url", "")
-        title = first.get("title", "")
-        if url:
-            return f"Нашёл! 🎯\n\n**{title}**\n[Ссылка]({url})"
-    
-    return None
-
-def process_history(query, user_id):
-    """Бот ищет в истории, DeepSeek форматирует"""
-    results = search_history(user_id, query)
-    if not results:
-        return None
-    
-    text_results = "\n".join([f"{r['role']}: {r['content']}" for r in results[:5]])
-    
-    prompt = f"""Вот что нашлось в истории по запросу '{query}':
-{text_results}
-
-Ответь пользователю коротко (2-3 предложения) как живой человек.
-Если это он сам писал — скажи "ты говорил", если бот — "я отвечал".
-"""
-    try:
-        final = deepseek.chat.completions.create(
-            model="deepseek-v4-flash",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=200,
-            timeout=30
-        )
-        reply = final.choices[0].message.content
-        if reply and reply.strip() not in ["", "...", "…"]:
-            return reply
-        return f"В истории нашлось:\n{text_results[:300]}"
-    except Exception as e:
-        logger.error(f"❌ Ошибка форматирования истории: {e}")
-        return f"В истории нашлось:\n{text_results[:300]}"
-
-# ============================================================
-# 7. ГЛАВНАЯ ЛОГИКА
-# ============================================================
+    # Если несколько ссылок
+    response = "Нашёл! 🎯\n\n"
+    for i, link in enumerate(good_links, 1):
+        response += f"{i}. **{link['title']}**\n[Ссылка]({link['url']})\n\n"
+    return response
 
 def deepseek_process(user_id, text):
     try:
@@ -295,22 +270,14 @@ def deepseek_process(user_id, text):
         if any(word in text.lower() for word in ["время", "сколько времени", "который час", "какое сегодня число"]):
             return get_current_time()
         
-        # === ПРЯМОЙ ПОИСК ===
+        # === ПОИСК ===
         search_triggers = ["найди", "поищи", "найти", "покажи", "где", "сайт", "фильм", "клиника", "адрес", "маршрут", "ссылка"]
         if any(word in text.lower() for word in search_triggers):
-            logger.info(f"🔍 Бот ищет: '{text}'")
-            
-            # Сначала ищем в интернете
-            result = process_search(text, user_city, user_name)
+            logger.info(f"🔍 Поиск: '{text}'")
+            result = process_search(text, user_city)
             if result:
                 return result
-            
-            # Если в интернете нет — ищем в истории
-            history_result = process_history(text, user_id)
-            if history_result:
-                return history_result
-            
-            return "Ничего не нашёл. Попробуй переформулировать запрос 😊"
+            return "Не нашёл рабочие ссылки. Попробуй переформулировать запрос 😊"
         
         # === ОБЫЧНЫЙ ДИАЛОГ ===
         history = get_recent_history(user_id, limit=15)
@@ -352,7 +319,7 @@ def deepseek_process(user_id, text):
         return "😅 Произошла ошибка. Попробуй ещё раз."
 
 # ============================================================
-# 8. WEBHOOK
+# 7. WEBHOOK
 # ============================================================
 
 @app.post("/webhook")
