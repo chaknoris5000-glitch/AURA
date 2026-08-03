@@ -10,6 +10,7 @@ from groq import Groq
 from dotenv import load_dotenv
 import requests
 import logging
+import time
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -24,7 +25,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-logger.info("🚀 AURA — ФИНАЛЬНАЯ ВЕРСИЯ (ЗАПОМИНАЕТ ИМЯ И ГОРОД)")
+logger.info("🚀 AURA — НОВАЯ ЧИСТАЯ АРХИТЕКТУРА")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -40,7 +41,7 @@ groq = Groq(api_key=GROQ_API_KEY)
 app = FastAPI()
 
 # ============================================================
-# 1. БАЗА
+# 1. РАБОТА С БАЗОЙ
 # ============================================================
 
 def save_message(user_id, role, content):
@@ -121,10 +122,10 @@ def get_current_time():
     return f"Сейчас **{now.strftime('%H:%M')}**, {now.strftime('%d.%m.%Y')} 😊"
 
 # ============================================================
-# 3. ПОИСК (TAVILY)
+# 3. TAVILY — ПОИСК В ИНТЕРНЕТЕ
 # ============================================================
 
-def search_web(query, max_results=5):
+def tavily_search(query, max_results=5):
     if not TAVILY_API_KEY:
         return None
     logger.info(f"🌐 Поиск: '{query}'")
@@ -148,35 +149,28 @@ def search_web(query, max_results=5):
         logger.error(f"❌ Ошибка поиска: {e}")
     return None
 
-def get_working_links(query, user_city=None):
-    if user_city:
-        query = f"{query} {user_city}"
-        logger.info(f"🔍 Добавил город: '{user_city}'")
-    
-    data = search_web(query)
+def is_link_working(url):
+    try:
+        head = requests.head(url, timeout=5)
+        return head.status_code < 400
+    except:
+        return False
+
+def get_good_links(data):
     if not data or not data.get("results"):
-        return None
-    
-    working_links = []
+        return []
+    good_links = []
     for r in data.get("results", []):
         url = r.get("url")
-        title = r.get("title", "")
-        content = r.get("content", "")
-        if not url:
-            continue
-        try:
-            head = requests.head(url, timeout=5)
-            if head.status_code < 400:
-                working_links.append({
-                    "url": url,
-                    "title": title,
-                    "content": content
-                })
-                if len(working_links) >= 3:
-                    break
-        except:
-            continue
-    return working_links
+        if url and is_link_working(url):
+            good_links.append({
+                "url": url,
+                "title": r.get("title", ""),
+                "content": r.get("content", "")
+            })
+            if len(good_links) >= 3:
+                break
+    return good_links
 
 # ============================================================
 # 4. ГОЛОС
@@ -230,33 +224,87 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# 6. ОСНОВНАЯ ЛОГИКА
+# 6. DEEPSEEK — МОЗГ (РЕШАЕТ, ФОРМАТИРУЕТ)
 # ============================================================
 
-def process_search(query, user_city=None):
-    links = get_working_links(query, user_city)
-    if not links:
-        return None
-    if len(links) == 1:
-        link = links[0]
-        return f"Нашёл! 🎯\n\n**{link['title']}**\n[Ссылка]({link['url']})"
-    response = "Нашёл! 🎯\n\n"
-    for i, link in enumerate(links, 1):
-        response += f"{i}. **{link['title']}**\n[Ссылка]({link['url']})\n\n"
-    return response
-
-def process_history(query, user_id):
-    results = search_history(user_id, query)
-    if not results:
-        return None
-    text_results = "\n".join([f"{h['role']}: {h['content']}" for h in results[:5]])
+def deepseek_decide(user_id, text, user_name, user_city, history):
+    history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
     
+    system_prompt = f"""Ты — AURA. Ты живой собеседник и друг.
+
+Пользователь: {user_name or "Незнакомец"}
+Город: {user_city or "Неизвестен"}
+
+История:
+{history_text}
+
+ИНСТРУКЦИЯ ПО ПАМЯТИ:
+- Если пользователь спрашивает о прошлом → напиши: [HISTORY: ключевое слово]
+- Если нужно найти информацию в интернете → напиши: [SEARCH: запрос]
+- Если это простой вопрос → ответь сам.
+
+ПРИМЕРЫ:
+Пользователь: "Что мы говорили про работу?" → [HISTORY: работа]
+Пользователь: "Найди клинику Калашникова" → [SEARCH: клиника Калашникова]
+Пользователь: "Привет" → Привет! 😊
+
+ПРАВИЛА:
+- Отвечай коротко (2-3 предложения)
+- Используй эмодзи 😊🔥
+- Если не знаешь → переспроси
+- Будь собой
+"""
+    
+    messages = [{"role": "system", "content": system_prompt}]
+    for h in history:
+        messages.append({"role": h["role"], "content": h["content"]})
+    messages.append({"role": "user", "content": text})
+    
+    logger.info(f"🧠 DeepSeek решает: {text[:50]}...")
+    response = deepseek.chat.completions.create(
+        model="deepseek-v4-flash",
+        messages=messages,
+        temperature=0.95,
+        max_tokens=700,
+        timeout=30
+    )
+    return response.choices[0].message.content
+
+def deepseek_format_search(query, good_links):
+    if not good_links:
+        return "Ничего не нашёл. Попробуй переформулировать запрос 😊"
+    
+    links_text = ""
+    for i, link in enumerate(good_links, 1):
+        links_text += f"{i}. **{link['title']}**\n[Ссылка]({link['url']})\n\n"
+    
+    prompt = f"""Пользователь искал: "{query}"
+Вот что нашлось:
+{links_text}
+Ответь пользователю КОРОТКО (2-3 предложения) как живой человек.
+Дай самую важную информацию и ссылку на источник.
+"""
+    try:
+        final = deepseek.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=300,
+            timeout=30
+        )
+        return final.choices[0].message.content
+    except:
+        return links_text
+
+def deepseek_format_history(query, results):
+    if not results:
+        return "Ничего не нашёл в истории по этому запросу 😊"
+    
+    text_results = "\n".join([f"{h['role']}: {h['content']}" for h in results[:5]])
     prompt = f"""Вот что нашлось в истории по запросу '{query}':
 {text_results}
 
-Ответь пользователю КОРОТКО (2-3 предложения) как живой человек.
-Если это он сам писал — скажи "ты говорил", если бот — "я отвечал".
-Используй эмодзи 😊
+Ответь пользователю коротко (2-3 предложения) как живой человек.
 """
     try:
         final = deepseek.chat.completions.create(
@@ -266,13 +314,13 @@ def process_history(query, user_id):
             max_tokens=200,
             timeout=30
         )
-        reply = final.choices[0].message.content
-        if reply and reply.strip() not in ["", "...", "…"]:
-            return reply
+        return final.choices[0].message.content
+    except:
         return f"В истории нашлось:\n{text_results[:300]}"
-    except Exception as e:
-        logger.error(f"❌ Ошибка форматирования истории: {e}")
-        return f"В истории нашлось:\n{text_results[:300]}"
+
+# ============================================================
+# 7. ОСНОВНАЯ ЛОГИКА
+# ============================================================
 
 def deepseek_process(user_id, text):
     try:
@@ -284,93 +332,41 @@ def deepseek_process(user_id, text):
             return get_current_time()
         
         # === ПРЯМЫЕ ЗАПРОСЫ (ИЗ USER_MEMORY) ===
-        # Имя
-        if any(word in text.lower() for word in ["как меня зовут", "моё имя", "кто я", "напомни моё имя", "как зовут"]):
-            name = get_fact(user_id, "name")
-            if name:
-                return f"Тебя зовут **{name}** 😊"
-            else:
-                return "Я не знаю твоего имени. Ты мне его не говорил. Скажи: 'Меня зовут ...' и я запомню 😊"
+        if any(word in text.lower() for word in ["как меня зовут", "моё имя", "кто я", "напомни моё имя"]):
+            return f"Тебя зовут **{user_name}** 😊" if user_name else "Я не знаю твоего имени. Скажи: 'Меня зовут ...'"
         
-        # Город
-        if any(word in text.lower() for word in ["где я живу", "мой город", "откуда я", "в каком городе", "город"]):
-            city = get_fact(user_id, "city")
-            if city:
-                return f"Ты из **{city}** 😊"
-            else:
-                return "Я не знаю, откуда ты. Ты мне не говорил. Скажи: 'Я живу в ...' и я запомню 😊"
-        
-        # === ПОИСК В ИНТЕРНЕТЕ ===
-        search_triggers = ["найди", "поищи", "найти", "покажи", "где", "сайт", "фильм", "клиника", "адрес", "маршрут", "ссылка", "квартиру", "квартиры"]
-        if any(word in text.lower() for word in search_triggers):
-            logger.info(f"🔍 Поиск: '{text}'")
-            result = process_search(text, user_city)
-            if result:
-                return result
-            history_results = search_history(user_id, text)
-            if history_results:
-                hist_text = "\n".join([f"{h['role']}: {h['content']}" for h in history_results[:3]])
-                return f"В истории нашлось:\n\n{hist_text}"
-            return "Ничего не нашёл. Попробуй переформулировать запрос 😊"
+        if any(word in text.lower() for word in ["где я живу", "мой город", "откуда я"]):
+            return f"Ты из **{user_city}** 😊" if user_city else "Я не знаю, откуда ты. Скажи: 'Я живу в ...'"
         
         # === ОСНОВНОЙ ДИАЛОГ ===
         history = get_recent_history(user_id, limit=30)
-        history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
-        
-        system_prompt = f"""Ты — AURA. Ты живой собеседник и друг.
-
-Пользователь: {user_name or "Незнакомец"}
-Город: {user_city or "Неизвестен"}
-
-История:
-{history_text}
-
-ИНСТРУКЦИЯ ПО ПАМЯТИ (SUPABASE):
-- Если пользователь спрашивает о прошлом, о том, что вы обсуждали раньше — НЕ ПРИДУМЫВАЙ.
-- Вместо этого напиши: [HISTORY: ключевое слово]
-- Бот сам найдёт это в Supabase и вернёт тебе информацию.
-
-ПРИМЕР:
-Пользователь: "Что мы говорили про работу?"
-Ты: [HISTORY: работа]
-
-ПРАВИЛА ОБЩЕНИЯ:
-1. Если не знаешь ответа — СКАЖИ ЧЕСТНО и ПРЕДЛОЖИ УТОЧНИТЬ.
-2. Если вопрос расплывчатый — ПЕРЕСПРОСИ.
-3. Если информации недостаточно — ПОПРОСИ УТОЧНИТЬ ДЕТАЛИ.
-4. Отвечай КОРОТКО (2-3 предложения), но ЖИВО и ЕСТЕСТВЕННО.
-5. Используй эмодзи 😊🔥😄.
-6. Будь ДРУЖЕЛЮБНЫМ и ИСКРЕННИМ.
-
-Ты — друг, а не робот. Будь собой.
-"""
-        
-        messages = [{"role": "system", "content": system_prompt}]
-        for h in history:
-            messages.append({"role": h["role"], "content": h["content"]})
-        messages.append({"role": "user", "content": text})
-        
-        logger.info(f"🧠 DeepSeek: {text[:50]}...")
-        response = deepseek.chat.completions.create(
-            model="deepseek-v4-flash",
-            messages=messages,
-            temperature=0.95,
-            max_tokens=600,
-            timeout=30
-        )
-        reply = response.choices[0].message.content
+        reply = deepseek_decide(user_id, text, user_name, user_city, history)
         
         # === ОБРАБОТКА КОМАНД DEEPSEEK ===
+        
+        # SEARCH
+        search_match = re.search(r'\[SEARCH:\s*(.+?)\]', reply)
+        if search_match:
+            query = search_match.group(1).strip()
+            logger.info(f"🔍 Поиск в интернете: '{query}'")
+            
+            if user_city:
+                query = f"{query} {user_city}"
+                logger.info(f"🔍 Добавил город: '{user_city}'")
+            
+            data = tavily_search(query)
+            good_links = get_good_links(data)
+            return deepseek_format_search(query, good_links)
+        
+        # HISTORY
         history_match = re.search(r'\[HISTORY:\s*(.+?)\]', reply)
         if history_match:
             query = history_match.group(1).strip()
-            logger.info(f"📚 Бот ищет в истории по команде DeepSeek: '{query}'")
-            history_result = process_history(query, user_id)
-            if history_result:
-                return history_result
-            else:
-                return "Ничего не нашёл в истории по этому запросу. Попробуй переформулировать 😊"
+            logger.info(f"📚 Поиск в истории: '{query}'")
+            results = search_history(user_id, query)
+            return deepseek_format_history(query, results)
         
+        # === ЕСЛИ НЕТ КОМАНД ===
         if not reply or reply.strip() in ["", "...", "…"]:
             return "Что-то пошло не так. Попробуй переформулировать вопрос 😊"
         
@@ -381,7 +377,7 @@ def deepseek_process(user_id, text):
         return "😅 Произошла ошибка. Попробуй ещё раз."
 
 # ============================================================
-# 7. WEBHOOK
+# 8. WEBHOOK
 # ============================================================
 
 @app.post("/webhook")
