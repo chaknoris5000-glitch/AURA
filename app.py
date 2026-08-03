@@ -10,7 +10,6 @@ from groq import Groq
 from dotenv import load_dotenv
 import requests
 import logging
-import time
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -25,7 +24,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-logger.info("🚀 AURA — ПРЕМИУМ БОТ")
+logger.info("🚀 AURA — С УТОЧНЕНИЯМИ И ПОИСКОМ ИСТИНЫ")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -135,7 +134,6 @@ def search_web(query, max_results=5):
     return None
 
 def get_working_links(query, user_city=None):
-    """Ищет и проверяет ссылки"""
     if user_city:
         query = f"{query} {user_city}"
         logger.info(f"🔍 Добавил город: '{user_city}'")
@@ -152,7 +150,6 @@ def get_working_links(query, user_city=None):
         if not url:
             continue
         
-        # Проверяем, что ссылка жива
         try:
             head = requests.head(url, timeout=5)
             if head.status_code < 400:
@@ -224,7 +221,6 @@ async def send_message(chat_id, text):
 # ============================================================
 
 def process_search(query, user_city=None):
-    """Поиск с проверкой ссылок"""
     links = get_working_links(query, user_city)
     if not links:
         return None
@@ -255,7 +251,6 @@ def deepseek_process(user_id, text):
             if result:
                 return result
             
-            # Если в интернете нет — ищем в истории
             history_results = search_history(user_id, text)
             if history_results:
                 hist_text = "\n".join([f"{h['role']}: {h['content']}" for h in history_results[:3]])
@@ -275,12 +270,15 @@ def deepseek_process(user_id, text):
 История:
 {history_text}
 
-ПРАВИЛА:
-1. Отвечай КОРОТКО (2-3 предложения), но ЖИВО и ЕСТЕСТВЕННО
-2. Используй эмодзи 😊🔥😄
-3. Если пользователь уточняет — УЧИТЫВАЙ КОНТЕКСТ
-4. Если не знаешь — скажи честно
-5. Будь ДРУЖЕЛЮБНЫМ
+ПРАВИЛА ОБЩЕНИЯ:
+1. Если не знаешь ответа — СКАЖИ ЧЕСТНО и ПРЕДЛОЖИ УТОЧНИТЬ.
+2. Если вопрос расплывчатый — ПЕРЕСПРОСИ, чтобы понять, что именно нужно.
+3. Если информации недостаточно — ПОПРОСИ УТОЧНИТЬ ДЕТАЛИ.
+4. Если пользователь спрашивает о фильме, книге, месте — спроси, что именно его интересует (сюжет, отзывы, где смотреть).
+5. Отвечай КОРОТКО (2-3 предложения), но ЖИВО и ЕСТЕСТВЕННО.
+6. Используй эмодзи 😊🔥😄.
+7. Если пользователь уточняет — УЧИТЫВАЙ КОНТЕКСТ.
+8. Будь ДРУЖЕЛЮБНЫМ и ИСКРЕННИМ.
 
 Ты — друг, а не робот. Будь собой.
 """
