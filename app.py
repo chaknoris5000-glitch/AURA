@@ -24,7 +24,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-logger.info("🚀 AURA — АВТОМАТИЧЕСКИЙ ПОИСК В ИСТОРИИ")
+logger.info("🚀 AURA — ФИНАЛЬНАЯ ВЕРСИЯ (ЗАПОМИНАЕТ ИМЯ И ГОРОД)")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -87,6 +87,21 @@ def search_history(user_id, query):
     except Exception as e:
         logger.error(f"❌ Ошибка поиска: {e}")
         return []
+
+def save_fact(user_id, key, value):
+    if not supabase:
+        return
+    try:
+        supabase.table("user_memory").delete().eq("user_id", user_id).eq("key", key).execute()
+        supabase.table("user_memory").insert({
+            "user_id": user_id,
+            "key": key,
+            "value": value,
+            "created_at": datetime.now().isoformat()
+        }).execute()
+        logger.info(f"💾 Сохранён факт: {key} = {value}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения факта: {e}")
 
 def get_fact(user_id, key):
     if not supabase:
@@ -231,7 +246,6 @@ def process_search(query, user_city=None):
     return response
 
 def process_history(query, user_id):
-    """Поиск в истории по команде DeepSeek"""
     results = search_history(user_id, query)
     if not results:
         return None
@@ -269,6 +283,23 @@ def deepseek_process(user_id, text):
         if any(word in text.lower() for word in ["время", "сколько времени", "который час", "какое сегодня число"]):
             return get_current_time()
         
+        # === ПРЯМЫЕ ЗАПРОСЫ (ИЗ USER_MEMORY) ===
+        # Имя
+        if any(word in text.lower() for word in ["как меня зовут", "моё имя", "кто я", "напомни моё имя", "как зовут"]):
+            name = get_fact(user_id, "name")
+            if name:
+                return f"Тебя зовут **{name}** 😊"
+            else:
+                return "Я не знаю твоего имени. Ты мне его не говорил. Скажи: 'Меня зовут ...' и я запомню 😊"
+        
+        # Город
+        if any(word in text.lower() for word in ["где я живу", "мой город", "откуда я", "в каком городе", "город"]):
+            city = get_fact(user_id, "city")
+            if city:
+                return f"Ты из **{city}** 😊"
+            else:
+                return "Я не знаю, откуда ты. Ты мне не говорил. Скажи: 'Я живу в ...' и я запомню 😊"
+        
         # === ПОИСК В ИНТЕРНЕТЕ ===
         search_triggers = ["найди", "поищи", "найти", "покажи", "где", "сайт", "фильм", "клиника", "адрес", "маршрут", "ссылка", "квартиру", "квартиры"]
         if any(word in text.lower() for word in search_triggers):
@@ -298,7 +329,6 @@ def deepseek_process(user_id, text):
 - Если пользователь спрашивает о прошлом, о том, что вы обсуждали раньше — НЕ ПРИДУМЫВАЙ.
 - Вместо этого напиши: [HISTORY: ключевое слово]
 - Бот сам найдёт это в Supabase и вернёт тебе информацию.
-- После этого ты ответишь пользователю.
 
 ПРИМЕР:
 Пользователь: "Что мы говорили про работу?"
