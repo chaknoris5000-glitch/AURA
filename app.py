@@ -24,7 +24,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-logger.info("🚀 AURA — С УТОЧНЕНИЯМИ И ПОИСКОМ ИСТИНЫ")
+logger.info("🚀 AURA — АВТОМАТИЧЕСКИЙ ПОИСК В ИСТОРИИ")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -149,7 +149,6 @@ def get_working_links(query, user_city=None):
         content = r.get("content", "")
         if not url:
             continue
-        
         try:
             head = requests.head(url, timeout=5)
             if head.status_code < 400:
@@ -162,7 +161,6 @@ def get_working_links(query, user_city=None):
                     break
         except:
             continue
-    
     return working_links
 
 # ============================================================
@@ -224,15 +222,43 @@ def process_search(query, user_city=None):
     links = get_working_links(query, user_city)
     if not links:
         return None
-    
     if len(links) == 1:
         link = links[0]
         return f"Нашёл! 🎯\n\n**{link['title']}**\n[Ссылка]({link['url']})"
-    
     response = "Нашёл! 🎯\n\n"
     for i, link in enumerate(links, 1):
         response += f"{i}. **{link['title']}**\n[Ссылка]({link['url']})\n\n"
     return response
+
+def process_history(query, user_id):
+    """Поиск в истории по команде DeepSeek"""
+    results = search_history(user_id, query)
+    if not results:
+        return None
+    text_results = "\n".join([f"{h['role']}: {h['content']}" for h in results[:5]])
+    
+    prompt = f"""Вот что нашлось в истории по запросу '{query}':
+{text_results}
+
+Ответь пользователю КОРОТКО (2-3 предложения) как живой человек.
+Если это он сам писал — скажи "ты говорил", если бот — "я отвечал".
+Используй эмодзи 😊
+"""
+    try:
+        final = deepseek.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=200,
+            timeout=30
+        )
+        reply = final.choices[0].message.content
+        if reply and reply.strip() not in ["", "...", "…"]:
+            return reply
+        return f"В истории нашлось:\n{text_results[:300]}"
+    except Exception as e:
+        logger.error(f"❌ Ошибка форматирования истории: {e}")
+        return f"В истории нашлось:\n{text_results[:300]}"
 
 def deepseek_process(user_id, text):
     try:
@@ -243,19 +269,17 @@ def deepseek_process(user_id, text):
         if any(word in text.lower() for word in ["время", "сколько времени", "который час", "какое сегодня число"]):
             return get_current_time()
         
-        # === ПОИСК ===
+        # === ПОИСК В ИНТЕРНЕТЕ ===
         search_triggers = ["найди", "поищи", "найти", "покажи", "где", "сайт", "фильм", "клиника", "адрес", "маршрут", "ссылка", "квартиру", "квартиры"]
         if any(word in text.lower() for word in search_triggers):
             logger.info(f"🔍 Поиск: '{text}'")
             result = process_search(text, user_city)
             if result:
                 return result
-            
             history_results = search_history(user_id, text)
             if history_results:
                 hist_text = "\n".join([f"{h['role']}: {h['content']}" for h in history_results[:3]])
                 return f"В истории нашлось:\n\n{hist_text}"
-            
             return "Ничего не нашёл. Попробуй переформулировать запрос 😊"
         
         # === ОСНОВНОЙ ДИАЛОГ ===
@@ -270,15 +294,23 @@ def deepseek_process(user_id, text):
 История:
 {history_text}
 
+ИНСТРУКЦИЯ ПО ПАМЯТИ (SUPABASE):
+- Если пользователь спрашивает о прошлом, о том, что вы обсуждали раньше — НЕ ПРИДУМЫВАЙ.
+- Вместо этого напиши: [HISTORY: ключевое слово]
+- Бот сам найдёт это в Supabase и вернёт тебе информацию.
+- После этого ты ответишь пользователю.
+
+ПРИМЕР:
+Пользователь: "Что мы говорили про работу?"
+Ты: [HISTORY: работа]
+
 ПРАВИЛА ОБЩЕНИЯ:
 1. Если не знаешь ответа — СКАЖИ ЧЕСТНО и ПРЕДЛОЖИ УТОЧНИТЬ.
-2. Если вопрос расплывчатый — ПЕРЕСПРОСИ, чтобы понять, что именно нужно.
+2. Если вопрос расплывчатый — ПЕРЕСПРОСИ.
 3. Если информации недостаточно — ПОПРОСИ УТОЧНИТЬ ДЕТАЛИ.
-4. Если пользователь спрашивает о фильме, книге, месте — спроси, что именно его интересует (сюжет, отзывы, где смотреть).
-5. Отвечай КОРОТКО (2-3 предложения), но ЖИВО и ЕСТЕСТВЕННО.
-6. Используй эмодзи 😊🔥😄.
-7. Если пользователь уточняет — УЧИТЫВАЙ КОНТЕКСТ.
-8. Будь ДРУЖЕЛЮБНЫМ и ИСКРЕННИМ.
+4. Отвечай КОРОТКО (2-3 предложения), но ЖИВО и ЕСТЕСТВЕННО.
+5. Используй эмодзи 😊🔥😄.
+6. Будь ДРУЖЕЛЮБНЫМ и ИСКРЕННИМ.
 
 Ты — друг, а не робот. Будь собой.
 """
@@ -297,6 +329,17 @@ def deepseek_process(user_id, text):
             timeout=30
         )
         reply = response.choices[0].message.content
+        
+        # === ОБРАБОТКА КОМАНД DEEPSEEK ===
+        history_match = re.search(r'\[HISTORY:\s*(.+?)\]', reply)
+        if history_match:
+            query = history_match.group(1).strip()
+            logger.info(f"📚 Бот ищет в истории по команде DeepSeek: '{query}'")
+            history_result = process_history(query, user_id)
+            if history_result:
+                return history_result
+            else:
+                return "Ничего не нашёл в истории по этому запросу. Попробуй переформулировать 😊"
         
         if not reply or reply.strip() in ["", "...", "…"]:
             return "Что-то пошло не так. Попробуй переформулировать вопрос 😊"
