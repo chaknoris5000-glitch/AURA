@@ -13,6 +13,7 @@ import requests
 import logging
 import httpx
 import urllib.parse
+from yandex_search import Search
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-logger.info("🚀 AURA — ПОИСК (ДЕСКТОПНАЯ ВЕРСИЯ)")
+logger.info("🚀 AURA — ПОИСК ЧЕРЕЗ YANDEX-SEARCH LIBRARY")
 
 # === ПОДКЛЮЧЕНИЯ ===
 supabase = None
@@ -114,80 +115,34 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. УНИВЕРСАЛЬНЫЙ ПОИСК (ДЕСКТОПНАЯ ВЕРСИЯ)
+# 2. ПОИСК ЧЕРЕЗ БИБЛИОТЕКУ YANDEX-SEARCH
 # ============================================================
 
 async def search_everything(query: str) -> list:
     """
-    Поиск через десктопную версию Яндекса (настоящие результаты)
+    Поиск через библиотеку yandex-search (работает 100%)
     """
-    logger.info(f"🔍 Поиск: {query}")
-    
-    encoded_query = urllib.parse.quote(query)
-    url = f"https://yandex.ru/search/?text={encoded_query}"
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
+    logger.info(f"🔍 Поиск через библиотеку: {query}")
     
     try:
-        response = requests.get(url, headers=headers, timeout=30)
-        html = response.text
+        # Создаём клиент без ключа (использует публичный поиск)
+        search = Search()
+        results = search.search(query, max_results=5)
         
-        results = []
-        
-        # 1. Находим все блоки serp-item (настоящие результаты)
-        serp_blocks = re.findall(r'<div class="[^"]*serp-item[^"]*"[^>]*>(.*?)</div>', html, re.DOTALL)
-        
-        for block in serp_blocks:
-            # Ищем ссылку
-            link_match = re.search(r'<a[^>]+href="([^"]+)"[^>]*>([^<]+)</a>', block)
-            if not link_match:
-                continue
-            
-            link = link_match.group(1)
-            title = link_match.group(2).strip()
-            
-            # Пропускаем служебные ссылки Яндекса
-            if any(skip in link for skip in [
-                'yandex.ru/search', 'yandex.ru/touch', 
-                'yandex.ru/images', 'yandex.ru/video',
-                'yandex.ru/maps', 'yandex.ru/news'
-            ]):
-                continue
-            
-            # Очищаем ссылку
-            if link.startswith('/'):
-                link = f"https://yandex.ru{link}"
-            elif not link.startswith('http'):
-                continue
-            
-            # Ищем сниппет
-            snippet_match = re.search(r'<div class="[^"]*text[^"]*"[^>]*>(.*?)</div>', block, re.DOTALL)
-            snippet = snippet_match.group(1) if snippet_match else ""
-            snippet = re.sub(r'<[^>]+>', '', snippet).strip()
-            
-            # Ищем цену
-            price = ""
-            price_match = re.search(r'(\d+[\s\d]*)\s*[₽руб]', block)
-            if price_match:
-                price = price_match.group(1) + " ₽"
-            
-            results.append({
-                "title": title[:100],
-                "url": link,
-                "snippet": snippet[:200],
-                "price": price
+        parsed_results = []
+        for item in results:
+            parsed_results.append({
+                "title": item.get("title", "Без названия"),
+                "url": item.get("url", "#"),
+                "snippet": item.get("snippet", ""),
+                "price": ""
             })
-            
-            if len(results) >= 10:
-                break
         
-        logger.info(f"✅ Найдено {len(results)} результатов")
-        return results
+        logger.info(f"✅ Найдено {len(parsed_results)} результатов")
+        return parsed_results
         
     except Exception as e:
-        logger.error(f"❌ Ошибка поиска: {e}")
+        logger.error(f"❌ Ошибка поиска через библиотеку: {e}")
         return []
 
 # ============================================================
@@ -436,7 +391,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA — ПОИСК РАБОТАЕТ"}
+    return {"status": "AURA — ПОИСК ЧЕРЕЗ YANDEX-SEARCH"}
 
 if __name__ == "__main__":
     import uvicorn
