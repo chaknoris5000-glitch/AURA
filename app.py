@@ -12,6 +12,8 @@ from dotenv import load_dotenv
 import requests
 import logging
 import httpx
+from bs4 import BeautifulSoup
+import urllib.parse
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -26,11 +28,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# КЛЮЧИ ЯНДЕКСА
-YANDEX_API_KEY = os.getenv("YANDEX_API_KEY_NEW")
-YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
-
-logger.info("🚀 AURA — С НОВОЙ ВЕРСИЕЙ YANDEX SEARCH API (v2)")
+logger.info("🚀 AURA — АГЕНТ, КОТОРЫЙ ИЩЕТ ВСЁ")
 
 # === ПОДКЛЮЧЕНИЯ ===
 supabase = None
@@ -117,61 +115,97 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ЯНДЕКС-ПОИСК (НОВАЯ ВЕРСИЯ API V2)
+# 2. УНИВЕРСАЛЬНЫЙ ПОИСК (ИЩЕТ ВСЁ)
 # ============================================================
 
-async def yandex_search(query: str) -> list:
+async def search_everything(query: str) -> list:
     """
-    Поиск через Yandex Search API v2 (Yandex Cloud Gateway)
-    Документация: https://yandex.cloud/en/services/search-api
+    Ищет ВСЁ через Яндекс.Поиск (парсинг страниц)
+    Возвращает список с заголовками, ссылками, ценами
     """
-    if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
-        logger.warning("⚠️ Нет ключа или папки Яндекса")
-        return []
-
-    logger.info(f"🔍 Поиск Яндекса (v2): {query}")
-
-    # ПРАВИЛЬНЫЙ URL для Yandex Search API v2
-    url = "https://search-api.yandex.net/v2/search"
+    logger.info(f"🔍 Универсальный поиск: {query}")
+    
+    # Кодируем запрос
+    encoded_query = urllib.parse.quote(query)
+    url = f"https://yandex.ru/search/?text={encoded_query}"
     
     headers = {
-        "Authorization": f"Api-Key {YANDEX_API_KEY}",
-        "Content-Type": "application/json"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
     
-    payload = {
-        "query": query,
-        "folder_id": YANDEX_FOLDER_ID,
-        "language": "ru",
-        "search_type": "web",
-        "page": 0,
-        "page_size": 5,
-        "sort_by": "relevance"
-    }
-
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, headers=headers, timeout=30)
-            if response.status_code == 200:
-                data = response.json()
-                results = []
-                for doc in data.get("results", []):
-                    results.append({
-                        "title": doc.get("title", "Без названия"),
-                        "url": doc.get("url", "#"),
-                        "snippet": doc.get("snippet", ""),
-                    })
-                logger.info(f"✅ Найдено {len(results)} результатов")
-                return results
-            else:
-                logger.error(f"❌ Ошибка поиска: {response.status_code} - {response.text}")
-                return []
+        response = requests.get(url, headers=headers, timeout=30)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        results = []
+        # Ищем все результаты на странице
+        for item in soup.select('.serp-item'):
+            title_elem = item.select_one('.organic__url-text')
+            link_elem = item.select_one('.organic__url')
+            snippet_elem = item.select_one('.organic__text')
+            price_elem = item.select_one('.price')
+            
+            if title_elem and link_elem:
+                title = title_elem.get_text(strip=True)
+                link = link_elem.get('href', '#')
+                snippet = snippet_elem.get_text(strip=True)[:200] if snippet_elem else ""
+                
+                # Пытаемся найти цену
+                price = ""
+                if price_elem:
+                    price = price_elem.get_text(strip=True)
+                elif "₽" in snippet or "руб" in snippet:
+                    # Ищем цену в сниппете
+                    price_match = re.search(r'(\d+[\s\d]*\s*[₽руб])', snippet)
+                    if price_match:
+                        price = price_match.group(1)
+                
+                results.append({
+                    "title": title,
+                    "url": link,
+                    "snippet": snippet,
+                    "price": price
+                })
+        
+        logger.info(f"✅ Найдено {len(results)} результатов")
+        return results[:10]  # Возвращаем топ-10
+        
     except Exception as e:
-        logger.error(f"❌ Ошибка запроса: {e}")
+        logger.error(f"❌ Ошибка поиска: {e}")
         return []
 
 # ============================================================
-# 3. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# 3. АНАЛИЗ ЦЕН
+# ============================================================
+
+def analyze_prices(results: list) -> dict:
+    """
+    Анализирует цены в результатах поиска
+    """
+    prices = []
+    for res in results:
+        if res.get('price'):
+            # Извлекаем число из цены
+            numbers = re.findall(r'\d+', res['price'])
+            if numbers:
+                price_int = int(''.join(numbers))
+                prices.append({
+                    "value": price_int,
+                    "title": res['title'],
+                    "url": res['url']
+                })
+    
+    if prices:
+        # Сортируем по цене
+        sorted_prices = sorted(prices, key=lambda x: x['value'])
+        return {
+            "cheapest": sorted_prices[0] if sorted_prices else None,
+            "all": sorted_prices
+        }
+    return {"cheapest": None, "all": []}
+
+# ============================================================
+# 4. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ============================================================
 
 def get_current_time():
@@ -222,7 +256,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# 4. ОСНОВНАЯ ЛОГИКА
+# 5. ОСНОВНАЯ ЛОГИКА
 # ============================================================
 
 async def deepseek_chat(text, history, user_name, user_city):
@@ -286,26 +320,42 @@ async def deepseek_process(user_id, text):
             else:
                 return "Ничего не нашёл в истории 😊"
         
-        # === ПОИСК В ИНТЕРНЕТЕ ===
+        # === УНИВЕРСАЛЬНЫЙ ПОИСК ===
         search_triggers = [
             "найди", "поищи", "найти", "покажи", "где", "сайт", "фильм", 
             "клиника", "адрес", "маршрут", "ссылка", "цены", "билеты", 
-            "купить", "скидки", "товар", "отель", "ресторан", "погода"
+            "купить", "скидки", "товар", "отель", "ресторан", "погода",
+            "машина", "квартира", "дом", "работа", "вакансия"
         ]
         if any(word in text.lower() for word in search_triggers):
-            logger.info(f"🔍 Поиск Яндекса: '{text}'")
+            logger.info(f"🔍 Поиск: '{text}'")
             
-            # Добавляем город в запрос
             query = text
-            if user_city:
+            if user_city and not any(word in query.lower() for word in ["погода", "новости"]):
                 query = f"{text} {user_city}"
             
-            results = await yandex_search(query)
+            results = await search_everything(query)
             
             if results:
-                response = "🔍 Нашёл! Вот что нашёл:\n\n"
-                for i, res in enumerate(results, 1):
-                    response += f"{i}. **{res['title']}**\n[Ссылка]({res['url']})\n\n"
+                # Анализируем цены
+                price_analysis = analyze_prices(results)
+                
+                response = "🔍 Нашёл! Вот лучшие результаты:\n\n"
+                
+                # Если есть цены, показываем самый дешёвый
+                if price_analysis['cheapest']:
+                    cheapest = price_analysis['cheapest']
+                    response += f"💰 **Самый дешёвый вариант:**\n"
+                    response += f"**{cheapest['title']}**\n"
+                    response += f"Цена: **{cheapest['value']} ₽**\n"
+                    response += f"[Ссылка]({cheapest['url']})\n\n"
+                
+                # Показываем топ результатов
+                response += "📋 **Другие варианты:**\n"
+                for i, res in enumerate(results[:5], 1):
+                    price_text = f" — {res['price']}" if res.get('price') else ""
+                    response += f"{i}. [{res['title']}]({res['url']}){price_text}\n"
+                
                 return response
             else:
                 return "Не нашёл ничего по этому запросу. Попробуй переформулировать 😊"
@@ -319,7 +369,7 @@ async def deepseek_process(user_id, text):
         return "😅 Произошла ошибка. Попробуй ещё раз."
 
 # ============================================================
-# 5. WEBHOOK
+# 6. WEBHOOK
 # ============================================================
 
 @app.post("/webhook")
@@ -375,7 +425,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA is alive with Yandex Search v2"}
+    return {"status": "AURA — УНИВЕРСАЛЬНЫЙ АГЕНТ"}
 
 if __name__ == "__main__":
     import uvicorn
