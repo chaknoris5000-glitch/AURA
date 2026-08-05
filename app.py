@@ -13,7 +13,6 @@ import requests
 import logging
 import httpx
 import urllib.parse
-from yandex_search import Search
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -28,7 +27,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-logger.info("🚀 AURA — ПОИСК ЧЕРЕЗ YANDEX-SEARCH LIBRARY")
+logger.info("🚀 AURA — СТАБИЛЬНАЯ ВЕРСИЯ (БЕЗ ЛИШНИХ БИБЛИОТЕК)")
 
 # === ПОДКЛЮЧЕНИЯ ===
 supabase = None
@@ -115,34 +114,53 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ПОИСК ЧЕРЕЗ БИБЛИОТЕКУ YANDEX-SEARCH
+# 2. ПОИСК (СТАБИЛЬНАЯ ВЕРСИЯ)
 # ============================================================
 
 async def search_everything(query: str) -> list:
     """
-    Поиск через библиотеку yandex-search (работает 100%)
+    Поиск через Яндекс (мобильная версия, без лишних библиотек)
     """
-    logger.info(f"🔍 Поиск через библиотеку: {query}")
+    logger.info(f"🔍 Поиск: {query}")
+    
+    encoded_query = urllib.parse.quote(query)
+    url = f"https://yandex.ru/touch/search?text={encoded_query}"
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.77 Mobile Safari/537.36"
+    }
     
     try:
-        # Создаём клиент без ключа (использует публичный поиск)
-        search = Search()
-        results = search.search(query, max_results=5)
+        response = requests.get(url, headers=headers, timeout=30)
+        html = response.text
         
-        parsed_results = []
-        for item in results:
-            parsed_results.append({
-                "title": item.get("title", "Без названия"),
-                "url": item.get("url", "#"),
-                "snippet": item.get("snippet", ""),
+        results = []
+        
+        # Ищем ссылки
+        link_pattern = r'<a[^>]+href="([^"]+)"[^>]*>([^<]+)</a>'
+        links = re.findall(link_pattern, html)
+        
+        for link, title in links[:10]:
+            # Очищаем ссылку
+            if not link.startswith('http'):
+                link = f"https://yandex.ru{link}"
+            
+            # Пропускаем служебные ссылки
+            if any(skip in link for skip in ['yandex.ru/search', 'yandex.ru/touch']):
+                continue
+            
+            results.append({
+                "title": title.strip(),
+                "url": link,
+                "snippet": "",
                 "price": ""
             })
         
-        logger.info(f"✅ Найдено {len(parsed_results)} результатов")
-        return parsed_results
+        logger.info(f"✅ Найдено {len(results)} результатов")
+        return results
         
     except Exception as e:
-        logger.error(f"❌ Ошибка поиска через библиотеку: {e}")
+        logger.error(f"❌ Ошибка поиска: {e}")
         return []
 
 # ============================================================
@@ -150,9 +168,6 @@ async def search_everything(query: str) -> list:
 # ============================================================
 
 def analyze_prices(results: list) -> dict:
-    """
-    Находит самый дешёвый вариант
-    """
     prices = []
     for res in results:
         if res.get('price'):
@@ -391,7 +406,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA — ПОИСК ЧЕРЕЗ YANDEX-SEARCH"}
+    return {"status": "AURA — СТАБИЛЬНАЯ ВЕРСИЯ"}
 
 if __name__ == "__main__":
     import uvicorn
