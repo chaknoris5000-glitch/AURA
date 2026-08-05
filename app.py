@@ -27,7 +27,11 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-logger.info("🚀 AURA — СТАБИЛЬНАЯ ВЕРСИЯ (БЕЗ ЛИШНИХ БИБЛИОТЕК)")
+# === КЛЮЧИ ЯНДЕКСА ===
+YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")  # Новый ключ для поиска
+YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")  # b1gt26bqh7052m5bhbeo
+
+logger.info("🚀 AURA — ФИНАЛЬНАЯ ВЕРСИЯ С YANDEX SEARCH API (v2)")
 
 # === ПОДКЛЮЧЕНИЯ ===
 supabase = None
@@ -114,53 +118,55 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ПОИСК (СТАБИЛЬНАЯ ВЕРСИЯ)
+# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API (v2)
 # ============================================================
 
 async def search_everything(query: str) -> list:
     """
-    Поиск через Яндекс (мобильная версия, без лишних библиотек)
+    Поиск через официальный Yandex Search API (v2)
     """
-    logger.info(f"🔍 Поиск: {query}")
-    
-    encoded_query = urllib.parse.quote(query)
-    url = f"https://yandex.ru/touch/search?text={encoded_query}"
+    if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
+        logger.warning("⚠️ Нет ключа или папки Яндекса")
+        return []
+
+    logger.info(f"🔍 Yandex Search API: {query}")
+
+    url = "https://search-api.yandex.net/v2/search"
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.77 Mobile Safari/537.36"
+        "Authorization": f"Api-Key {YANDEX_API_KEY}",
+        "Content-Type": "application/json"
     }
     
+    payload = {
+        "query": query,
+        "folder_id": YANDEX_FOLDER_ID,
+        "language": "ru",
+        "search_type": "web",
+        "page": 0,
+        "page_size": 5,
+        "sort_by": "relevance"
+    }
+
     try:
-        response = requests.get(url, headers=headers, timeout=30)
-        html = response.text
-        
-        results = []
-        
-        # Ищем ссылки
-        link_pattern = r'<a[^>]+href="([^"]+)"[^>]*>([^<]+)</a>'
-        links = re.findall(link_pattern, html)
-        
-        for link, title in links[:10]:
-            # Очищаем ссылку
-            if not link.startswith('http'):
-                link = f"https://yandex.ru{link}"
-            
-            # Пропускаем служебные ссылки
-            if any(skip in link for skip in ['yandex.ru/search', 'yandex.ru/touch']):
-                continue
-            
-            results.append({
-                "title": title.strip(),
-                "url": link,
-                "snippet": "",
-                "price": ""
-            })
-        
-        logger.info(f"✅ Найдено {len(results)} результатов")
-        return results
-        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json=payload, headers=headers, timeout=30)
+            if response.status_code == 200:
+                data = response.json()
+                results = []
+                for doc in data.get("results", []):
+                    results.append({
+                        "title": doc.get("title", "Без названия"),
+                        "url": doc.get("url", "#"),
+                        "snippet": doc.get("snippet", ""),
+                    })
+                logger.info(f"✅ Найдено {len(results)} результатов")
+                return results
+            else:
+                logger.error(f"❌ Ошибка поиска: {response.status_code} - {response.text}")
+                return []
     except Exception as e:
-        logger.error(f"❌ Ошибка поиска: {e}")
+        logger.error(f"❌ Ошибка запроса: {e}")
         return []
 
 # ============================================================
@@ -406,7 +412,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA — СТАБИЛЬНАЯ ВЕРСИЯ"}
+    return {"status": "AURA — YANDEX SEARCH API (v2)"}
 
 if __name__ == "__main__":
     import uvicorn
