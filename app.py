@@ -1,6 +1,7 @@
 import os
 import re
 import tempfile
+import json
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -10,23 +11,29 @@ from groq import Groq
 from dotenv import load_dotenv
 import requests
 import logging
-import time
+import httpx
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 load_dotenv()
 
+# === КЛЮЧИ ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-logger.info("🚀 AURA — НОВАЯ ЧИСТАЯ АРХИТЕКТУРА")
+# НОВЫЙ КЛЮЧ ДЛЯ ЯНДЕКСА
+YANDEX_API_KEY = os.getenv("YANDEX_API_KEY_NEW")  # Новый ключ для AI Studio
+YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")  # ID папки из консоли
+YANDEX_OLD_KEY = os.getenv("YANDEX_API_KEY_OLD")  # Старый ключ для голоса (опционально)
 
+logger.info("🚀 AURA — НОВАЯ ВЕРСИЯ С ЯНДЕКС-АГЕНТОМ")
+
+# === ПОДКЛЮЧЕНИЯ ===
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
@@ -37,11 +44,10 @@ if SUPABASE_URL and SUPABASE_KEY:
 
 deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 groq = Groq(api_key=GROQ_API_KEY)
-
 app = FastAPI()
 
 # ============================================================
-# 1. РАБОТА С БАЗОЙ
+# 1. БАЗА ДАННЫХ (ВСЯ ИСТОРИЯ)
 # ============================================================
 
 def save_message(user_id, role, content):
@@ -58,7 +64,7 @@ def save_message(user_id, role, content):
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения: {e}")
 
-def get_recent_history(user_id, limit=30):
+def get_recent_history(user_id, limit=50):
     if not supabase:
         return []
     try:
@@ -73,7 +79,8 @@ def get_recent_history(user_id, limit=30):
         logger.error(f"❌ Ошибка загрузки: {e}")
         return []
 
-def search_history(user_id, query):
+def search_all_history(user_id, query):
+    """Поиск по ВСЕЙ истории (за всё время)"""
     if not supabase:
         return []
     try:
@@ -82,7 +89,7 @@ def search_history(user_id, query):
             .eq("user_id", user_id)\
             .ilike("content", f"%{query}%")\
             .order("created_at", desc=True)\
-            .limit(10)\
+            .limit(20)\
             .execute()
         return res.data if res.data else []
     except Exception as e:
@@ -114,63 +121,60 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ВРЕМЯ
+# 2. ЯНДЕКС-АГЕНТ (ЗАМЕНЯЕТ TAVILY)
+# ============================================================
+
+async def yandex_agent_search(query: str) -> dict:
+    """
+    Запрос к Яндекс-агенту через AI Studio API
+    """
+    if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
+        logger.warning("⚠️ Нет ключа или папки Яндекса")
+        return {"error": "Нет ключа"}
+
+    logger.info(f"🔍 Яндекс-агент ищет: {query}")
+
+    url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+    headers = {
+        "Authorization": f"Api-Key {YANDEX_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "modelUri": f"gpt://{YANDEX_FOLDER_ID}/yandexgpt/latest",
+        "completionOptions": {
+            "stream": False,
+            "temperature": 0.3,
+            "maxTokens": 1000
+        },
+        "messages": [
+            {"role": "system", "text": "Ты — помощник, который ищет информацию в интернете. Отвечай коротко и по делу."},
+            {"role": "user", "text": f"Найди информацию по запросу: {query}"}
+        ]
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json=payload, headers=headers, timeout=30)
+            if response.status_code == 200:
+                data = response.json()
+                result = data.get("result", {}).get("alternatives", [{}])[0].get("message", {}).get("text", "Ничего не найдено")
+                logger.info(f"✅ Яндекс-агент ответил: {result[:50]}...")
+                return {"success": True, "result": result}
+            else:
+                logger.error(f"❌ Ошибка Яндекса: {response.status_code} - {response.text}")
+                return {"error": f"Ошибка {response.status_code}"}
+    except Exception as e:
+        logger.error(f"❌ Исключение Яндекса: {e}")
+        return {"error": str(e)}
+
+# ============================================================
+# 3. ВРЕМЯ
 # ============================================================
 
 def get_current_time():
     now = datetime.utcnow() + timedelta(hours=7)
     return f"Сейчас **{now.strftime('%H:%M')}**, {now.strftime('%d.%m.%Y')} 😊"
-
-# ============================================================
-# 3. TAVILY — ПОИСК В ИНТЕРНЕТЕ
-# ============================================================
-
-def tavily_search(query, max_results=5):
-    if not TAVILY_API_KEY:
-        return None
-    logger.info(f"🌐 Поиск: '{query}'")
-    try:
-        response = requests.post(
-            "https://api.tavily.com/search",
-            json={
-                "api_key": TAVILY_API_KEY,
-                "query": query,
-                "max_results": max_results,
-                "include_answer": True,
-                "search_depth": "advanced"
-            },
-            timeout=30
-        )
-        if response.status_code == 200:
-            data = response.json()
-            logger.info(f"✅ Найдено {len(data.get('results', []))} результатов")
-            return data
-    except Exception as e:
-        logger.error(f"❌ Ошибка поиска: {e}")
-    return None
-
-def is_link_working(url):
-    try:
-        head = requests.head(url, timeout=5)
-        return head.status_code < 400
-    except:
-        return False
-
-def get_good_links(data):
-    if not data or not data.get("results"):
-        return []
-    good_links = []
-    for r in data.get("results", []):
-        url = r.get("url")
-        if url and is_link_working(url):
-            good_links.append({
-                "url": url,
-                "title": r.get("title", ""),
-                "content": r.get("content", "")
-            })
-            if len(good_links) >= 3:
-                break
-    return good_links
 
 # ============================================================
 # 4. ГОЛОС
@@ -197,7 +201,7 @@ def transcribe_audio(audio_url):
         return None
 
 # ============================================================
-# 5. ОТПРАВКА
+# 5. ОТПРАВКА СООБЩЕНИЙ
 # ============================================================
 
 async def send_chat_action(chat_id):
@@ -224,160 +228,105 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# 6. DEEPSEEK — МОЗГ (РЕШАЕТ, ФОРМАТИРУЕТ)
+# 6. ОСНОВНАЯ ЛОГИКА (С ЯНДЕКС-АГЕНТОМ)
 # ============================================================
 
-def deepseek_decide(user_id, text, user_name, user_city, history):
-    history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history])
+async def deepseek_chat(text, history, user_name, user_city):
+    history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history[-10:]])  # Последние 10 для контекста
     
     system_prompt = f"""Ты — AURA. Ты живой собеседник и друг.
 
 Пользователь: {user_name or "Незнакомец"}
 Город: {user_city or "Неизвестен"}
 
-История:
+История (последние сообщения):
 {history_text}
 
-ИНСТРУКЦИЯ ПО ПАМЯТИ:
-- Если пользователь спрашивает о прошлом → напиши: [HISTORY: ключевое слово]
-- Если нужно найти информацию в интернете → напиши: [SEARCH: запрос]
-- Если это простой вопрос → ответь сам.
-
-ПРИМЕРЫ:
-Пользователь: "Что мы говорили про работу?" → [HISTORY: работа]
-Пользователь: "Найди клинику Калашникова" → [SEARCH: клиника Калашникова]
-Пользователь: "Привет" → Привет! 😊
-
 ПРАВИЛА:
-- Отвечай коротко (2-3 предложения)
-- Используй эмодзи 😊🔥
-- Если не знаешь → переспроси
-- Будь собой
+1. Отвечай коротко (2-3 предложения)
+2. Используй эмодзи 😊🔥
+3. Будь собой
+4. Если не знаешь ответа — скажи честно
 """
     
     messages = [{"role": "system", "content": system_prompt}]
-    for h in history:
+    for h in history[-10:]:
         messages.append({"role": h["role"], "content": h["content"]})
     messages.append({"role": "user", "content": text})
     
-    logger.info(f"🧠 DeepSeek решает: {text[:50]}...")
-    response = deepseek.chat.completions.create(
-        model="deepseek-v4-flash",
-        messages=messages,
-        temperature=0.95,
-        max_tokens=700,
-        timeout=30
-    )
-    return response.choices[0].message.content
-
-def deepseek_format_search(query, good_links):
-    if not good_links:
-        return "Ничего не нашёл. Попробуй переформулировать запрос 😊"
-    
-    links_text = ""
-    for i, link in enumerate(good_links, 1):
-        links_text += f"{i}. **{link['title']}**\n[Ссылка]({link['url']})\n\n"
-    
-    prompt = f"""Пользователь искал: "{query}"
-Вот что нашлось:
-{links_text}
-Ответь пользователю КОРОТКО (2-3 предложения) как живой человек.
-Дай самую важную информацию и ссылку на источник.
-"""
     try:
-        final = deepseek.chat.completions.create(
+        response = deepseek.chat.completions.create(
             model="deepseek-v4-flash",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=300,
+            messages=messages,
+            temperature=0.95,
+            max_tokens=700,
             timeout=30
         )
-        return final.choices[0].message.content
-    except:
-        return links_text
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"❌ Ошибка DeepSeek: {e}")
+        return "😅 Извини, что-то пошло не так. Попробуй ещё раз."
 
-def deepseek_format_history(query, results):
-    if not results:
-        return "Ничего не нашёл в истории по этому запросу 😊"
-    
-    text_results = "\n".join([f"{h['role']}: {h['content']}" for h in results[:5]])
-    prompt = f"""Вот что нашлось в истории по запросу '{query}':
-{text_results}
-
-Ответь пользователю коротко (2-3 предложения) как живой человек.
-"""
-    try:
-        final = deepseek.chat.completions.create(
-            model="deepseek-v4-flash",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=200,
-            timeout=30
-        )
-        return final.choices[0].message.content
-    except:
-        return f"В истории нашлось:\n{text_results[:300]}"
-
-# ============================================================
-# 7. ОСНОВНАЯ ЛОГИКА
-# ============================================================
-
-def deepseek_process(user_id, text):
+async def deepseek_process(user_id, text):
     try:
         user_name = get_fact(user_id, "name")
         user_city = get_fact(user_id, "city")
         
-        # === ВРЕМЯ ===
+        # === ТРИГГЕРЫ ===
+        
+        # Время
         if any(word in text.lower() for word in ["время", "сколько времени", "который час", "какое сегодня число"]):
             return get_current_time()
         
-        # === ПРЯМЫЕ ЗАПРОСЫ (ИЗ USER_MEMORY) ===
+        # Имя
         if any(word in text.lower() for word in ["как меня зовут", "моё имя", "кто я", "напомни моё имя"]):
             return f"Тебя зовут **{user_name}** 😊" if user_name else "Я не знаю твоего имени. Скажи: 'Меня зовут ...'"
         
+        # Город
         if any(word in text.lower() for word in ["где я живу", "мой город", "откуда я"]):
             return f"Ты из **{user_city}** 😊" if user_city else "Я не знаю, откуда ты. Скажи: 'Я живу в ...'"
         
-        # === ОСНОВНОЙ ДИАЛОГ ===
+        # Поиск по истории (вечная память)
+        if any(word in text.lower() for word in ["говорили", "раньше", "помнишь", "вспомни", "полгода", "месяц назад"]):
+            results = search_all_history(user_id, text)
+            if results:
+                history_text = "\n".join([f"{h['role']}: {h['content'][:100]}..." for h in results[:5]])
+                return f"🔍 Нашёл в истории:\n\n{history_text}"
+            else:
+                return "Ничего не нашёл в истории по этому запросу 😊"
+        
+        # === АГЕНТНЫЙ ПОИСК (ЯНДЕКС) ===
+        search_triggers = [
+            "найди", "поищи", "найти", "покажи", "где", "сайт", "фильм", 
+            "клиника", "адрес", "маршрут", "ссылка", "цены", "билеты", "купить", "скидки", "товар"
+        ]
+        if any(word in text.lower() for word in search_triggers):
+            logger.info(f"🔍 Яндекс-агент: '{text}'")
+            
+            # Добавляем город в запрос, если есть
+            query = text
+            if user_city and not any(word in query for word in ["погода", "новости"]):
+                query = f"{text} {user_city}"
+            
+            result = await yandex_agent_search(query)
+            
+            if result.get("success"):
+                return f"🔍 Нашёл:\n\n{result['result']}"
+            else:
+                # Fallback — если Яндекс не работает, используем обычный диалог
+                history = get_recent_history(user_id, limit=30)
+                return await deepseek_chat(text, history, user_name, user_city)
+        
+        # === ОБЫЧНЫЙ ДИАЛОГ ===
         history = get_recent_history(user_id, limit=30)
-        reply = deepseek_decide(user_id, text, user_name, user_city, history)
-        
-        # === ОБРАБОТКА КОМАНД DEEPSEEK ===
-        
-        # SEARCH
-        search_match = re.search(r'\[SEARCH:\s*(.+?)\]', reply)
-        if search_match:
-            query = search_match.group(1).strip()
-            logger.info(f"🔍 Поиск в интернете: '{query}'")
-            
-            if user_city:
-                query = f"{query} {user_city}"
-                logger.info(f"🔍 Добавил город: '{user_city}'")
-            
-            data = tavily_search(query)
-            good_links = get_good_links(data)
-            return deepseek_format_search(query, good_links)
-        
-        # HISTORY
-        history_match = re.search(r'\[HISTORY:\s*(.+?)\]', reply)
-        if history_match:
-            query = history_match.group(1).strip()
-            logger.info(f"📚 Поиск в истории: '{query}'")
-            results = search_history(user_id, query)
-            return deepseek_format_history(query, results)
-        
-        # === ЕСЛИ НЕТ КОМАНД ===
-        if not reply or reply.strip() in ["", "...", "…"]:
-            return "Что-то пошло не так. Попробуй переформулировать вопрос 😊"
-        
-        return reply
+        return await deepseek_chat(text, history, user_name, user_city)
         
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
         return "😅 Произошла ошибка. Попробуй ещё раз."
 
 # ============================================================
-# 8. WEBHOOK
+# 7. WEBHOOK
 # ============================================================
 
 @app.post("/webhook")
@@ -391,6 +340,7 @@ async def webhook(request: Request):
         user_id = str(msg["from"]["id"])
         text = None
         
+        # === ГОЛОС ===
         if "voice" in msg:
             file_id = msg["voice"]["file_id"]
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
@@ -407,14 +357,16 @@ async def webhook(request: Request):
                 await send_message(user_id, "⚠️ Ошибка обработки голоса.")
                 return JSONResponse({"ok": True})
         
+        # === ТЕКСТ ===
         if "text" in msg:
             text = msg["text"].strip()
         
         if not text:
             return JSONResponse({"ok": True})
         
+        # === ОБРАБОТКА ===
         save_message(user_id, "user", text)
-        reply = deepseek_process(user_id, text)
+        reply = await deepseek_process(user_id, text)
         save_message(user_id, "assistant", reply)
         await send_message(user_id, reply)
         
@@ -430,7 +382,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA is alive"}
+    return {"status": "AURA is alive with Yandex Agent"}
 
 if __name__ == "__main__":
     import uvicorn
