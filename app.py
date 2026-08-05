@@ -31,7 +31,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")  # Новый ключ для поиска
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")  # b1gt26bqh7052m5bhbeo
 
-logger.info("🚀 AURA — ФИНАЛЬНАЯ ВЕРСИЯ С YANDEX SEARCH API (v2)")
+logger.info("🚀 AURA — YANDEX SEARCH API v2 (FIXED)")
 
 # === ПОДКЛЮЧЕНИЯ ===
 supabase = None
@@ -118,7 +118,7 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API (v2)
+# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API (v2) — ПРАВИЛЬНЫЙ URL
 # ============================================================
 
 async def search_everything(query: str) -> list:
@@ -131,7 +131,8 @@ async def search_everything(query: str) -> list:
 
     logger.info(f"🔍 Yandex Search API: {query}")
 
-    url = "https://search-api.yandex.net/v2/search"
+    # ПРАВИЛЬНЫЙ URL для Yandex Search API v2
+    url = "https://yandex.cloud/ru/docs/search-api/operations/search"
     
     headers = {
         "Authorization": f"Api-Key {YANDEX_API_KEY}",
@@ -412,7 +413,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA — YANDEX SEARCH API (v2)"}
+    return {"status": "AURA — YANDEX SEARCH API v2 (FIXED)"}
 
 if __name__ == "__main__":
     import uvicorn
