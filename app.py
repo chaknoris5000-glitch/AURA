@@ -30,7 +30,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY_NEW")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
-logger.info("🚀 AURA — С РЕАЛЬНЫМ ЯНДЕКС-ПОИСКОМ (FINAL FIX)")
+logger.info("🚀 AURA — С НОВОЙ ВЕРСИЕЙ YANDEX SEARCH API (v2)")
 
 # === ПОДКЛЮЧЕНИЯ ===
 supabase = None
@@ -117,51 +117,49 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. НАСТОЯЩИЙ ЯНДЕКС-ПОИСК (ИСПРАВЛЕННЫЙ)
+# 2. ЯНДЕКС-ПОИСК (НОВАЯ ВЕРСИЯ API V2)
 # ============================================================
 
 async def yandex_search(query: str) -> list:
     """
-    Реальный поиск через Yandex Search API (AI Studio)
+    Поиск через Yandex Search API v2 (Yandex Cloud Gateway)
+    Документация: https://yandex.cloud/en/services/search-api
     """
     if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
         logger.warning("⚠️ Нет ключа или папки Яндекса")
         return []
 
-    logger.info(f"🔍 Поиск Яндекса: {query}")
+    logger.info(f"🔍 Поиск Яндекса (v2): {query}")
 
-    # ПРАВИЛЬНЫЙ URL и метод для AI Studio Search API
-    url = "https://yandex.ru/search/xml"
+    # ПРАВИЛЬНЫЙ URL для Yandex Search API v2
+    url = "https://search-api.yandex.net/v2/search"
     
-    params = {
-        "folderid": YANDEX_FOLDER_ID,
-        "apikey": YANDEX_API_KEY,
+    headers = {
+        "Authorization": f"Api-Key {YANDEX_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
         "query": query,
-        "l10n": "ru",
-        "sortby": "rlv",
-        "filter": "moderate",
-        "maxpassages": "1",
-        "groupby": f"attr=d.url.mode=flat.groups-on-page=5.docs-in-group=1",
-        "page": "0"
+        "folder_id": YANDEX_FOLDER_ID,
+        "language": "ru",
+        "search_type": "web",
+        "page": 0,
+        "page_size": 5,
+        "sort_by": "relevance"
     }
 
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, params=params, timeout=30)
+            response = await client.post(url, json=payload, headers=headers, timeout=30)
             if response.status_code == 200:
-                # Парсим XML ответ
-                import xml.etree.ElementTree as ET
-                root = ET.fromstring(response.text)
+                data = response.json()
                 results = []
-                for doc in root.findall(".//doc"):
-                    title_elem = doc.find("title")
-                    url_elem = doc.find("url")
-                    snippet_elem = doc.find("snippet")
-                    
+                for doc in data.get("results", []):
                     results.append({
-                        "title": title_elem.text if title_elem is not None else "Без названия",
-                        "url": url_elem.text if url_elem is not None else "#",
-                        "snippet": snippet_elem.text if snippet_elem is not None else "",
+                        "title": doc.get("title", "Без названия"),
+                        "url": doc.get("url", "#"),
+                        "snippet": doc.get("snippet", ""),
                     })
                 logger.info(f"✅ Найдено {len(results)} результатов")
                 return results
@@ -288,7 +286,7 @@ async def deepseek_process(user_id, text):
             else:
                 return "Ничего не нашёл в истории 😊"
         
-        # === ПОИСК В ИНТЕРНЕТЕ (НОВЫЙ, НАСТОЯЩИЙ) ===
+        # === ПОИСК В ИНТЕРНЕТЕ ===
         search_triggers = [
             "найди", "поищи", "найти", "покажи", "где", "сайт", "фильм", 
             "клиника", "адрес", "маршрут", "ссылка", "цены", "билеты", 
@@ -377,7 +375,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA is alive with Yandex Search (FINAL FIX)"}
+    return {"status": "AURA is alive with Yandex Search v2"}
 
 if __name__ == "__main__":
     import uvicorn
