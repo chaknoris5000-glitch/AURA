@@ -26,11 +26,11 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# КЛЮЧИ ЯНДЕКСА (ОДИН КЛЮЧ НА ВСЁ)
-YANDEX_API_KEY = os.getenv("YANDEX_API_KEY_NEW")  # Тот самый новый ключ
+# КЛЮЧИ ЯНДЕКСА
+YANDEX_API_KEY = os.getenv("YANDEX_API_KEY_NEW")  # Тот самый ключ из AI Studio
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")  # b1gt26bqh7052m5bhbeo
 
-logger.info("🚀 AURA — С РЕАЛЬНЫМ ЯНДЕКС-ПОИСКОМ")
+logger.info("🚀 AURA — С РЕАЛЬНЫМ ЯНДЕКС-ПОИСКОМ (FIXED)")
 
 # === ПОДКЛЮЧЕНИЯ ===
 supabase = None
@@ -117,13 +117,12 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. НАСТОЯЩИЙ ЯНДЕКС-ПОИСК
+# 2. НАСТОЯЩИЙ ЯНДЕКС-ПОИСК (ИСПРАВЛЕННЫЙ)
 # ============================================================
 
 async def yandex_search(query: str) -> list:
     """
-    Реальный поиск через Yandex Search API
-    Возвращает список словарей с ссылками
+    Реальный поиск через Yandex Search API (AI Studio)
     """
     if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
         logger.warning("⚠️ Нет ключа или папки Яндекса")
@@ -131,25 +130,27 @@ async def yandex_search(query: str) -> list:
 
     logger.info(f"🔍 Поиск Яндекса: {query}")
 
-    # Формируем запрос к Search API
-    url = "https://search.yandex.ru/search"
-    params = {
-        "text": query,
-        "api_key": YANDEX_API_KEY,
+    # Правильный URL для Search API в AI Studio
+    url = "https://search-api.cloud.yandex.net/api/v1/search"
+    
+    headers = {
+        "Authorization": f"Api-Key {YANDEX_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "query": query,
         "folder_id": YANDEX_FOLDER_ID,
-        "num_docs": 5,  # Количество результатов
-        "group_by": "domain",
-        "group_by_groups_count": 5
+        "num_results": 5,
+        "group_by": "domain"
     }
 
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, params=params, timeout=30)
+            response = await client.post(url, json=payload, headers=headers, timeout=30)
             if response.status_code == 200:
                 data = response.json()
                 results = []
-                
-                # Парсим результаты
                 for doc in data.get("results", []):
                     results.append({
                         "title": doc.get("title", "Без названия"),
@@ -159,7 +160,7 @@ async def yandex_search(query: str) -> list:
                 logger.info(f"✅ Найдено {len(results)} результатов")
                 return results
             else:
-                logger.error(f"❌ Ошибка поиска: {response.status_code}")
+                logger.error(f"❌ Ошибка поиска: {response.status_code} - {response.text}")
                 return []
     except Exception as e:
         logger.error(f"❌ Ошибка запроса: {e}")
@@ -371,7 +372,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA is alive with Yandex Search"}
+    return {"status": "AURA is alive with Yandex Search (FIXED)"}
 
 if __name__ == "__main__":
     import uvicorn
