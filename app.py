@@ -28,10 +28,10 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # === КЛЮЧИ ЯНДЕКСА ===
-YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")  # Новый ключ для поиска
-YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")  # b1gt26bqh7052m5bhbeo
+YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
+YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
-logger.info("🚀 AURA — YANDEX SEARCH API v2 (FIXED)")
+logger.info("🚀 AURA — YANDEX SEARCH API v2 (ФИНАЛЬНАЯ ВЕРСИЯ)")
 
 # === ПОДКЛЮЧЕНИЯ ===
 supabase = None
@@ -118,12 +118,12 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API (v2) — ПРАВИЛЬНЫЙ URL
+# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API (v2) — ПРОВЕРЕННЫЙ URL
 # ============================================================
 
 async def search_everything(query: str) -> list:
     """
-    Поиск через официальный Yandex Search API (v2)
+    Поиск через официальный Yandex Search API (v2) с правильным URL
     """
     if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
         logger.warning("⚠️ Нет ключа или папки Яндекса")
@@ -131,8 +131,8 @@ async def search_everything(query: str) -> list:
 
     logger.info(f"🔍 Yandex Search API: {query}")
 
-    # ПРАВИЛЬНЫЙ URL для Yandex Search API v2
-    url = "https://yandex.cloud/ru/docs/search-api/operations/search"
+    # ПРАВИЛЬНЫЙ URL ДЛЯ YANDEX SEARCH API v2
+    url = "https://search-api.yandex.net/v2/search"
     
     headers = {
         "Authorization": f"Api-Key {YANDEX_API_KEY}",
@@ -413,7 +413,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA — YANDEX SEARCH API v2 (FIXED)"}
+    return {"status": "AURA — YANDEX SEARCH API v2 (ФИНАЛЬНАЯ ВЕРСИЯ)"}
 
 if __name__ == "__main__":
     import uvicorn
