@@ -26,12 +26,11 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# НОВЫЙ КЛЮЧ ДЛЯ ЯНДЕКСА
-YANDEX_API_KEY = os.getenv("YANDEX_API_KEY_NEW")  # Новый ключ для AI Studio
-YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")  # ID папки из консоли
-YANDEX_OLD_KEY = os.getenv("YANDEX_API_KEY_OLD")  # Старый ключ для голоса (опционально)
+# КЛЮЧИ ЯНДЕКСА (ОДИН КЛЮЧ НА ВСЁ)
+YANDEX_API_KEY = os.getenv("YANDEX_API_KEY_NEW")  # Тот самый новый ключ
+YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")  # b1gt26bqh7052m5bhbeo
 
-logger.info("🚀 AURA — НОВАЯ ВЕРСИЯ С ЯНДЕКС-АГЕНТОМ")
+logger.info("🚀 AURA — С РЕАЛЬНЫМ ЯНДЕКС-ПОИСКОМ")
 
 # === ПОДКЛЮЧЕНИЯ ===
 supabase = None
@@ -47,7 +46,7 @@ groq = Groq(api_key=GROQ_API_KEY)
 app = FastAPI()
 
 # ============================================================
-# 1. БАЗА ДАННЫХ (ВСЯ ИСТОРИЯ)
+# 1. БАЗА ДАННЫХ
 # ============================================================
 
 def save_message(user_id, role, content):
@@ -60,7 +59,6 @@ def save_message(user_id, role, content):
             "content": content,
             "created_at": datetime.now().isoformat()
         }).execute()
-        logger.info(f"💾 {role}: {content[:30]}...")
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения: {e}")
 
@@ -80,7 +78,6 @@ def get_recent_history(user_id, limit=50):
         return []
 
 def search_all_history(user_id, query):
-    """Поиск по ВСЕЙ истории (за всё время)"""
     if not supabase:
         return []
     try:
@@ -107,7 +104,6 @@ def save_fact(user_id, key, value):
             "value": value,
             "created_at": datetime.now().isoformat()
         }).execute()
-        logger.info(f"💾 Сохранён факт: {key} = {value}")
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения факта: {e}")
 
@@ -121,64 +117,61 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ЯНДЕКС-АГЕНТ (ЗАМЕНЯЕТ TAVILY)
+# 2. НАСТОЯЩИЙ ЯНДЕКС-ПОИСК
 # ============================================================
 
-async def yandex_agent_search(query: str) -> dict:
+async def yandex_search(query: str) -> list:
     """
-    Запрос к Яндекс-агенту через AI Studio API
+    Реальный поиск через Yandex Search API
+    Возвращает список словарей с ссылками
     """
     if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
         logger.warning("⚠️ Нет ключа или папки Яндекса")
-        return {"error": "Нет ключа"}
+        return []
 
-    logger.info(f"🔍 Яндекс-агент ищет: {query}")
+    logger.info(f"🔍 Поиск Яндекса: {query}")
 
-    url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
-    headers = {
-        "Authorization": f"Api-Key {YANDEX_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    payload = {
-        "modelUri": f"gpt://{YANDEX_FOLDER_ID}/yandexgpt/latest",
-        "completionOptions": {
-            "stream": False,
-            "temperature": 0.3,
-            "maxTokens": 1000
-        },
-        "messages": [
-            {"role": "system", "text": "Ты — помощник, который ищет информацию в интернете. Отвечай коротко и по делу."},
-            {"role": "user", "text": f"Найди информацию по запросу: {query}"}
-        ]
+    # Формируем запрос к Search API
+    url = "https://search.yandex.ru/search"
+    params = {
+        "text": query,
+        "api_key": YANDEX_API_KEY,
+        "folder_id": YANDEX_FOLDER_ID,
+        "num_docs": 5,  # Количество результатов
+        "group_by": "domain",
+        "group_by_groups_count": 5
     }
 
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, headers=headers, timeout=30)
+            response = await client.get(url, params=params, timeout=30)
             if response.status_code == 200:
                 data = response.json()
-                result = data.get("result", {}).get("alternatives", [{}])[0].get("message", {}).get("text", "Ничего не найдено")
-                logger.info(f"✅ Яндекс-агент ответил: {result[:50]}...")
-                return {"success": True, "result": result}
+                results = []
+                
+                # Парсим результаты
+                for doc in data.get("results", []):
+                    results.append({
+                        "title": doc.get("title", "Без названия"),
+                        "url": doc.get("url", "#"),
+                        "snippet": doc.get("snippet", ""),
+                    })
+                logger.info(f"✅ Найдено {len(results)} результатов")
+                return results
             else:
-                logger.error(f"❌ Ошибка Яндекса: {response.status_code} - {response.text}")
-                return {"error": f"Ошибка {response.status_code}"}
+                logger.error(f"❌ Ошибка поиска: {response.status_code}")
+                return []
     except Exception as e:
-        logger.error(f"❌ Исключение Яндекса: {e}")
-        return {"error": str(e)}
+        logger.error(f"❌ Ошибка запроса: {e}")
+        return []
 
 # ============================================================
-# 3. ВРЕМЯ
+# 3. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ============================================================
 
 def get_current_time():
     now = datetime.utcnow() + timedelta(hours=7)
     return f"Сейчас **{now.strftime('%H:%M')}**, {now.strftime('%d.%m.%Y')} 😊"
-
-# ============================================================
-# 4. ГОЛОС
-# ============================================================
 
 def transcribe_audio(audio_url):
     try:
@@ -199,10 +192,6 @@ def transcribe_audio(audio_url):
     except Exception as e:
         logger.error(f"❌ Ошибка распознавания: {e}")
         return None
-
-# ============================================================
-# 5. ОТПРАВКА СООБЩЕНИЙ
-# ============================================================
 
 async def send_chat_action(chat_id):
     try:
@@ -228,11 +217,11 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# 6. ОСНОВНАЯ ЛОГИКА (С ЯНДЕКС-АГЕНТОМ)
+# 4. ОСНОВНАЯ ЛОГИКА
 # ============================================================
 
 async def deepseek_chat(text, history, user_name, user_city):
-    history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history[-10:]])  # Последние 10 для контекста
+    history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history[-10:]])
     
     system_prompt = f"""Ты — AURA. Ты живой собеседник и друг.
 
@@ -246,7 +235,6 @@ async def deepseek_chat(text, history, user_name, user_city):
 1. Отвечай коротко (2-3 предложения)
 2. Используй эмодзи 😊🔥
 3. Будь собой
-4. Если не знаешь ответа — скажи честно
 """
     
     messages = [{"role": "system", "content": system_prompt}]
@@ -272,50 +260,51 @@ async def deepseek_process(user_id, text):
         user_name = get_fact(user_id, "name")
         user_city = get_fact(user_id, "city")
         
-        # === ТРИГГЕРЫ ===
-        
-        # Время
-        if any(word in text.lower() for word in ["время", "сколько времени", "который час", "какое сегодня число"]):
+        # === ВРЕМЯ ===
+        if any(word in text.lower() for word in ["время", "сколько времени", "который час"]):
             return get_current_time()
         
-        # Имя
-        if any(word in text.lower() for word in ["как меня зовут", "моё имя", "кто я", "напомни моё имя"]):
-            return f"Тебя зовут **{user_name}** 😊" if user_name else "Я не знаю твоего имени. Скажи: 'Меня зовут ...'"
+        # === ИМЯ ===
+        if any(word in text.lower() for word in ["как меня зовут", "моё имя"]):
+            return f"Тебя зовут **{user_name}** 😊" if user_name else "Я не знаю твоего имени."
         
-        # Город
-        if any(word in text.lower() for word in ["где я живу", "мой город", "откуда я"]):
-            return f"Ты из **{user_city}** 😊" if user_city else "Я не знаю, откуда ты. Скажи: 'Я живу в ...'"
+        # === ГОРОД ===
+        if any(word in text.lower() for word in ["где я живу", "мой город"]):
+            return f"Ты из **{user_city}** 😊" if user_city else "Я не знаю, откуда ты."
         
-        # Поиск по истории (вечная память)
-        if any(word in text.lower() for word in ["говорили", "раньше", "помнишь", "вспомни", "полгода", "месяц назад"]):
+        # === ПОИСК В ИСТОРИИ ===
+        if any(word in text.lower() for word in ["говорили", "раньше", "помнишь", "вспомни"]):
             results = search_all_history(user_id, text)
             if results:
                 history_text = "\n".join([f"{h['role']}: {h['content'][:100]}..." for h in results[:5]])
                 return f"🔍 Нашёл в истории:\n\n{history_text}"
             else:
-                return "Ничего не нашёл в истории по этому запросу 😊"
+                return "Ничего не нашёл в истории 😊"
         
-        # === АГЕНТНЫЙ ПОИСК (ЯНДЕКС) ===
+        # === ПОИСК В ИНТЕРНЕТЕ (НОВЫЙ, НАСТОЯЩИЙ) ===
         search_triggers = [
             "найди", "поищи", "найти", "покажи", "где", "сайт", "фильм", 
-            "клиника", "адрес", "маршрут", "ссылка", "цены", "билеты", "купить", "скидки", "товар"
+            "клиника", "адрес", "маршрут", "ссылка", "цены", "билеты", 
+            "купить", "скидки", "товар", "отель", "ресторан", "погода"
         ]
         if any(word in text.lower() for word in search_triggers):
-            logger.info(f"🔍 Яндекс-агент: '{text}'")
+            logger.info(f"🔍 Поиск Яндекса: '{text}'")
             
-            # Добавляем город в запрос, если есть
+            # Добавляем город в запрос
             query = text
-            if user_city and not any(word in query for word in ["погода", "новости"]):
+            if user_city:
                 query = f"{text} {user_city}"
             
-            result = await yandex_agent_search(query)
+            results = await yandex_search(query)
             
-            if result.get("success"):
-                return f"🔍 Нашёл:\n\n{result['result']}"
+            if results:
+                response = "🔍 Нашёл! Вот что нашёл:\n\n"
+                for i, res in enumerate(results, 1):
+                    response += f"{i}. **{res['title']}**\n[Ссылка]({res['url']})\n\n"
+                return response
             else:
-                # Fallback — если Яндекс не работает, используем обычный диалог
-                history = get_recent_history(user_id, limit=30)
-                return await deepseek_chat(text, history, user_name, user_city)
+                # Если поиск не дал результатов
+                return "Не нашёл ничего по этому запросу. Попробуй переформулировать 😊"
         
         # === ОБЫЧНЫЙ ДИАЛОГ ===
         history = get_recent_history(user_id, limit=30)
@@ -326,7 +315,7 @@ async def deepseek_process(user_id, text):
         return "😅 Произошла ошибка. Попробуй ещё раз."
 
 # ============================================================
-# 7. WEBHOOK
+# 5. WEBHOOK
 # ============================================================
 
 @app.post("/webhook")
@@ -382,7 +371,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA is alive with Yandex Agent"}
+    return {"status": "AURA is alive with Yandex Search"}
 
 if __name__ == "__main__":
     import uvicorn
