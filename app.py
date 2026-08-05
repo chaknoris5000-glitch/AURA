@@ -130,31 +130,38 @@ async def yandex_search(query: str) -> list:
 
     logger.info(f"🔍 Поиск Яндекса: {query}")
 
-    # ПРАВИЛЬНЫЙ URL для Search API в AI Studio
-    url = "https://search-api.yandexcloud.net/v1/search"
+    # ПРАВИЛЬНЫЙ URL и метод для AI Studio Search API
+    url = "https://yandex.ru/search/xml"
     
-    headers = {
-        "Authorization": f"Api-Key {YANDEX_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    payload = {
+    params = {
+        "folderid": YANDEX_FOLDER_ID,
+        "apikey": YANDEX_API_KEY,
         "query": query,
-        "folder_id": YANDEX_FOLDER_ID,
-        "limit": 5
+        "l10n": "ru",
+        "sortby": "rlv",
+        "filter": "moderate",
+        "maxpassages": "1",
+        "groupby": f"attr=d.url.mode=flat.groups-on-page=5.docs-in-group=1",
+        "page": "0"
     }
 
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, headers=headers, timeout=30)
+            response = await client.get(url, params=params, timeout=30)
             if response.status_code == 200:
-                data = response.json()
+                # Парсим XML ответ
+                import xml.etree.ElementTree as ET
+                root = ET.fromstring(response.text)
                 results = []
-                for doc in data.get("results", []):
+                for doc in root.findall(".//doc"):
+                    title_elem = doc.find("title")
+                    url_elem = doc.find("url")
+                    snippet_elem = doc.find("snippet")
+                    
                     results.append({
-                        "title": doc.get("title", "Без названия"),
-                        "url": doc.get("url", "#"),
-                        "snippet": doc.get("snippet", ""),
+                        "title": title_elem.text if title_elem is not None else "Без названия",
+                        "url": url_elem.text if url_elem is not None else "#",
+                        "snippet": snippet_elem.text if snippet_elem is not None else "",
                     })
                 logger.info(f"✅ Найдено {len(results)} результатов")
                 return results
@@ -303,7 +310,6 @@ async def deepseek_process(user_id, text):
                     response += f"{i}. **{res['title']}**\n[Ссылка]({res['url']})\n\n"
                 return response
             else:
-                # Если поиск не дал результатов
                 return "Не нашёл ничего по этому запросу. Попробуй переформулировать 😊"
         
         # === ОБЫЧНЫЙ ДИАЛОГ ===
