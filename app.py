@@ -27,7 +27,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-logger.info("🚀 AURA — ПОИСК (МОБИЛЬНАЯ ВЕРСИЯ)")
+logger.info("🚀 AURA — ПОИСК (ДЕСКТОПНАЯ ВЕРСИЯ)")
 
 # === ПОДКЛЮЧЕНИЯ ===
 supabase = None
@@ -114,20 +114,20 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. УНИВЕРСАЛЬНЫЙ ПОИСК (МОБИЛЬНАЯ ВЕРСИЯ ЯНДЕКСА)
+# 2. УНИВЕРСАЛЬНЫЙ ПОИСК (ДЕСКТОПНАЯ ВЕРСИЯ)
 # ============================================================
 
 async def search_everything(query: str) -> list:
     """
-    Поиск через мобильную версию Яндекса (легче парсить)
+    Поиск через десктопную версию Яндекса (настоящие результаты)
     """
-    logger.info(f"🔍 Мобильный поиск: {query}")
+    logger.info(f"🔍 Поиск: {query}")
     
     encoded_query = urllib.parse.quote(query)
-    url = f"https://yandex.ru/touch/search?text={encoded_query}"
+    url = f"https://yandex.ru/search/?text={encoded_query}"
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.77 Mobile Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
     
     try:
@@ -136,43 +136,52 @@ async def search_everything(query: str) -> list:
         
         results = []
         
-        # Ищем ссылки и заголовки в мобильной версии
-        link_pattern = r'<a class="[^"]*link[^"]*"[^>]*href="([^"]+)"[^>]*>([^<]+)</a>'
-        links = re.findall(link_pattern, html)
+        # 1. Находим все блоки serp-item (настоящие результаты)
+        serp_blocks = re.findall(r'<div class="[^"]*serp-item[^"]*"[^>]*>(.*?)</div>', html, re.DOTALL)
         
-        # Ищем описания
-        snippet_pattern = r'<div class="[^"]*text[^"]*"[^>]*>([^<]+)</div>'
-        snippets = re.findall(snippet_pattern, html)
-        
-        # Если не нашли по простым паттернам, ищем по более общим
-        if not links:
-            # Ищем все ссылки с текстом
-            link_pattern2 = r'<a[^>]+href="([^"]+)"[^>]*>([^<]+)</a>'
-            links = re.findall(link_pattern2, html)
-            # Фильтруем ссылки, которые похожи на результаты поиска
-            links = [(l, t) for l, t in links if "yandex" not in l and "?" not in l and len(t) > 5]
-        
-        # Собираем результаты
-        for i, (link, title) in enumerate(links[:10]):
-            # Очищаем ссылку
-            if not link.startswith("http"):
-                link = f"https://yandex.ru{link}"
+        for block in serp_blocks:
+            # Ищем ссылку
+            link_match = re.search(r'<a[^>]+href="([^"]+)"[^>]*>([^<]+)</a>', block)
+            if not link_match:
+                continue
             
-            # Берем сниппет, если есть
-            snippet = snippets[i] if i < len(snippets) else ""
+            link = link_match.group(1)
+            title = link_match.group(2).strip()
+            
+            # Пропускаем служебные ссылки Яндекса
+            if any(skip in link for skip in [
+                'yandex.ru/search', 'yandex.ru/touch', 
+                'yandex.ru/images', 'yandex.ru/video',
+                'yandex.ru/maps', 'yandex.ru/news'
+            ]):
+                continue
+            
+            # Очищаем ссылку
+            if link.startswith('/'):
+                link = f"https://yandex.ru{link}"
+            elif not link.startswith('http'):
+                continue
+            
+            # Ищем сниппет
+            snippet_match = re.search(r'<div class="[^"]*text[^"]*"[^>]*>(.*?)</div>', block, re.DOTALL)
+            snippet = snippet_match.group(1) if snippet_match else ""
+            snippet = re.sub(r'<[^>]+>', '', snippet).strip()
             
             # Ищем цену
             price = ""
-            price_match = re.search(r'(\d+[\s\d]*)\s*[₽руб]', snippet + " " + title)
+            price_match = re.search(r'(\d+[\s\d]*)\s*[₽руб]', block)
             if price_match:
                 price = price_match.group(1) + " ₽"
             
             results.append({
-                "title": title.strip(),
+                "title": title[:100],
                 "url": link,
-                "snippet": snippet[:200].strip(),
+                "snippet": snippet[:200],
                 "price": price
             })
+            
+            if len(results) >= 10:
+                break
         
         logger.info(f"✅ Найдено {len(results)} результатов")
         return results
@@ -427,7 +436,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA — УНИВЕРСАЛЬНЫЙ АГЕНТ (МОБИЛЬНЫЙ ПОИСК)"}
+    return {"status": "AURA — ПОИСК РАБОТАЕТ"}
 
 if __name__ == "__main__":
     import uvicorn
