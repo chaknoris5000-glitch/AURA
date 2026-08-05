@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 import requests
 import logging
 import httpx
-from bs4 import BeautifulSoup
 import urllib.parse
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -28,7 +27,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-logger.info("🚀 AURA — АГЕНТ, КОТОРЫЙ ИЩЕТ ВСЁ")
+logger.info("🚀 AURA — УНИВЕРСАЛЬНЫЙ ПОИСК (ФИНАЛЬНЫЙ КОД)")
 
 # === ПОДКЛЮЧЕНИЯ ===
 supabase = None
@@ -115,17 +114,15 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. УНИВЕРСАЛЬНЫЙ ПОИСК (ИЩЕТ ВСЁ)
+# 2. УНИВЕРСАЛЬНЫЙ ПОИСК (РЕГУЛЯРКИ, БЕЗ БИБЛИОТЕК)
 # ============================================================
 
 async def search_everything(query: str) -> list:
     """
-    Ищет ВСЁ через Яндекс.Поиск (парсинг страниц)
-    Возвращает список с заголовками, ссылками, ценами
+    Универсальный поиск через Яндекс (парсим регулярками, без библиотек)
     """
-    logger.info(f"🔍 Универсальный поиск: {query}")
+    logger.info(f"🔍 Поиск: {query}")
     
-    # Кодируем запрос
     encoded_query = urllib.parse.quote(query)
     url = f"https://yandex.ru/search/?text={encoded_query}"
     
@@ -135,40 +132,41 @@ async def search_everything(query: str) -> list:
     
     try:
         response = requests.get(url, headers=headers, timeout=30)
-        soup = BeautifulSoup(response.text, 'html.parser')
+        html = response.text
         
         results = []
-        # Ищем все результаты на странице
-        for item in soup.select('.serp-item'):
-            title_elem = item.select_one('.organic__url-text')
-            link_elem = item.select_one('.organic__url')
-            snippet_elem = item.select_one('.organic__text')
-            price_elem = item.select_one('.price')
+        
+        # Ищем все результаты: <a class="link" href="url">Заголовок</a>
+        link_pattern = r'<a class="link[^"]*" href="([^"]+)"[^>]*>([^<]+)</a>'
+        links = re.findall(link_pattern, html)
+        
+        # Ищем описания
+        snippet_pattern = r'<div class="text[^"]*"[^>]*>([^<]+)</div>'
+        snippets = re.findall(snippet_pattern, html)
+        
+        # Собираем результаты
+        for i, (link, title) in enumerate(links[:10]):
+            snippet = snippets[i] if i < len(snippets) else ""
             
-            if title_elem and link_elem:
-                title = title_elem.get_text(strip=True)
-                link = link_elem.get('href', '#')
-                snippet = snippet_elem.get_text(strip=True)[:200] if snippet_elem else ""
-                
-                # Пытаемся найти цену
-                price = ""
-                if price_elem:
-                    price = price_elem.get_text(strip=True)
-                elif "₽" in snippet or "руб" in snippet:
-                    # Ищем цену в сниппете
-                    price_match = re.search(r'(\d+[\s\d]*\s*[₽руб])', snippet)
-                    if price_match:
-                        price = price_match.group(1)
-                
-                results.append({
-                    "title": title,
-                    "url": link,
-                    "snippet": snippet,
-                    "price": price
-                })
+            # Ищем цену
+            price = ""
+            price_match = re.search(r'(\d+[\s\d]*)\s*[₽руб]', snippet + " " + title)
+            if price_match:
+                price = price_match.group(1) + " ₽"
+            
+            # Очищаем ссылку
+            if not link.startswith("http"):
+                link = f"https://yandex.ru{link}"
+            
+            results.append({
+                "title": title.strip(),
+                "url": link,
+                "snippet": snippet[:200].strip(),
+                "price": price
+            })
         
         logger.info(f"✅ Найдено {len(results)} результатов")
-        return results[:10]  # Возвращаем топ-10
+        return results
         
     except Exception as e:
         logger.error(f"❌ Ошибка поиска: {e}")
@@ -180,12 +178,11 @@ async def search_everything(query: str) -> list:
 
 def analyze_prices(results: list) -> dict:
     """
-    Анализирует цены в результатах поиска
+    Находит самый дешёвый вариант
     """
     prices = []
     for res in results:
         if res.get('price'):
-            # Извлекаем число из цены
             numbers = re.findall(r'\d+', res['price'])
             if numbers:
                 price_int = int(''.join(numbers))
@@ -196,7 +193,6 @@ def analyze_prices(results: list) -> dict:
                 })
     
     if prices:
-        # Сортируем по цене
         sorted_prices = sorted(prices, key=lambda x: x['value'])
         return {
             "cheapest": sorted_prices[0] if sorted_prices else None,
@@ -320,7 +316,7 @@ async def deepseek_process(user_id, text):
             else:
                 return "Ничего не нашёл в истории 😊"
         
-        # === УНИВЕРСАЛЬНЫЙ ПОИСК ===
+        # === ПОИСК В ИНТЕРНЕТЕ ===
         search_triggers = [
             "найди", "поищи", "найти", "покажи", "где", "сайт", "фильм", 
             "клиника", "адрес", "маршрут", "ссылка", "цены", "билеты", 
@@ -331,18 +327,16 @@ async def deepseek_process(user_id, text):
             logger.info(f"🔍 Поиск: '{text}'")
             
             query = text
-            if user_city and not any(word in query.lower() for word in ["погода", "новости"]):
+            if user_city:
                 query = f"{text} {user_city}"
             
             results = await search_everything(query)
             
             if results:
-                # Анализируем цены
                 price_analysis = analyze_prices(results)
                 
                 response = "🔍 Нашёл! Вот лучшие результаты:\n\n"
                 
-                # Если есть цены, показываем самый дешёвый
                 if price_analysis['cheapest']:
                     cheapest = price_analysis['cheapest']
                     response += f"💰 **Самый дешёвый вариант:**\n"
@@ -350,7 +344,6 @@ async def deepseek_process(user_id, text):
                     response += f"Цена: **{cheapest['value']} ₽**\n"
                     response += f"[Ссылка]({cheapest['url']})\n\n"
                 
-                # Показываем топ результатов
                 response += "📋 **Другие варианты:**\n"
                 for i, res in enumerate(results[:5], 1):
                     price_text = f" — {res['price']}" if res.get('price') else ""
