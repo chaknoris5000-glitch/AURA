@@ -27,10 +27,10 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # КЛЮЧИ ЯНДЕКСА
-YANDEX_API_KEY = os.getenv("YANDEX_API_KEY_NEW")  # Тот самый ключ из AI Studio
-YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")  # b1gt26bqh7052m5bhbeo
+YANDEX_API_KEY = os.getenv("YANDEX_API_KEY_NEW")
+YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
-logger.info("🚀 AURA — С РЕАЛЬНЫМ ЯНДЕКС-ПОИСКОМ (FIXED)")
+logger.info("🚀 AURA — С РЕАЛЬНЫМ ЯНДЕКС-ПОИСКОМ (FINAL FIX)")
 
 # === ПОДКЛЮЧЕНИЯ ===
 supabase = None
@@ -130,8 +130,8 @@ async def yandex_search(query: str) -> list:
 
     logger.info(f"🔍 Поиск Яндекса: {query}")
 
-    # Правильный URL для Search API в AI Studio
-    url = "https://search-api.cloud.yandex.net/api/v1/search"
+    # ПРАВИЛЬНЫЙ URL для Search API в AI Studio
+    url = "https://search-api.yandexcloud.net/v1/search"
     
     headers = {
         "Authorization": f"Api-Key {YANDEX_API_KEY}",
@@ -141,8 +141,7 @@ async def yandex_search(query: str) -> list:
     payload = {
         "query": query,
         "folder_id": YANDEX_FOLDER_ID,
-        "num_results": 5,
-        "group_by": "domain"
+        "limit": 5
     }
 
     try:
@@ -372,7 +371,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA is alive with Yandex Search (FIXED)"}
+    return {"status": "AURA is alive with Yandex Search (FINAL FIX)"}
 
 if __name__ == "__main__":
     import uvicorn
