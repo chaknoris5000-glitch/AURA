@@ -31,7 +31,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
-logger.info("🚀 AURA — YANDEX SEARCH API (ПРЯМОЙ IP)")
+logger.info("🚀 AURA — YANDEX SEARCH API (ЧЕРЕЗ API GATEWAY)")
 
 # === ПОДКЛЮЧЕНИЯ ===
 supabase = None
@@ -118,24 +118,23 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ПОИСК ЧЕРЕЗ ПРЯМОЙ IP
+# 2. ПОИСК ЧЕРЕЗ API GATEWAY
 # ============================================================
 
 async def search_everything(query: str) -> list:
     """
-    Поиск через Yandex Search API по прямому IP
+    Поиск через Yandex Search API через API Gateway
     """
     if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
         logger.warning("⚠️ Нет ключа или папки Яндекса")
         return []
 
-    logger.info(f"🔍 Yandex Search API (IP): {query}")
+    logger.info(f"🔍 Yandex Search API (Gateway): {query}")
 
-    # Прямой IP Яндекса
-    url = "https://84.201.175.42/v2/search"
+    # Адрес шлюза
+    url = "https://d5d9h42ts88tug9epccv.uvah0e6r.apigw.yandexcloud.net/"
     
     headers = {
-        "Host": "search-api.yandex.net",
         "Authorization": f"Api-Key {YANDEX_API_KEY}",
         "Content-Type": "application/json"
     }
@@ -151,7 +150,7 @@ async def search_everything(query: str) -> list:
     }
 
     try:
-        async with httpx.AsyncClient(verify=False) as client:
+        async with httpx.AsyncClient() as client:
             response = await client.post(url, json=payload, headers=headers, timeout=30)
             if response.status_code == 200:
                 data = response.json()
@@ -414,7 +413,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA — YANDEX SEARCH API (ПРЯМОЙ IP)"}
+    return {"status": "AURA — YANDEX SEARCH API (ЧЕРЕЗ API GATEWAY)"}
 
 if __name__ == "__main__":
     import uvicorn
