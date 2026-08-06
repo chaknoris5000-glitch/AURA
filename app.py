@@ -31,7 +31,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
-logger.info("🚀 AURA — YANDEX SEARCH API (С РЕДИРЕКТОМ)")
+logger.info("🚀 AURA — YANDEX SEARCH API v2 (ПО ДОКУМЕНТАЦИИ)")
 
 # === ПОДКЛЮЧЕНИЯ ===
 supabase = None
@@ -118,20 +118,22 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API (С РЕДИРЕКТОМ)
+# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API v2 (ПО ДОКУМЕНТАЦИИ)
 # ============================================================
 
 async def search_everything(query: str) -> list:
     """
-    Поиск через Yandex Search API с автоматическим редиректом
+    Поиск через официальный Yandex Search API v2
+    Документация: https://yandex.cloud/ru/docs/search-api/api-ref/
     """
     if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
         logger.warning("⚠️ Нет ключа или папки Яндекса")
         return []
 
-    logger.info(f"🔍 Yandex Search API: {query}")
+    logger.info(f"🔍 Yandex Search API v2: {query}")
 
-    url = "https://yandex.ru/search-api/v2/search"
+    # ПРАВИЛЬНЫЙ URL ПО ДОКУМЕНТАЦИИ
+    url = "https://search-api.yandex.net/v2/search"
     
     headers = {
         "Authorization": f"Api-Key {YANDEX_API_KEY}",
@@ -149,7 +151,7 @@ async def search_everything(query: str) -> list:
     }
 
     try:
-        async with httpx.AsyncClient(follow_redirects=True) as client:
+        async with httpx.AsyncClient() as client:
             response = await client.post(url, json=payload, headers=headers, timeout=30)
             if response.status_code == 200:
                 data = response.json()
@@ -412,7 +414,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA — YANDEX SEARCH API (С РЕДИРЕКТОМ)"}
+    return {"status": "AURA — YANDEX SEARCH API v2 (ПО ДОКУМЕНТАЦИИ)"}
 
 if __name__ == "__main__":
     import uvicorn
