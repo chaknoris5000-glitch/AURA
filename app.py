@@ -31,7 +31,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
-logger.info("🚀 AURA — YANDEX SEARCH API (ЧЕРЕЗ API GATEWAY)")
+logger.info("🚀 AURA — YANDEX SEARCH API (ПРАВИЛЬНЫЙ ЭНДПОИНТ)")
 
 # === ПОДКЛЮЧЕНИЯ ===
 supabase = None
@@ -118,32 +118,35 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ПОИСК ЧЕРЕЗ API GATEWAY
+# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API (ПРАВИЛЬНЫЙ ЭНДПОИНТ)
 # ============================================================
 
 async def search_everything(query: str) -> list:
     """
-    Поиск через Yandex Search API через API Gateway
+    Поиск через Yandex Search API v2 с правильным эндпоинтом
     """
     if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
         logger.warning("⚠️ Нет ключа или папки Яндекса")
         return []
 
-    logger.info(f"🔍 Yandex Search API (Gateway): {query}")
+    logger.info(f"🔍 Yandex Search API: {query}")
 
-    # Адрес шлюза
-    url = "https://d5d9h42ts88tug9epccv.uvah0e6r.apigw.yandexcloud.net/"
+    # ПРАВИЛЬНЫЙ ЭНДПОИНТ
+    url = "https://search-api.cloud.yandex.net/v2/web/search"
     
     headers = {
         "Authorization": f"Api-Key {YANDEX_API_KEY}",
         "Content-Type": "application/json"
     }
     
+    # ПРАВИЛЬНОЕ ТЕЛО ЗАПРОСА
     payload = {
-        "query": query,
+        "query": {
+            "text": query,
+            "type": "web"
+        },
         "folder_id": YANDEX_FOLDER_ID,
         "language": "ru",
-        "search_type": "web",
         "page": 0,
         "page_size": 5,
         "sort_by": "relevance"
@@ -413,7 +416,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA — YANDEX SEARCH API (ЧЕРЕЗ API GATEWAY)"}
+    return {"status": "AURA — YANDEX SEARCH API (ПРАВИЛЬНЫЙ ЭНДПОИНТ)"}
 
 if __name__ == "__main__":
     import uvicorn
