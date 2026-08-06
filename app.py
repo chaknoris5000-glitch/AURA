@@ -2,6 +2,7 @@ import os
 import re
 import tempfile
 import json
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -31,7 +32,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
-logger.info("🚀 AURA — YANDEX SEARCH API (ПРАВИЛЬНЫЙ ЭНДПОИНТ)")
+logger.info("🚀 AURA — YANDEX SEARCH API (REST, ПО ДОКУМЕНТАЦИИ)")
 
 # === ПОДКЛЮЧЕНИЯ ===
 supabase = None
@@ -118,38 +119,35 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API (ПРАВИЛЬНЫЙ ЭНДПОИНТ)
+# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API (REST, ПО ДОКУМЕНТАЦИИ)
 # ============================================================
 
 async def search_everything(query: str) -> list:
     """
-    Поиск через Yandex Search API v2 с правильным эндпоинтом
+    Поиск через Yandex Search API REST по документации
     """
     if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
         logger.warning("⚠️ Нет ключа или папки Яндекса")
         return []
 
-    logger.info(f"🔍 Yandex Search API: {query}")
+    logger.info(f"🔍 Yandex Search API (REST): {query}")
 
-    # ПРАВИЛЬНЫЙ ЭНДПОИНТ
-    url = "https://search-api.cloud.yandex.net/v2/web/search"
+    # ЭНДПОИНТ ИЗ ДОКУМЕНТАЦИИ
+    url = "https://searchapi.api.cloud.yandex.net/v2/websearch"
     
     headers = {
         "Authorization": f"Api-Key {YANDEX_API_KEY}",
         "Content-Type": "application/json"
     }
     
-    # ПРАВИЛЬНОЕ ТЕЛО ЗАПРОСА
+    # ТЕЛО ЗАПРОСА ПО ДОКУМЕНТАЦИИ
     payload = {
         "query": {
-            "text": query,
-            "type": "web"
+            "searchType": "SEARCH_TYPE_RU",
+            "queryText": query,
+            "page": "0"
         },
-        "folder_id": YANDEX_FOLDER_ID,
-        "language": "ru",
-        "page": 0,
-        "page_size": 5,
-        "sort_by": "relevance"
+        "folderId": YANDEX_FOLDER_ID
     }
 
     try:
@@ -158,12 +156,20 @@ async def search_everything(query: str) -> list:
             if response.status_code == 200:
                 data = response.json()
                 results = []
-                for doc in data.get("results", []):
-                    results.append({
-                        "title": doc.get("title", "Без названия"),
-                        "url": doc.get("url", "#"),
-                        "snippet": doc.get("snippet", ""),
-                    })
+                raw_data = data.get("rawData", "")
+                if raw_data:
+                    # Парсим XML из rawData
+                    root = ET.fromstring(raw_data)
+                    for doc in root.findall(".//doc"):
+                        title = doc.findtext("title", "Без названия")
+                        link = doc.findtext("url", "#")
+                        snippet = doc.findtext("snippet", "")
+                        results.append({
+                            "title": title,
+                            "url": link,
+                            "snippet": snippet,
+                            "price": ""
+                        })
                 logger.info(f"✅ Найдено {len(results)} результатов")
                 return results
             else:
@@ -416,7 +422,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA — YANDEX SEARCH API (ПРАВИЛЬНЫЙ ЭНДПОИНТ)"}
+    return {"status": "AURA — YANDEX SEARCH API (REST, ПО ДОКУМЕНТАЦИИ)"}
 
 if __name__ == "__main__":
     import uvicorn
