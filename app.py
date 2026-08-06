@@ -31,7 +31,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
-logger.info("🚀 AURA — YANDEX SEARCH API v2 (ПО ДОКУМЕНТАЦИИ)")
+logger.info("🚀 AURA — YANDEX SEARCH API (IAM-ТОКЕН)")
 
 # === ПОДКЛЮЧЕНИЯ ===
 supabase = None
@@ -118,25 +118,54 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API v2 (ПО ДОКУМЕНТАЦИИ)
+# 2. ПОЛУЧЕНИЕ IAM-ТОКЕНА
+# ============================================================
+
+async def get_iam_token(api_key: str) -> str:
+    """
+    Обмен API-ключа на IAM-токен
+    """
+    url = "https://iam.api.cloud.yandex.net/iam/v1/tokens"
+    payload = {"yandexPassportOauthToken": api_key}
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json=payload, timeout=30)
+            if response.status_code == 200:
+                token = response.json().get("iamToken")
+                logger.info("✅ IAM-токен получен")
+                return token
+            else:
+                logger.error(f"❌ Ошибка получения IAM-токена: {response.status_code} - {response.text}")
+                return None
+    except Exception as e:
+        logger.error(f"❌ Ошибка запроса IAM-токена: {e}")
+        return None
+
+# ============================================================
+# 3. ПОИСК ЧЕРЕЗ YANDEX SEARCH API
 # ============================================================
 
 async def search_everything(query: str) -> list:
     """
-    Поиск через официальный Yandex Search API v2
-    Документация: https://yandex.cloud/ru/docs/search-api/api-ref/
+    Поиск через Yandex Search API с IAM-токеном
     """
     if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
         logger.warning("⚠️ Нет ключа или папки Яндекса")
         return []
 
-    logger.info(f"🔍 Yandex Search API v2: {query}")
+    # Получаем IAM-токен
+    iam_token = await get_iam_token(YANDEX_API_KEY)
+    if not iam_token:
+        logger.error("❌ Не удалось получить IAM-токен")
+        return []
 
-    # ПРАВИЛЬНЫЙ URL ПО ДОКУМЕНТАЦИИ
+    logger.info(f"🔍 Yandex Search API: {query}")
+
     url = "https://search-api.yandex.net/v2/search"
     
     headers = {
-        "Authorization": f"Api-Key {YANDEX_API_KEY}",
+        "Authorization": f"Bearer {iam_token}",
         "Content-Type": "application/json"
     }
     
@@ -172,7 +201,7 @@ async def search_everything(query: str) -> list:
         return []
 
 # ============================================================
-# 3. АНАЛИЗ ЦЕН
+# 4. АНАЛИЗ ЦЕН
 # ============================================================
 
 def analyze_prices(results: list) -> dict:
@@ -197,7 +226,7 @@ def analyze_prices(results: list) -> dict:
     return {"cheapest": None, "all": []}
 
 # ============================================================
-# 4. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# 5. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ============================================================
 
 def get_current_time():
@@ -248,7 +277,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# 5. ОСНОВНАЯ ЛОГИКА
+# 6. ОСНОВНАЯ ЛОГИКА
 # ============================================================
 
 async def deepseek_chat(text, history, user_name, user_city):
@@ -358,7 +387,7 @@ async def deepseek_process(user_id, text):
         return "😅 Произошла ошибка. Попробуй ещё раз."
 
 # ============================================================
-# 6. WEBHOOK
+# 7. WEBHOOK
 # ============================================================
 
 @app.post("/webhook")
@@ -414,7 +443,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA — YANDEX SEARCH API v2 (ПО ДОКУМЕНТАЦИИ)"}
+    return {"status": "AURA — YANDEX SEARCH API (IAM-ТОКЕН)"}
 
 if __name__ == "__main__":
     import uvicorn
