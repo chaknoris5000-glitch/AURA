@@ -31,7 +31,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
-logger.info("🚀 AURA — YANDEX SEARCH API (IAM-ТОКЕН)")
+logger.info("🚀 AURA — YANDEX SEARCH API (IAM-ТОКЕН, ИСПРАВЛЕННЫЙ)")
 
 # === ПОДКЛЮЧЕНИЯ ===
 supabase = None
@@ -118,12 +118,12 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ПОЛУЧЕНИЕ IAM-ТОКЕНА
+# 2. ПОЛУЧЕНИЕ IAM-ТОКЕНА (ИСПРАВЛЕННЫЙ URL)
 # ============================================================
 
 async def get_iam_token(api_key: str) -> str:
     """
-    Обмен API-ключа на IAM-токен
+    Обмен API-ключа AI Studio на IAM-токен
     """
     url = "https://iam.api.cloud.yandex.net/iam/v1/tokens"
     payload = {"yandexPassportOauthToken": api_key}
@@ -443,7 +443,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA — YANDEX SEARCH API (IAM-ТОКЕН)"}
+    return {"status": "AURA — YANDEX SEARCH API (IAM-ТОКЕН, ИСПРАВЛЕННЫЙ)"}
 
 if __name__ == "__main__":
     import uvicorn
