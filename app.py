@@ -13,10 +13,6 @@ import requests
 import logging
 import httpx
 import urllib.parse
-import yandexcloud
-from yandexcloud import SDK
-from yandexcloud._auth_fabric import auth_handler
-from yandex.cloud.ai.search.v2 import search_service_pb2, search_service_pb2_grpc
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -35,7 +31,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
-logger.info("🚀 AURA — YANDEX SEARCH API (ОФИЦИАЛЬНЫЙ SDK)")
+logger.info("🚀 AURA — YANDEX SEARCH API (ПРЯМОЙ IP)")
 
 # === ПОДКЛЮЧЕНИЯ ===
 supabase = None
@@ -49,9 +45,6 @@ if SUPABASE_URL and SUPABASE_KEY:
 deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 groq = Groq(api_key=GROQ_API_KEY)
 app = FastAPI()
-
-# Инициализация SDK Яндекса
-sdk = SDK(credentials=auth_handler.credentials_from_api_key(YANDEX_API_KEY))
 
 # ============================================================
 # 1. БАЗА ДАННЫХ
@@ -125,46 +118,55 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ПОИСК ЧЕРЕЗ ОФИЦИАЛЬНЫЙ SDK
+# 2. ПОИСК ЧЕРЕЗ ПРЯМОЙ IP
 # ============================================================
 
 async def search_everything(query: str) -> list:
     """
-    Поиск через официальный Yandex Search API (SDK)
+    Поиск через Yandex Search API по прямому IP
     """
     if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
         logger.warning("⚠️ Нет ключа или папки Яндекса")
         return []
 
-    logger.info(f"🔍 Yandex Search API (SDK): {query}")
+    logger.info(f"🔍 Yandex Search API (IP): {query}")
+
+    # Прямой IP Яндекса
+    url = "https://84.201.175.42/v2/search"
+    
+    headers = {
+        "Host": "search-api.yandex.net",
+        "Authorization": f"Api-Key {YANDEX_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "query": query,
+        "folder_id": YANDEX_FOLDER_ID,
+        "language": "ru",
+        "search_type": "web",
+        "page": 0,
+        "page_size": 5,
+        "sort_by": "relevance"
+    }
 
     try:
-        # Создаём запрос через gRPC
-        request = search_service_pb2.SearchRequest(
-            folder_id=YANDEX_FOLDER_ID,
-            query=query,
-            language="ru",
-            search_type=search_service_pb2.SearchType.WEB,
-            page=0,
-            page_size=5,
-            sort_by=search_service_pb2.SortBy.RELEVANCE
-        )
-        
-        # Отправляем запрос
-        response = sdk.client(search_service_pb2_grpc.SearchServiceStub).Search(request)
-        
-        results = []
-        for doc in response.results:
-            results.append({
-                "title": doc.title,
-                "url": doc.url,
-                "snippet": doc.snippet,
-                "price": ""
-            })
-        
-        logger.info(f"✅ Найдено {len(results)} результатов")
-        return results
-        
+        async with httpx.AsyncClient(verify=False) as client:
+            response = await client.post(url, json=payload, headers=headers, timeout=30)
+            if response.status_code == 200:
+                data = response.json()
+                results = []
+                for doc in data.get("results", []):
+                    results.append({
+                        "title": doc.get("title", "Без названия"),
+                        "url": doc.get("url", "#"),
+                        "snippet": doc.get("snippet", ""),
+                    })
+                logger.info(f"✅ Найдено {len(results)} результатов")
+                return results
+            else:
+                logger.error(f"❌ Ошибка поиска: {response.status_code} - {response.text}")
+                return []
     except Exception as e:
         logger.error(f"❌ Ошибка запроса: {e}")
         return []
@@ -412,7 +414,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA — YANDEX SEARCH API (ОФИЦИАЛЬНЫЙ SDK)"}
+    return {"status": "AURA — YANDEX SEARCH API (ПРЯМОЙ IP)"}
 
 if __name__ == "__main__":
     import uvicorn
