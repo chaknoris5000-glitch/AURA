@@ -3,7 +3,6 @@ import re
 import tempfile
 import json
 import xml.etree.ElementTree as ET
-import urllib.parse
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -14,6 +13,7 @@ from dotenv import load_dotenv
 import requests
 import logging
 import httpx
+import urllib.parse
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -32,7 +32,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
-logger.info("🚀 AURA — YANDEX SEARCH API (GET-ЗАПРОСЫ)")
+logger.info("🚀 AURA — YANDEX SEARCH API (V2 REST)")
 
 # === ПОДКЛЮЧЕНИЯ ===
 supabase = None
@@ -119,62 +119,60 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API (GET-ЗАПРОСЫ)
+# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API (V2 REST)
 # ============================================================
 
 async def search_everything(query: str) -> list:
     """
-    Поиск через Yandex Search API с использованием GET-запроса
+    Поиск через Yandex Search API v2 REST
     """
     if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
         logger.warning("⚠️ Нет ключа или папки Яндекса")
         return []
 
-    logger.info(f"🔍 Yandex Search API (GET): {query}")
+    logger.info(f"🔍 Yandex Search API (v2 REST): {query}")
 
-    # Кодируем запрос для URL
-    encoded_query = urllib.parse.quote(query)
+    # ЭНДПОИНТ ИЗ ДОКУМЕНТАЦИИ ПОДДЕРЖКИ
+    url = "https://searchapi.api.cloud.yandex.net/v2/websearch"
     
-    # Формируем URL для GET-запроса согласно документации
-    url = f"https://yandex.ru/search/xml"
+    headers = {
+        "Authorization": f"Api-Key {YANDEX_API_KEY}",
+        "Content-Type": "application/json"
+    }
     
-    params = {
-        "folderid": YANDEX_FOLDER_ID,
-        "apikey": YANDEX_API_KEY,
-        "query": encoded_query,
-        "l10n": "ru",
-        "sortby": "rlv",
-        "filter": "moderate",
-        "groupby": f"attr%3Dd.mode%3Ddeep.groups-on-page%3D5.docs-in-group%3D1",
-        "maxpassages": "2",
-        "page": "0"
+    # ТЕЛО ЗАПРОСА ПО ДОКУМЕНТАЦИИ
+    payload = {
+        "query": {
+            "searchType": "SEARCH_TYPE_RU",
+            "queryText": query,
+            "page": "0"
+        },
+        "folderId": YANDEX_FOLDER_ID
     }
 
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, params=params, timeout=30)
+            response = await client.post(url, json=payload, headers=headers, timeout=30)
             if response.status_code == 200:
-                # Парсим XML-ответ
-                root = ET.fromstring(response.text)
-                results = []
+                data = response.json()
+                raw_data = data.get("rawData", "")
+                if not raw_data:
+                    logger.warning("⚠️ rawData пуст")
+                    return []
                 
-                # Находим все документы в ответе
+                # Парсим XML из rawData
+                root = ET.fromstring(raw_data)
+                results = []
                 for doc in root.findall(".//doc"):
-                    title_elem = doc.find("title")
-                    url_elem = doc.find("url")
-                    snippet_elem = doc.find("snippet")
-                    
-                    title = title_elem.text if title_elem is not None else "Без названия"
-                    link = url_elem.text if url_elem is not None else "#"
-                    snippet = snippet_elem.text if snippet_elem is not None else ""
-                    
+                    title = doc.findtext("title", "Без названия")
+                    link = doc.findtext("url", "#")
+                    snippet = doc.findtext("snippet", "")
                     results.append({
                         "title": title,
                         "url": link,
                         "snippet": snippet,
                         "price": ""
                     })
-                
                 logger.info(f"✅ Найдено {len(results)} результатов")
                 return results
             else:
@@ -427,7 +425,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA — YANDEX SEARCH API (GET-ЗАПРОСЫ)"}
+    return {"status": "AURA — YANDEX SEARCH API (V2 REST)"}
 
 if __name__ == "__main__":
     import uvicorn
