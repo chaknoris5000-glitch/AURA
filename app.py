@@ -79,19 +79,39 @@ def get_recent_history(user_id, limit=50):
         return []
 
 def search_all_history(user_id, query):
+    """
+    Ищет во ВСЕЙ истории пользователя по ключевым словам.
+    Возвращает список сообщений, где есть совпадения.
+    """
     if not supabase:
         return []
     try:
-        res = supabase.table("history")\
+        # Разбиваем запрос на слова
+        words = query.lower().split()
+        # Строим условие ILIKE для каждого слова
+        conditions = []
+        for word in words:
+            if len(word) > 2:  # игнорируем короткие слова
+                conditions.append(f"content.ilike.%{word}%")
+        
+        if not conditions:
+            return []
+        
+        # Строим запрос с OR для каждого слова
+        query_builder = supabase.table("history")\
             .select("role, content, created_at")\
             .eq("user_id", user_id)\
-            .ilike("content", f"%{query}%")\
             .order("created_at", desc=True)\
-            .limit(20)\
-            .execute()
+            .limit(30)
+        
+        # Применяем OR условия
+        for cond in conditions:
+            query_builder = query_builder.or_(cond)
+        
+        res = query_builder.execute()
         return res.data if res.data else []
     except Exception as e:
-        logger.error(f"❌ Ошибка поиска: {e}")
+        logger.error(f"❌ Ошибка поиска в истории: {e}")
         return []
 
 def save_fact(user_id, key, value):
@@ -187,41 +207,61 @@ async def extract_page_content(url: str) -> str:
             response = await client.get(url, timeout=10, follow_redirects=True)
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, "html.parser")
-                # Удаляем скрипты и стили
                 for tag in soup(["script", "style"]):
                     tag.decompose()
                 text = soup.get_text(separator="\n")
                 lines = [line.strip() for line in text.splitlines() if line.strip()]
-                # Возвращаем первые 200 строк (чтобы не перегружать)
-                return "\n".join(lines[:200])
+                return "\n".join(lines[:80])
             return ""
     except Exception as e:
         logger.error(f"❌ Ошибка чтения страницы {url}: {e}")
         return ""
 
 # ============================================================
-# 4. АНАЛИЗ ЦЕН
+# 4. ДИАЛОГ С АНАЛИЗОМ КОНТЕКСТА И ИСТОРИИ
 # ============================================================
 
-def analyze_prices(results: list) -> dict:
-    prices = []
-    for res in results:
-        if res.get('price'):
-            numbers = re.findall(r'\d+', res['price'])
-            if numbers:
-                price_int = int(''.join(numbers))
-                prices.append({
-                    "value": price_int,
-                    "title": res['title'],
-                    "url": res['url']
-                })
-    if prices:
-        sorted_prices = sorted(prices, key=lambda x: x['value'])
-        return {
-            "cheapest": sorted_prices[0] if sorted_prices else None,
-            "all": sorted_prices
-        }
-    return {"cheapest": None, "all": []}
+async def deepseek_chat_with_context(text, history, user_name, user_city, context="", history_context=""):
+    history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history[-20:]])
+    
+    system_prompt = f"""Ты — AURA. Ты живой собеседник и помощник.
+Пользователь: {user_name or "Незнакомец"}
+Город: {user_city or "Неизвестен"}
+История (последние сообщения):
+{history_text}
+
+ПРАВИЛА:
+1. Отвечай коротко (2-4 предложения).
+2. Используй эмодзи 😊🔥.
+3. Будь дружелюбным и естественным.
+4. Если есть контекст из интернета — используй его для ответа.
+5. Ты должен давать завершённый ответ, который умещается в 700 токенов.
+6. Если запрос неясен или недостаточно информации — задай уточняющий вопрос.
+7. Учитывай всю историю диалога — если пользователь уже что-то просил, используй это.
+8. Если в истории есть ответ на вопрос пользователя — используй его, даже если это было давно.
+
+ИСТОРИЯ ИЗ БАЗЫ ДАННЫХ (все прошлые сообщения по теме):
+{history_context}
+
+КОНТЕКСТ ИЗ ИНТЕРНЕТА (если есть):
+{context}
+"""
+    messages = [{"role": "system", "content": system_prompt}]
+    for h in history[-20:]:
+        messages.append({"role": h["role"], "content": h["content"]})
+    messages.append({"role": "user", "content": text})
+    try:
+        response = deepseek.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=messages,
+            temperature=0.95,
+            max_tokens=700,
+            timeout=30
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"❌ Ошибка DeepSeek: {e}")
+        return "😅 Извини, что-то пошло не так. Попробуй ещё раз."
 
 # ============================================================
 # 5. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -263,6 +303,8 @@ async def send_chat_action(chat_id):
 
 async def send_message(chat_id, text):
     await send_chat_action(chat_id)
+    if not text:
+        text = "😅 Что-то пошло не так. Попробуй ещё раз."
     if len(text) > 4000:
         text = text[:3997] + "..."
     try:
@@ -275,45 +317,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# 6. ДИАЛОГ С АНАЛИЗОМ СТРАНИЦ
-# ============================================================
-
-async def deepseek_chat_with_context(text, history, user_name, user_city, context=""):
-    history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history[-10:]])
-    system_prompt = f"""Ты — AURA. Ты живой собеседник и помощник.
-Пользователь: {user_name or "Незнакомец"}
-Город: {user_city or "Неизвестен"}
-История (последние сообщения):
-{history_text}
-
-ПРАВИЛА:
-1. Отвечай коротко (2-4 предложения).
-2. Используй эмодзи 😊🔥.
-3. Будь дружелюбным и естественным.
-4. Если есть контекст из интернета — используй его для ответа.
-
-КОНТЕКСТ ИЗ ИНТЕРНЕТА (если есть):
-{context}
-"""
-    messages = [{"role": "system", "content": system_prompt}]
-    for h in history[-10:]:
-        messages.append({"role": h["role"], "content": h["content"]})
-    messages.append({"role": "user", "content": text})
-    try:
-        response = deepseek.chat.completions.create(
-            model="deepseek-v4-flash",
-            messages=messages,
-            temperature=0.95,
-            max_tokens=700,
-            timeout=30
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        logger.error(f"❌ Ошибка DeepSeek: {e}")
-        return "😅 Извини, что-то пошло не так. Попробуй ещё раз."
-
-# ============================================================
-# 7. ОСНОВНАЯ ЛОГИКА
+# 6. ОСНОВНАЯ ЛОГИКА
 # ============================================================
 
 async def deepseek_process(user_id, text):
@@ -333,21 +337,25 @@ async def deepseek_process(user_id, text):
         if any(word in text.lower() for word in ["где я живу", "мой город"]):
             return f"Ты из **{user_city}** 😊" if user_city else "Я не знаю, откуда ты."
         
-        # === ПОИСК В ИСТОРИИ ===
-        if any(word in text.lower() for word in ["говорили", "раньше", "помнишь", "вспомни"]):
-            results = search_all_history(user_id, text)
-            if results:
-                history_text = "\n".join([f"{h['role']}: {h['content'][:100]}..." for h in results[:5]])
-                return f"🔍 Нашёл в истории:\n\n{history_text}"
-            else:
-                return "Ничего не нашёл в истории 😊"
+        # === ПОИСК В ИСТОРИИ (ВСЕЙ) ===
+        # Проверяем, не спрашивает ли пользователь о том, что уже обсуждалось
+        history_results = search_all_history(user_id, text)
+        history_context = ""
+        if history_results:
+            # Формируем контекст из найденных сообщений
+            history_parts = []
+            for item in history_results[:5]:
+                role = "Ты" if item["role"] == "assistant" else "Пользователь"
+                history_parts.append(f"{role} ({item['created_at'][:16]}): {item['content'][:200]}")
+            history_context = "\n".join(history_parts)
+            logger.info(f"📚 Найдено {len(history_results)} сообщений в истории по запросу")
         
         # === ПОИСК В ИНТЕРНЕТЕ С АНАЛИЗОМ ===
         search_triggers = [
             "найди", "поищи", "найти", "покажи", "где", "сайт", "фильм", 
             "клиника", "адрес", "маршрут", "ссылка", "цены", "билеты", 
             "купить", "скидки", "товар", "отель", "ресторан", "погода",
-            "машина", "квартира", "дом", "работа", "вакансия"
+            "машина", "квартира", "дом", "работа", "вакансия", "курс"
         ]
         if any(word in text.lower() for word in search_triggers):
             logger.info(f"🔍 Поиск: '{text}'")
@@ -357,42 +365,59 @@ async def deepseek_process(user_id, text):
             results = await search_everything(query)
             
             if results:
-                # Берём первые 2 ссылки
                 pages_text = []
                 for res in results[:2]:
                     if res["url"] and res["url"] != "#":
                         content = await extract_page_content(res["url"])
                         if content:
-                            pages_text.append(f"Страница: {res['title']}\n{content[:500]}")
+                            pages_text.append(f"Страница: {res['title']}\n{content[:300]}")
                 
                 context = "\n\n".join(pages_text) if pages_text else ""
-                if context:
-                    reply = await deepseek_chat_with_context(
-                        text, 
-                        get_recent_history(user_id, limit=30),
-                        user_name,
-                        user_city,
-                        context
-                    )
-                else:
-                    # Если страницы не прочитались — показываем ссылки
-                    reply = "🔍 Нашёл ссылки, но не смог прочитать страницы:\n\n"
+                reply = await deepseek_chat_with_context(
+                    text, 
+                    get_recent_history(user_id, limit=50),
+                    user_name,
+                    user_city,
+                    context,
+                    history_context
+                )
+                # Если ответ пустой — показываем ссылки
+                if not reply or len(reply.strip()) < 5:
+                    reply = "🔍 Нашёл ссылки, но не смог обработать страницы:\n\n"
                     for i, res in enumerate(results[:5], 1):
                         reply += f"{i}. [{res['title']}]({res['url']})\n"
                 return reply
             else:
-                return "Не нашёл ничего по этому запросу. Попробуй переформулировать 😊"
+                # Если в истории есть ответ — используем его
+                if history_context:
+                    return await deepseek_chat_with_context(
+                        text, 
+                        get_recent_history(user_id, limit=50),
+                        user_name,
+                        user_city,
+                        "",
+                        history_context
+                    )
+                else:
+                    return "Не нашёл ничего по этому запросу. Попробуй переформулировать 😊"
         
         # === ОБЫЧНЫЙ ДИАЛОГ ===
-        history = get_recent_history(user_id, limit=30)
-        return await deepseek_chat_with_context(text, history, user_name, user_city, "")
+        history = get_recent_history(user_id, limit=50)
+        return await deepseek_chat_with_context(
+            text, 
+            history,
+            user_name,
+            user_city,
+            "",
+            history_context
+        )
         
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
         return "😅 Произошла ошибка. Попробуй ещё раз."
 
 # ============================================================
-# 8. WEBHOOK
+# 7. WEBHOOK
 # ============================================================
 
 @app.post("/webhook")
@@ -431,6 +456,8 @@ async def webhook(request: Request):
         # === ОБРАБОТКА ===
         save_message(user_id, "user", text)
         reply = await deepseek_process(user_id, text)
+        if not reply:
+            reply = "😅 Не смог сформировать ответ. Попробуй ещё раз."
         save_message(user_id, "assistant", reply)
         await send_message(user_id, reply)
         return JSONResponse({"ok": True})
