@@ -2,7 +2,6 @@ import os
 import re
 import tempfile
 import json
-import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -13,7 +12,6 @@ from dotenv import load_dotenv
 import requests
 import logging
 import httpx
-import urllib.parse
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -28,11 +26,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# === КЛЮЧИ ЯНДЕКСА ===
-YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
-YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
-
-logger.info("🚀 AURA — YANDEX SEARCH API (V2 REST)")
+logger.info("🚀 AURA — ПОИСК ЧЕРЕЗ DUCKDUCKGO")
 
 # === ПОДКЛЮЧЕНИЯ ===
 supabase = None
@@ -119,96 +113,36 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API (V2 REST)
+# 2. ПОИСК ЧЕРЕЗ DUCKDUCKGO
 # ============================================================
 
 async def search_everything(query: str) -> list:
-    """
-    Поиск через Yandex Search API v2 REST
-    """
-    if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
-        logger.warning("⚠️ Нет ключа или папки Яндекса")
-        return []
-
-    logger.info(f"🔍 Yandex Search API (v2 REST): {query}")
-
-    # ЭНДПОИНТ ИЗ ДОКУМЕНТАЦИИ ПОДДЕРЖКИ
-    url = "https://searchapi.api.cloud.yandex.net/v2/websearch"
+    logger.info(f"🔍 DuckDuckGo-поиск: {query}")
     
-    headers = {
-        "Authorization": f"Api-Key {YANDEX_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    url = f"https://api.duckduckgo.com/?q={query}&format=json"
     
-    # ТЕЛО ЗАПРОСА ПО ДОКУМЕНТАЦИИ
-    payload = {
-        "query": {
-            "searchType": "SEARCH_TYPE_RU",
-            "queryText": query,
-            "page": "0"
-        },
-        "folderId": YANDEX_FOLDER_ID
-    }
-
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, headers=headers, timeout=30)
-            if response.status_code == 200:
-                data = response.json()
-                raw_data = data.get("rawData", "")
-                if not raw_data:
-                    logger.warning("⚠️ rawData пуст")
-                    return []
-                
-                # Парсим XML из rawData
-                root = ET.fromstring(raw_data)
-                results = []
-                for doc in root.findall(".//doc"):
-                    title = doc.findtext("title", "Без названия")
-                    link = doc.findtext("url", "#")
-                    snippet = doc.findtext("snippet", "")
-                    results.append({
-                        "title": title,
-                        "url": link,
-                        "snippet": snippet,
-                        "price": ""
-                    })
-                logger.info(f"✅ Найдено {len(results)} результатов")
-                return results
-            else:
-                logger.error(f"❌ Ошибка поиска: {response.status_code} - {response.text}")
-                return []
+        response = requests.get(url, timeout=30)
+        data = response.json()
+        results = []
+        
+        for topic in data.get("RelatedTopics", [])[:5]:
+            if "Text" in topic and "FirstURL" in topic:
+                results.append({
+                    "title": topic["Text"][:100],
+                    "url": topic["FirstURL"],
+                    "snippet": topic["Text"][:200],
+                    "price": ""
+                })
+        
+        logger.info(f"✅ Найдено {len(results)} результатов")
+        return results
     except Exception as e:
-        logger.error(f"❌ Ошибка запроса: {e}")
+        logger.error(f"❌ Ошибка DuckDuckGo: {e}")
         return []
 
 # ============================================================
-# 3. АНАЛИЗ ЦЕН
-# ============================================================
-
-def analyze_prices(results: list) -> dict:
-    prices = []
-    for res in results:
-        if res.get('price'):
-            numbers = re.findall(r'\d+', res['price'])
-            if numbers:
-                price_int = int(''.join(numbers))
-                prices.append({
-                    "value": price_int,
-                    "title": res['title'],
-                    "url": res['url']
-                })
-    
-    if prices:
-        sorted_prices = sorted(prices, key=lambda x: x['value'])
-        return {
-            "cheapest": sorted_prices[0] if sorted_prices else None,
-            "all": sorted_prices
-        }
-    return {"cheapest": None, "all": []}
-
-# ============================================================
-# 4. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# 3. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ============================================================
 
 def get_current_time():
@@ -259,7 +193,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# 5. ОСНОВНАЯ ЛОГИКА
+# 4. ОСНОВНАЯ ЛОГИКА
 # ============================================================
 
 async def deepseek_chat(text, history, user_name, user_city):
@@ -302,28 +236,15 @@ async def deepseek_process(user_id, text):
         user_name = get_fact(user_id, "name")
         user_city = get_fact(user_id, "city")
         
-        # === ВРЕМЯ ===
         if any(word in text.lower() for word in ["время", "сколько времени", "который час"]):
             return get_current_time()
         
-        # === ИМЯ ===
         if any(word in text.lower() for word in ["как меня зовут", "моё имя"]):
             return f"Тебя зовут **{user_name}** 😊" if user_name else "Я не знаю твоего имени."
         
-        # === ГОРОД ===
         if any(word in text.lower() for word in ["где я живу", "мой город"]):
             return f"Ты из **{user_city}** 😊" if user_city else "Я не знаю, откуда ты."
         
-        # === ПОИСК В ИСТОРИИ ===
-        if any(word in text.lower() for word in ["говорили", "раньше", "помнишь", "вспомни"]):
-            results = search_all_history(user_id, text)
-            if results:
-                history_text = "\n".join([f"{h['role']}: {h['content'][:100]}..." for h in results[:5]])
-                return f"🔍 Нашёл в истории:\n\n{history_text}"
-            else:
-                return "Ничего не нашёл в истории 😊"
-        
-        # === ПОИСК В ИНТЕРНЕТЕ ===
         search_triggers = [
             "найди", "поищи", "найти", "покажи", "где", "сайт", "фильм", 
             "клиника", "адрес", "маршрут", "ссылка", "цены", "билеты", 
@@ -332,35 +253,15 @@ async def deepseek_process(user_id, text):
         ]
         if any(word in text.lower() for word in search_triggers):
             logger.info(f"🔍 Поиск: '{text}'")
-            
-            query = text
-            if user_city:
-                query = f"{text} {user_city}"
-            
-            results = await search_everything(query)
-            
+            results = await search_everything(text)
             if results:
-                price_analysis = analyze_prices(results)
-                
-                response = "🔍 Нашёл! Вот лучшие результаты:\n\n"
-                
-                if price_analysis['cheapest']:
-                    cheapest = price_analysis['cheapest']
-                    response += f"💰 **Самый дешёвый вариант:**\n"
-                    response += f"**{cheapest['title']}**\n"
-                    response += f"Цена: **{cheapest['value']} ₽**\n"
-                    response += f"[Ссылка]({cheapest['url']})\n\n"
-                
-                response += "📋 **Другие варианты:**\n"
+                response = "🔍 Нашёл!\n\n"
                 for i, res in enumerate(results[:5], 1):
-                    price_text = f" — {res['price']}" if res.get('price') else ""
-                    response += f"{i}. [{res['title']}]({res['url']}){price_text}\n"
-                
+                    response += f"{i}. [{res['title']}]({res['url']})\n"
                 return response
             else:
-                return "Не нашёл ничего по этому запросу. Попробуй переформулировать 😊"
+                return "Не нашёл ничего. Попробуй переформулировать 😊"
         
-        # === ОБЫЧНЫЙ ДИАЛОГ ===
         history = get_recent_history(user_id, limit=30)
         return await deepseek_chat(text, history, user_name, user_city)
         
@@ -369,7 +270,7 @@ async def deepseek_process(user_id, text):
         return "😅 Произошла ошибка. Попробуй ещё раз."
 
 # ============================================================
-# 6. WEBHOOK
+# 5. WEBHOOK
 # ============================================================
 
 @app.post("/webhook")
@@ -383,7 +284,6 @@ async def webhook(request: Request):
         user_id = str(msg["from"]["id"])
         text = None
         
-        # === ГОЛОС ===
         if "voice" in msg:
             file_id = msg["voice"]["file_id"]
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
@@ -400,14 +300,12 @@ async def webhook(request: Request):
                 await send_message(user_id, "⚠️ Ошибка обработки голоса.")
                 return JSONResponse({"ok": True})
         
-        # === ТЕКСТ ===
         if "text" in msg:
             text = msg["text"].strip()
         
         if not text:
             return JSONResponse({"ok": True})
         
-        # === ОБРАБОТКА ===
         save_message(user_id, "user", text)
         reply = await deepseek_process(user_id, text)
         save_message(user_id, "assistant", reply)
@@ -425,7 +323,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA — YANDEX SEARCH API (V2 REST)"}
+    return {"status": "AURA — ПОИСК ЧЕРЕЗ DUCKDUCKGO"}
 
 if __name__ == "__main__":
     import uvicorn
