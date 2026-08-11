@@ -116,7 +116,7 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API v2 (ИСПРАВЛЕННЫЙ)
+# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API v2 (ПО ИНСТРУКЦИИ ПОДДЕРЖКИ)
 # ============================================================
 
 async def search_everything(query: str) -> list:
@@ -137,12 +137,17 @@ async def search_everything(query: str) -> list:
             "queryText": query,
         },
         "folderId": YANDEX_FOLDER_ID,
-        "responseFormat": "FORMAT_XML"
+        "responseFormat": "FORMAT_XML"  # ← ПОДДЕРЖКА УКАЗАЛА ЭТОТ ПАРАМЕТР
     }
 
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(url, json=payload, headers=headers, timeout=30)
+            
+            # ЛОГИРУЕМ СЫРОЙ ОТВЕТ
+            logger.info(f"🔴 СТАТУС: {response.status_code}")
+            logger.info(f"🔴 СЫРОЙ ОТВЕТ (первые 500 символов): {response.text[:500]}")
+            
             if response.status_code == 200:
                 data = response.json()
                 raw_data = data.get("rawData", "")
@@ -150,14 +155,14 @@ async def search_everything(query: str) -> list:
                     logger.warning("⚠️ rawData пуст")
                     return []
                 
-                # Парсим XML
+                # ПАРСИМ XML
                 try:
                     root = ET.fromstring(raw_data)
                 except ET.ParseError as e:
                     logger.error(f"❌ Ошибка парсинга XML: {e}")
-                    logger.error(f"Ответ Яндекса (первые 200 символов): {raw_data[:200]}...")
+                    logger.error(f"❌ rawData (первые 200 символов): {raw_data[:200]}")
                     return []
-
+                
                 results = []
                 for doc in root.findall(".//doc"):
                     title = doc.findtext("title", "Без названия")
@@ -172,7 +177,7 @@ async def search_everything(query: str) -> list:
                 logger.info(f"✅ Найдено {len(results)} результатов")
                 return results[:10]
             else:
-                logger.error(f"❌ Ошибка поиска: {response.status_code} - {response.text}")
+                logger.error(f"❌ Ошибка поиска: {response.status_code} - {response.text[:200]}")
                 return []
     except Exception as e:
         logger.error(f"❌ Ошибка запроса: {e}")
