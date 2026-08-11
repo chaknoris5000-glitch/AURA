@@ -2,7 +2,6 @@ import os
 import re
 import tempfile
 import json
-import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -116,7 +115,7 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API v2 (ПО ИНСТРУКЦИИ ПОДДЕРЖКИ)
+# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API v2 (ФИНАЛЬНАЯ ВЕРСИЯ)
 # ============================================================
 
 async def search_everything(query: str) -> list:
@@ -137,41 +136,23 @@ async def search_everything(query: str) -> list:
             "queryText": query,
         },
         "folderId": YANDEX_FOLDER_ID,
-        "responseFormat": "FORMAT_XML"  # ← ПОДДЕРЖКА УКАЗАЛА ЭТОТ ПАРАМЕТР
+        # responseFormat УБРАН — пусть возвращает JSON
     }
 
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(url, json=payload, headers=headers, timeout=30)
-            
-            # ЛОГИРУЕМ СЫРОЙ ОТВЕТ
             logger.info(f"🔴 СТАТУС: {response.status_code}")
             logger.info(f"🔴 СЫРОЙ ОТВЕТ (первые 500 символов): {response.text[:500]}")
             
             if response.status_code == 200:
                 data = response.json()
-                raw_data = data.get("rawData", "")
-                if not raw_data:
-                    logger.warning("⚠️ rawData пуст")
-                    return []
-                
-                # ПАРСИМ XML
-                try:
-                    root = ET.fromstring(raw_data)
-                except ET.ParseError as e:
-                    logger.error(f"❌ Ошибка парсинга XML: {e}")
-                    logger.error(f"❌ rawData (первые 200 символов): {raw_data[:200]}")
-                    return []
-                
                 results = []
-                for doc in root.findall(".//doc"):
-                    title = doc.findtext("title", "Без названия")
-                    link = doc.findtext("url", "#")
-                    snippet = doc.findtext("snippet", "")
+                for item in data.get("results", []):
                     results.append({
-                        "title": title,
-                        "url": link,
-                        "snippet": snippet,
+                        "title": item.get("title", "Без названия"),
+                        "url": item.get("url", "#"),
+                        "snippet": item.get("snippet", ""),
                         "price": ""
                     })
                 logger.info(f"✅ Найдено {len(results)} результатов")
