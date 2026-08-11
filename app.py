@@ -2,6 +2,8 @@ import os
 import re
 import tempfile
 import json
+import base64  # <--- ДОБАВЛЕН ИМПОРТ
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -115,7 +117,7 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API v2 (ФИНАЛЬНАЯ ВЕРСИЯ)
+# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API v2 (С ДЕКОДИРОВАНИЕМ BASE64)
 # ============================================================
 
 async def search_everything(query: str) -> list:
@@ -136,7 +138,7 @@ async def search_everything(query: str) -> list:
             "queryText": query,
         },
         "folderId": YANDEX_FOLDER_ID,
-        # responseFormat УБРАН — пусть возвращает JSON
+        "responseFormat": "FORMAT_XML"
     }
 
     try:
@@ -147,12 +149,35 @@ async def search_everything(query: str) -> list:
             
             if response.status_code == 200:
                 data = response.json()
+                raw_data = data.get("rawData", "")
+                if not raw_data:
+                    logger.warning("⚠️ rawData пуст")
+                    return []
+                
+                # ✅ Декодируем Base64
+                try:
+                    xml_string = base64.b64decode(raw_data).decode('utf-8')
+                    logger.info(f"✅ XML расшифрован (первые 200 символов): {xml_string[:200]}")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка декодирования Base64: {e}")
+                    return []
+                
+                # ✅ Парсим XML
+                try:
+                    root = ET.fromstring(xml_string)
+                except ET.ParseError as e:
+                    logger.error(f"❌ Ошибка парсинга XML: {e}")
+                    return []
+                
                 results = []
-                for item in data.get("results", []):
+                for doc in root.findall(".//doc"):
+                    title = doc.findtext("title", "Без названия")
+                    link = doc.findtext("url", "#")
+                    snippet = doc.findtext("snippet", "")
                     results.append({
-                        "title": item.get("title", "Без названия"),
-                        "url": item.get("url", "#"),
-                        "snippet": item.get("snippet", ""),
+                        "title": title,
+                        "url": link,
+                        "snippet": snippet,
                         "price": ""
                     })
                 logger.info(f"✅ Найдено {len(results)} результатов")
