@@ -115,7 +115,7 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API v2 (ИСПРАВЛЕННЫЙ)
+# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API v2 (С ЛОГИРОВАНИЕМ)
 # ============================================================
 
 async def search_everything(query: str) -> list:
@@ -136,7 +136,6 @@ async def search_everything(query: str) -> list:
             "queryText": query,
         },
         "folderId": YANDEX_FOLDER_ID,
-        # responseFormat убран — пусть Яндекс возвращает JSON по умолчанию
     }
 
     try:
@@ -144,7 +143,9 @@ async def search_everything(query: str) -> list:
             response = await client.post(url, json=payload, headers=headers, timeout=30)
             if response.status_code == 200:
                 data = response.json()
-                # Яндекс возвращает результат в поле "results"
+                # === ЛОГИРУЕМ ПОЛНЫЙ ОТВЕТ ЯНДЕКСА ===
+                logger.info(f"🔍 ПОЛНЫЙ ОТВЕТ ЯНДЕКСА: {json.dumps(data, indent=2, ensure_ascii=False)}")
+                
                 results = []
                 for item in data.get("results", []):
                     results.append({
