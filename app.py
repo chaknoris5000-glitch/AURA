@@ -2,8 +2,6 @@ import os
 import re
 import tempfile
 import json
-import urllib.parse
-import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -117,7 +115,7 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API v2
+# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API v2 (ИСПРАВЛЕННЫЙ)
 # ============================================================
 
 async def search_everything(query: str) -> list:
@@ -138,7 +136,7 @@ async def search_everything(query: str) -> list:
             "queryText": query,
         },
         "folderId": YANDEX_FOLDER_ID,
-        "responseFormat": "FORMAT_HTML",
+        # responseFormat убран — пусть Яндекс возвращает JSON по умолчанию
     }
 
     try:
@@ -146,26 +144,14 @@ async def search_everything(query: str) -> list:
             response = await client.post(url, json=payload, headers=headers, timeout=30)
             if response.status_code == 200:
                 data = response.json()
-                raw_data = data.get("rawData", "")
-                if not raw_data:
-                    logger.warning("⚠️ rawData пуст")
-                    return []
-                root = ET.fromstring(raw_data)
+                # Яндекс возвращает результат в поле "results"
                 results = []
-                for doc in root.findall(".//doc"):
-                    title = doc.findtext("title", "Без названия")
-                    link = doc.findtext("url", "#")
-                    snippet = doc.findtext("snippet", "")
-                    # Попытка найти цену
-                    price = ""
-                    price_match = re.search(r'(\d+[\s.,]*\d*)\s*₽', snippet + " " + title)
-                    if price_match:
-                        price = price_match.group(1).replace(" ", "") + " ₽"
+                for item in data.get("results", []):
                     results.append({
-                        "title": title,
-                        "url": link,
-                        "snippet": snippet,
-                        "price": price
+                        "title": item.get("title", "Без названия"),
+                        "url": item.get("url", "#"),
+                        "snippet": item.get("snippet", ""),
+                        "price": ""
                     })
                 logger.info(f"✅ Найдено {len(results)} результатов")
                 return results[:10]
