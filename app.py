@@ -2,7 +2,7 @@ import os
 import re
 import tempfile
 import json
-import base64  # <--- ДОБАВЛЕН ИМПОРТ
+import base64
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 import requests
 import logging
 import httpx
+from bs4 import BeautifulSoup
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -117,7 +118,7 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API v2 (С ДЕКОДИРОВАНИЕМ BASE64)
+# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API v2
 # ============================================================
 
 async def search_everything(query: str) -> list:
@@ -144,31 +145,18 @@ async def search_everything(query: str) -> list:
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(url, json=payload, headers=headers, timeout=30)
-            logger.info(f"🔴 СТАТУС: {response.status_code}")
-            logger.info(f"🔴 СЫРОЙ ОТВЕТ (первые 500 символов): {response.text[:500]}")
-            
             if response.status_code == 200:
                 data = response.json()
                 raw_data = data.get("rawData", "")
                 if not raw_data:
-                    logger.warning("⚠️ rawData пуст")
                     return []
-                
-                # ✅ Декодируем Base64
-                try:
-                    xml_string = base64.b64decode(raw_data).decode('utf-8')
-                    logger.info(f"✅ XML расшифрован (первые 200 символов): {xml_string[:200]}")
-                except Exception as e:
-                    logger.error(f"❌ Ошибка декодирования Base64: {e}")
-                    return []
-                
-                # ✅ Парсим XML
-                try:
-                    root = ET.fromstring(xml_string)
-                except ET.ParseError as e:
-                    logger.error(f"❌ Ошибка парсинга XML: {e}")
-                    return []
-                
+                # Декодируем Base64
+                raw_data = raw_data.strip().strip('"').strip()
+                missing_padding = len(raw_data) % 4
+                if missing_padding:
+                    raw_data += '=' * (4 - missing_padding)
+                xml_string = base64.b64decode(raw_data).decode('utf-8')
+                root = ET.fromstring(xml_string)
                 results = []
                 for doc in root.findall(".//doc"):
                     title = doc.findtext("title", "Без названия")
@@ -190,7 +178,29 @@ async def search_everything(query: str) -> list:
         return []
 
 # ============================================================
-# 3. АНАЛИЗ ЦЕН
+# 3. ЧТЕНИЕ СТРАНИЦ (ДЛЯ АНАЛИЗА)
+# ============================================================
+
+async def extract_page_content(url: str) -> str:
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, timeout=10, follow_redirects=True)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, "html.parser")
+                # Удаляем скрипты и стили
+                for tag in soup(["script", "style"]):
+                    tag.decompose()
+                text = soup.get_text(separator="\n")
+                lines = [line.strip() for line in text.splitlines() if line.strip()]
+                # Возвращаем первые 200 строк (чтобы не перегружать)
+                return "\n".join(lines[:200])
+            return ""
+    except Exception as e:
+        logger.error(f"❌ Ошибка чтения страницы {url}: {e}")
+        return ""
+
+# ============================================================
+# 4. АНАЛИЗ ЦЕН
 # ============================================================
 
 def analyze_prices(results: list) -> dict:
@@ -214,7 +224,7 @@ def analyze_prices(results: list) -> dict:
     return {"cheapest": None, "all": []}
 
 # ============================================================
-# 4. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# 5. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ============================================================
 
 def get_current_time():
@@ -265,20 +275,25 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# 5. ОСНОВНАЯ ЛОГИКА
+# 6. ДИАЛОГ С АНАЛИЗОМ СТРАНИЦ
 # ============================================================
 
-async def deepseek_chat(text, history, user_name, user_city):
+async def deepseek_chat_with_context(text, history, user_name, user_city, context=""):
     history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history[-10:]])
-    system_prompt = f"""Ты — AURA. Ты живой собеседник и друг.
+    system_prompt = f"""Ты — AURA. Ты живой собеседник и помощник.
 Пользователь: {user_name or "Незнакомец"}
 Город: {user_city or "Неизвестен"}
 История (последние сообщения):
 {history_text}
+
 ПРАВИЛА:
-1. Отвечай коротко (2-3 предложения)
-2. Используй эмодзи 😊🔥
-3. Будь собой
+1. Отвечай коротко (2-4 предложения).
+2. Используй эмодзи 😊🔥.
+3. Будь дружелюбным и естественным.
+4. Если есть контекст из интернета — используй его для ответа.
+
+КОНТЕКСТ ИЗ ИНТЕРНЕТА (если есть):
+{context}
 """
     messages = [{"role": "system", "content": system_prompt}]
     for h in history[-10:]:
@@ -296,6 +311,10 @@ async def deepseek_chat(text, history, user_name, user_city):
     except Exception as e:
         logger.error(f"❌ Ошибка DeepSeek: {e}")
         return "😅 Извини, что-то пошло не так. Попробуй ещё раз."
+
+# ============================================================
+# 7. ОСНОВНАЯ ЛОГИКА
+# ============================================================
 
 async def deepseek_process(user_id, text):
     try:
@@ -323,7 +342,7 @@ async def deepseek_process(user_id, text):
             else:
                 return "Ничего не нашёл в истории 😊"
         
-        # === ПОИСК В ИНТЕРНЕТЕ ===
+        # === ПОИСК В ИНТЕРНЕТЕ С АНАЛИЗОМ ===
         search_triggers = [
             "найди", "поищи", "найти", "покажи", "где", "сайт", "фильм", 
             "клиника", "адрес", "маршрут", "ссылка", "цены", "билеты", 
@@ -336,32 +355,44 @@ async def deepseek_process(user_id, text):
             if user_city:
                 query = f"{text} {user_city}"
             results = await search_everything(query)
+            
             if results:
-                price_analysis = analyze_prices(results)
-                response = "🔍 Нашёл! Вот лучшие результаты:\n\n"
-                if price_analysis['cheapest']:
-                    cheapest = price_analysis['cheapest']
-                    response += f"💰 **Самый дешёвый вариант:**\n"
-                    response += f"**{cheapest['title']}**\n"
-                    response += f"Цена: **{cheapest['value']} ₽**\n"
-                    response += f"[Ссылка]({cheapest['url']})\n\n"
-                response += "📋 **Другие варианты:**\n"
-                for i, res in enumerate(results[:5], 1):
-                    price_text = f" — {res['price']}" if res.get('price') else ""
-                    response += f"{i}. [{res['title']}]({res['url']}){price_text}\n"
-                return response
+                # Берём первые 2 ссылки
+                pages_text = []
+                for res in results[:2]:
+                    if res["url"] and res["url"] != "#":
+                        content = await extract_page_content(res["url"])
+                        if content:
+                            pages_text.append(f"Страница: {res['title']}\n{content[:500]}")
+                
+                context = "\n\n".join(pages_text) if pages_text else ""
+                if context:
+                    reply = await deepseek_chat_with_context(
+                        text, 
+                        get_recent_history(user_id, limit=30),
+                        user_name,
+                        user_city,
+                        context
+                    )
+                else:
+                    # Если страницы не прочитались — показываем ссылки
+                    reply = "🔍 Нашёл ссылки, но не смог прочитать страницы:\n\n"
+                    for i, res in enumerate(results[:5], 1):
+                        reply += f"{i}. [{res['title']}]({res['url']})\n"
+                return reply
             else:
                 return "Не нашёл ничего по этому запросу. Попробуй переформулировать 😊"
         
         # === ОБЫЧНЫЙ ДИАЛОГ ===
         history = get_recent_history(user_id, limit=30)
-        return await deepseek_chat(text, history, user_name, user_city)
+        return await deepseek_chat_with_context(text, history, user_name, user_city, "")
+        
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
         return "😅 Произошла ошибка. Попробуй ещё раз."
 
 # ============================================================
-# 6. WEBHOOK
+# 8. WEBHOOK
 # ============================================================
 
 @app.post("/webhook")
