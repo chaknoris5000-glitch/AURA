@@ -1,6 +1,8 @@
 import os
 import tempfile
 import json
+import httpx
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -10,7 +12,6 @@ from groq import Groq
 from dotenv import load_dotenv
 import requests
 import logging
-import httpx
 
 from agents.searcher import Searcher
 from agents.analyzer import Analyzer
@@ -47,6 +48,58 @@ analyzer = Analyzer()
 responder = Responder(deepseek)
 
 app = FastAPI()
+
+# ============================================================
+# НОВОСТНОЙ АГЕНТ (RSS)
+# ============================================================
+
+class NewsReader:
+    def __init__(self):
+        self.rss_urls = {
+            "яндекс": "https://news.yandex.ru/index.rss",
+            "риа": "https://ria.ru/export/rss2/archive/index.xml",
+            "тасс": "https://tass.ru/rss/v2.xml"
+        }
+    
+    async def get_news(self, query: str, limit: int = 10) -> list:
+        all_news = []
+        keywords = [w.lower() for w in query.split() if len(w) > 2]
+        
+        for source, url in self.rss_urls.items():
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(url, timeout=10)
+                    if response.status_code == 200:
+                        root = ET.fromstring(response.text)
+                        items = root.findall(".//item")
+                        for item in items[:20]:
+                            title = item.findtext("title", "")
+                            link = item.findtext("link", "")
+                            description = item.findtext("description", "")
+                            pub_date = item.findtext("pubDate", "")
+                            
+                            # Проверяем по ключевым словам
+                            text = (title + " " + description).lower()
+                            if not keywords or any(kw in text for kw in keywords):
+                                all_news.append({
+                                    "title": title,
+                                    "link": link,
+                                    "description": description[:300],
+                                    "source": source,
+                                    "date": pub_date
+                                })
+            except Exception as e:
+                logger.error(f"❌ Ошибка RSS {source}: {e}")
+        
+        # Сортируем по дате (свежие сверху)
+        all_news.sort(key=lambda x: x.get("date", ""), reverse=True)
+        return all_news[:limit]
+
+news_reader = NewsReader()
+
+# ============================================================
+# БАЗА ДАННЫХ
+# ============================================================
 
 def save_message(user_id, role, content):
     if not supabase:
@@ -123,6 +176,10 @@ def get_fact(user_id, key):
     except:
         return None
 
+# ============================================================
+# ДИАЛОГ
+# ============================================================
+
 async def deepseek_chat_with_context(text, history, user_name, user_city, context=""):
     history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history[-20:]])
     system_prompt = f"""Ты — AURA. Ты живой собеседник и помощник.
@@ -157,6 +214,10 @@ async def deepseek_chat_with_context(text, history, user_name, user_city, contex
     except Exception as e:
         logger.error(f"❌ Ошибка DeepSeek: {e}")
         return "😅 Извини, что-то пошло не так. Попробуй ещё раз."
+
+# ============================================================
+# ГОЛОС И ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ============================================================
 
 def transcribe_audio(audio_url):
     try:
@@ -203,20 +264,28 @@ async def send_message(chat_id, text):
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
 
+# ============================================================
+# ОСНОВНАЯ ЛОГИКА
+# ============================================================
+
 async def deepseek_process(user_id, text):
     try:
         user_name = get_fact(user_id, "name")
         user_city = get_fact(user_id, "city")
         
+        # === ВРЕМЯ ===
         if any(word in text.lower() for word in ["время", "сколько времени", "который час"]):
             return get_current_time()
         
+        # === ИМЯ ===
         if any(word in text.lower() for word in ["как меня зовут", "моё имя"]):
             return f"Тебя зовут **{user_name}** 😊" if user_name else "Я не знаю твоего имени."
         
+        # === ГОРОД ===
         if any(word in text.lower() for word in ["где я живу", "мой город"]):
             return f"Ты из **{user_city}** 😊" if user_city else "Я не знаю, откуда ты."
         
+        # === ПОИСК В ИСТОРИИ ===
         if any(word in text.lower() for word in ["говорили", "раньше", "помнишь", "вспомни"]):
             results = search_all_history(user_id, text)
             if results:
@@ -225,6 +294,30 @@ async def deepseek_process(user_id, text):
             else:
                 return "Ничего не нашёл в истории 😊"
         
+        # === НОВОСТИ (RSS) ===
+        news_triggers = ["новост", "сегодня", "произошл", "случил", "событи", "склады", "атак", "пожар", "взрыв"]
+        if any(word in text.lower() for word in news_triggers):
+            logger.info(f"📰 Новости: '{text}'")
+            news = await news_reader.get_news(text, limit=10)
+            
+            if news:
+                # Формируем красивый ответ с одной лучшей ссылкой
+                best = news[0]
+                reply = f"📰 **{best['title']}**\n\n"
+                reply += f"{best['description'][:200]}...\n\n"
+                reply += f"🔗 [Читать полностью]({best['link']})\n"
+                reply += f"📌 Источник: {best['source'].capitalize()}"
+                
+                # Если есть ещё новости — добавляем кратко
+                if len(news) > 1:
+                    reply += "\n\n📌 **Другие новости по теме:**\n"
+                    for item in news[1:3]:
+                        reply += f"• [{item['title'][:60]}...]({item['link']})\n"
+                return reply
+            else:
+                return "😊 Не нашёл свежих новостей по этому запросу. Попробуй уточнить тему или дату! 🔍"
+        
+        # === ПОИСК В ИНТЕРНЕТЕ (ТОВАРЫ И ВСЁ ОСТАЛЬНОЕ) ===
         search_triggers = [
             "найди", "поищи", "найти", "покажи", "где", "сайт", "фильм", 
             "клиника", "адрес", "маршрут", "ссылка", "цены", "билеты", 
@@ -241,22 +334,35 @@ async def deepseek_process(user_id, text):
             results = await searcher.search(query, max_results=15)
             
             if results:
-                # === ЕСЛИ ЗАПРОС ПРО ТОВАРЫ (Wildberries, Ozon, маркетплейсы) — СРАЗУ ПОКАЗЫВАЕМ ССЫЛКИ ===
+                # === ЕСЛИ ТОВАРЫ — ПОКАЗЫВАЕМ ОДНУ ЛУЧШУЮ ССЫЛКУ ===
                 if any(word in text.lower() for word in ["валтберис", "wildberries", "озон", "маркетплейс", "купить", "носки", "товар"]):
-                    reply = "🔍 Вот ссылки на найденные товары:\n\n"
-                    for i, res in enumerate(results[:5], 1):
-                        price_text = f" — {res['price']} ₽" if res.get("price", 0) > 0 else ""
-                        reply += f"{i}. [{res['title']}]({res['url']}){price_text}\n"
+                    # Выбираем лучший результат (с ценой или без)
+                    best = results[0]
+                    for res in results:
+                        if res.get("price", 0) > 0:
+                            best = res
+                            break
+                    
+                    reply = f"🛒 **Нашёл для тебя лучший вариант!**\n\n"
+                    reply += f"📦 {best['title']}\n"
+                    if best.get("price", 0) > 0:
+                        reply += f"💰 Цена: **{best['price']} ₽**\n"
+                    reply += f"\n🔗 [Перейти к товару]({best['url']})\n"
+                    reply += f"\n💡 Если не подходит — я могу поискать другие варианты! 😊"
                     return reply
                 
                 # === ИНАЧЕ — АНАЛИЗИРУЕМ ЧЕРЕЗ АГЕНТОВ ===
                 analysis = analyzer.analyze(results, text)
                 reply = await responder.generate_response(analysis, text, user_name, user_city)
+                
+                # Если ответ пустой или слишком короткий — показываем одну ссылку
                 if not reply or len(reply.strip()) < 10:
-                    reply = "🔍 Нашёл! Вот результаты:\n\n"
-                    for i, res in enumerate(results[:5], 1):
-                        price_text = f" — {res['price']} ₽" if res.get("price", 0) > 0 else ""
-                        reply += f"{i}. [{res['title']}]({res['url']}){price_text}\n"
+                    best = results[0]
+                    reply = f"🔍 **Нашёл для тебя результат:**\n\n"
+                    reply += f"📌 {best['title']}\n"
+                    if best.get("price", 0) > 0:
+                        reply += f"💰 Цена: **{best['price']} ₽**\n"
+                    reply += f"\n🔗 [Подробнее]({best['url']})"
                 return reply
             else:
                 context = "Поиск в интернете не дал результатов по запросу пользователя."
@@ -268,15 +374,20 @@ async def deepseek_process(user_id, text):
                     context
                 )
                 if not reply or len(reply.strip()) < 5:
-                    reply = "Не нашёл ничего по этому запросу. Попробуй переформулировать 😊"
+                    reply = "😊 Не нашёл ничего по этому запросу. Попробуй переформулировать или уточнить! 🔍"
                 return reply
         
+        # === ОБЫЧНЫЙ ДИАЛОГ ===
         history = get_recent_history(user_id, limit=50)
         return await deepseek_chat_with_context(text, history, user_name, user_city, "")
         
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
         return "😅 Произошла ошибка. Попробуй ещё раз."
+
+# ============================================================
+# WEBHOOK
+# ============================================================
 
 @app.post("/webhook")
 async def webhook(request: Request):
