@@ -1,9 +1,6 @@
 import os
-import re
 import tempfile
 import json
-import base64
-import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -14,26 +11,26 @@ from dotenv import load_dotenv
 import requests
 import logging
 import httpx
-from bs4 import BeautifulSoup
+
+from agents.searcher import Searcher
+from agents.analyzer import Analyzer
+from agents.responder import Responder
+from utils.helpers import get_current_time, extract_city_from_query
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# === КЛЮЧИ ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
-YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
-logger.info("🚀 AURA — YANDEX SEARCH API v2 (RENDER)")
+logger.info("🚀 AURA — МНОГОАГЕНТНАЯ ВЕРСИЯ (RENDER)")
 
-# === ПОДКЛЮЧЕНИЯ ===
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
@@ -44,11 +41,12 @@ if SUPABASE_URL and SUPABASE_KEY:
 
 deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 groq = Groq(api_key=GROQ_API_KEY)
-app = FastAPI()
 
-# ============================================================
-# 1. БАЗА ДАННЫХ
-# ============================================================
+searcher = Searcher()
+analyzer = Analyzer()
+responder = Responder(deepseek)
+
+app = FastAPI()
 
 def save_message(user_id, role, content):
     if not supabase:
@@ -79,35 +77,23 @@ def get_recent_history(user_id, limit=50):
         return []
 
 def search_all_history(user_id, query):
-    """
-    Ищет во ВСЕЙ истории пользователя по ключевым словам.
-    Возвращает список сообщений, где есть совпадения.
-    """
     if not supabase:
         return []
     try:
-        # Разбиваем запрос на слова
         words = query.lower().split()
-        # Строим условие ILIKE для каждого слова
         conditions = []
         for word in words:
-            if len(word) > 2:  # игнорируем короткие слова
+            if len(word) > 2:
                 conditions.append(f"content.ilike.%{word}%")
-        
         if not conditions:
             return []
-        
-        # Строим запрос с OR для каждого слова
         query_builder = supabase.table("history")\
             .select("role, content, created_at")\
             .eq("user_id", user_id)\
             .order("created_at", desc=True)\
             .limit(30)
-        
-        # Применяем OR условия
         for cond in conditions:
             query_builder = query_builder.or_(cond)
-        
         res = query_builder.execute()
         return res.data if res.data else []
     except Exception as e:
@@ -137,114 +123,23 @@ def get_fact(user_id, key):
     except:
         return None
 
-# ============================================================
-# 2. ПОИСК ЧЕРЕЗ YANDEX SEARCH API v2
-# ============================================================
-
-async def search_everything(query: str) -> list:
-    if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
-        logger.warning("⚠️ Нет ключа или папки Яндекса")
-        return []
-
-    logger.info(f"🔍 Yandex Search API v2: {query}")
-
-    url = "https://searchapi.api.cloud.yandex.net/v2/web/search"
-    headers = {
-        "Authorization": f"Api-Key {YANDEX_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "query": {
-            "searchType": "SEARCH_TYPE_RU",
-            "queryText": query,
-        },
-        "folderId": YANDEX_FOLDER_ID,
-        "responseFormat": "FORMAT_XML"
-    }
-
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, headers=headers, timeout=30)
-            if response.status_code == 200:
-                data = response.json()
-                raw_data = data.get("rawData", "")
-                if not raw_data:
-                    return []
-                # Декодируем Base64
-                raw_data = raw_data.strip().strip('"').strip()
-                missing_padding = len(raw_data) % 4
-                if missing_padding:
-                    raw_data += '=' * (4 - missing_padding)
-                xml_string = base64.b64decode(raw_data).decode('utf-8')
-                root = ET.fromstring(xml_string)
-                results = []
-                for doc in root.findall(".//doc"):
-                    title = doc.findtext("title", "Без названия")
-                    link = doc.findtext("url", "#")
-                    snippet = doc.findtext("snippet", "")
-                    results.append({
-                        "title": title,
-                        "url": link,
-                        "snippet": snippet,
-                        "price": ""
-                    })
-                logger.info(f"✅ Найдено {len(results)} результатов")
-                return results[:10]
-            else:
-                logger.error(f"❌ Ошибка поиска: {response.status_code} - {response.text[:200]}")
-                return []
-    except Exception as e:
-        logger.error(f"❌ Ошибка запроса: {e}")
-        return []
-
-# ============================================================
-# 3. ЧТЕНИЕ СТРАНИЦ (ДЛЯ АНАЛИЗА)
-# ============================================================
-
-async def extract_page_content(url: str) -> str:
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, timeout=10, follow_redirects=True)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, "html.parser")
-                for tag in soup(["script", "style"]):
-                    tag.decompose()
-                text = soup.get_text(separator="\n")
-                lines = [line.strip() for line in text.splitlines() if line.strip()]
-                return "\n".join(lines[:80])
-            return ""
-    except Exception as e:
-        logger.error(f"❌ Ошибка чтения страницы {url}: {e}")
-        return ""
-
-# ============================================================
-# 4. ДИАЛОГ С АНАЛИЗОМ КОНТЕКСТА И ИСТОРИИ
-# ============================================================
-
-async def deepseek_chat_with_context(text, history, user_name, user_city, context="", history_context=""):
+async def deepseek_chat_with_context(text, history, user_name, user_city, context=""):
     history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history[-20:]])
-    
     system_prompt = f"""Ты — AURA. Ты живой собеседник и помощник.
 Пользователь: {user_name or "Незнакомец"}
 Город: {user_city or "Неизвестен"}
 История (последние сообщения):
 {history_text}
 
+КОНТЕКСТ:
+{context if context else "Нет дополнительного контекста"}
+
 ПРАВИЛА:
 1. Отвечай коротко (2-4 предложения).
 2. Используй эмодзи 😊🔥.
-3. Будь дружелюбным и естественным.
-4. Если есть контекст из интернета — используй его для ответа.
-5. Ты должен давать завершённый ответ, который умещается в 700 токенов.
-6. Если запрос неясен или недостаточно информации — задай уточняющий вопрос.
-7. Учитывай всю историю диалога — если пользователь уже что-то просил, используй это.
-8. Если в истории есть ответ на вопрос пользователя — используй его, даже если это было давно.
-
-ИСТОРИЯ ИЗ БАЗЫ ДАННЫХ (все прошлые сообщения по теме):
-{history_context}
-
-КОНТЕКСТ ИЗ ИНТЕРНЕТА (если есть):
-{context}
+3. Будь дружелюбным.
+4. Если есть контекст — используй его.
+5. Отвечай завершённо.
 """
     messages = [{"role": "system", "content": system_prompt}]
     for h in history[-20:]:
@@ -254,7 +149,7 @@ async def deepseek_chat_with_context(text, history, user_name, user_city, contex
         response = deepseek.chat.completions.create(
             model="deepseek-v4-flash",
             messages=messages,
-            temperature=0.95,
+            temperature=0.85,
             max_tokens=700,
             timeout=30
         )
@@ -262,14 +157,6 @@ async def deepseek_chat_with_context(text, history, user_name, user_city, contex
     except Exception as e:
         logger.error(f"❌ Ошибка DeepSeek: {e}")
         return "😅 Извини, что-то пошло не так. Попробуй ещё раз."
-
-# ============================================================
-# 5. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# ============================================================
-
-def get_current_time():
-    now = datetime.utcnow() + timedelta(hours=7)
-    return f"Сейчас **{now.strftime('%H:%M')}**, {now.strftime('%d.%m.%Y')} 😊"
 
 def transcribe_audio(audio_url):
     try:
@@ -316,41 +203,28 @@ async def send_message(chat_id, text):
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
 
-# ============================================================
-# 6. ОСНОВНАЯ ЛОГИКА
-# ============================================================
-
 async def deepseek_process(user_id, text):
     try:
         user_name = get_fact(user_id, "name")
         user_city = get_fact(user_id, "city")
         
-        # === ВРЕМЯ ===
         if any(word in text.lower() for word in ["время", "сколько времени", "который час"]):
             return get_current_time()
         
-        # === ИМЯ ===
         if any(word in text.lower() for word in ["как меня зовут", "моё имя"]):
             return f"Тебя зовут **{user_name}** 😊" if user_name else "Я не знаю твоего имени."
         
-        # === ГОРОД ===
         if any(word in text.lower() for word in ["где я живу", "мой город"]):
             return f"Ты из **{user_city}** 😊" if user_city else "Я не знаю, откуда ты."
         
-        # === ПОИСК В ИСТОРИИ (ВСЕЙ) ===
-        # Проверяем, не спрашивает ли пользователь о том, что уже обсуждалось
-        history_results = search_all_history(user_id, text)
-        history_context = ""
-        if history_results:
-            # Формируем контекст из найденных сообщений
-            history_parts = []
-            for item in history_results[:5]:
-                role = "Ты" if item["role"] == "assistant" else "Пользователь"
-                history_parts.append(f"{role} ({item['created_at'][:16]}): {item['content'][:200]}")
-            history_context = "\n".join(history_parts)
-            logger.info(f"📚 Найдено {len(history_results)} сообщений в истории по запросу")
+        if any(word in text.lower() for word in ["говорили", "раньше", "помнишь", "вспомни"]):
+            results = search_all_history(user_id, text)
+            if results:
+                history_text = "\n".join([f"{h['role']}: {h['content'][:100]}..." for h in results[:5]])
+                return f"🔍 Нашёл в истории:\n\n{history_text}"
+            else:
+                return "Ничего не нашёл в истории 😊"
         
-        # === ПОИСК В ИНТЕРНЕТЕ С АНАЛИЗОМ ===
         search_triggers = [
             "найди", "поищи", "найти", "покажи", "где", "сайт", "фильм", 
             "клиника", "адрес", "маршрут", "ссылка", "цены", "билеты", 
@@ -359,66 +233,41 @@ async def deepseek_process(user_id, text):
         ]
         if any(word in text.lower() for word in search_triggers):
             logger.info(f"🔍 Поиск: '{text}'")
+            
             query = text
-            if user_city:
+            if user_city and not any(city in query.lower() for city in ["москва", "спб", "сочи", "казань", "белово"]):
                 query = f"{text} {user_city}"
-            results = await search_everything(query)
+            
+            results = await searcher.search(query, max_results=15)
             
             if results:
-                pages_text = []
-                for res in results[:2]:
-                    if res["url"] and res["url"] != "#":
-                        content = await extract_page_content(res["url"])
-                        if content:
-                            pages_text.append(f"Страница: {res['title']}\n{content[:300]}")
-                
-                context = "\n\n".join(pages_text) if pages_text else ""
+                analysis = analyzer.analyze(results, text)
+                reply = await responder.generate_response(analysis, text, user_name, user_city)
+                if not reply or len(reply.strip()) < 10:
+                    reply = "🔍 Нашёл! Вот результаты:\n\n"
+                    for i, res in enumerate(results[:5], 1):
+                        price_text = f" — {res['price']} ₽" if res.get("price", 0) > 0 else ""
+                        reply += f"{i}. [{res['title']}]({res['url']}){price_text}\n"
+                return reply
+            else:
+                context = "Поиск в интернете не дал результатов по запросу пользователя."
                 reply = await deepseek_chat_with_context(
                     text, 
                     get_recent_history(user_id, limit=50),
                     user_name,
                     user_city,
-                    context,
-                    history_context
+                    context
                 )
-                # Если ответ пустой — показываем ссылки
                 if not reply or len(reply.strip()) < 5:
-                    reply = "🔍 Нашёл ссылки, но не смог обработать страницы:\n\n"
-                    for i, res in enumerate(results[:5], 1):
-                        reply += f"{i}. [{res['title']}]({res['url']})\n"
+                    reply = "Не нашёл ничего по этому запросу. Попробуй переформулировать 😊"
                 return reply
-            else:
-                # Если в истории есть ответ — используем его
-                if history_context:
-                    return await deepseek_chat_with_context(
-                        text, 
-                        get_recent_history(user_id, limit=50),
-                        user_name,
-                        user_city,
-                        "",
-                        history_context
-                    )
-                else:
-                    return "Не нашёл ничего по этому запросу. Попробуй переформулировать 😊"
         
-        # === ОБЫЧНЫЙ ДИАЛОГ ===
         history = get_recent_history(user_id, limit=50)
-        return await deepseek_chat_with_context(
-            text, 
-            history,
-            user_name,
-            user_city,
-            "",
-            history_context
-        )
+        return await deepseek_chat_with_context(text, history, user_name, user_city, "")
         
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
         return "😅 Произошла ошибка. Попробуй ещё раз."
-
-# ============================================================
-# 7. WEBHOOK
-# ============================================================
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -430,7 +279,6 @@ async def webhook(request: Request):
         user_id = str(msg["from"]["id"])
         text = None
         
-        # === ГОЛОС ===
         if "voice" in msg:
             file_id = msg["voice"]["file_id"]
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
@@ -447,13 +295,11 @@ async def webhook(request: Request):
                 await send_message(user_id, "⚠️ Ошибка обработки голоса.")
                 return JSONResponse({"ok": True})
         
-        # === ТЕКСТ ===
         if "text" in msg:
             text = msg["text"].strip()
         if not text:
             return JSONResponse({"ok": True})
         
-        # === ОБРАБОТКА ===
         save_message(user_id, "user", text)
         reply = await deepseek_process(user_id, text)
         if not reply:
@@ -467,7 +313,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA — YANDEX SEARCH API v2 (RENDER)"}
+    return {"status": "AURA — МНОГОАГЕНТНАЯ ВЕРСИЯ (RENDER)"}
 
 if __name__ == "__main__":
     import uvicorn
