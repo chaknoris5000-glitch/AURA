@@ -30,7 +30,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-logger.info("🚀 AURA — VIP-ВЕРСИЯ (ЭТАЛОН)")
+logger.info("🚀 AURA — МНОГОАГЕНТНАЯ ВЕРСИЯ (RENDER)")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -61,7 +61,7 @@ class NewsReader:
             "тасс": "https://tass.ru/rss/v2.xml"
         }
     
-    async def get_news(self, query: str, limit: int = 15) -> list:
+    async def get_news(self, query: str, limit: int = 10) -> list:
         all_news = []
         keywords = [w.lower() for w in query.split() if len(w) > 2]
         
@@ -178,47 +178,40 @@ def get_fact(user_id, key):
 # ДИАЛОГ
 # ============================================================
 
-async def deepseek_analyze(text, history, user_name, user_city, context):
-    """DeepSeek анализирует контекст и выдаёт живой ответ"""
+async def deepseek_chat_with_context(text, history, user_name, user_city, context=""):
     history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history[-20:]])
-    
-    system_prompt = f"""Ты — AURA, премиум-ассистент для VIP-клиентов.
-
+    system_prompt = f"""Ты — AURA. Ты живой собеседник и помощник.
 Пользователь: {user_name or "Незнакомец"}
 Город: {user_city or "Неизвестен"}
-
-История общения:
+История (последние сообщения):
 {history_text}
 
-КОНТЕКСТ (результаты поиска, новости, данные):
-{context}
+КОНТЕКСТ:
+{context if context else "Нет дополнительного контекста"}
 
-ТВОЙ СТИЛЬ:
-1. Отвечай коротко — 2–4 предложения, только суть.
-2. Используй 1 эмодзи, не больше.
-3. Будь как лучший друг: тепло, вовлечённо, по делу.
-4. Если есть ссылка — вставь её в конце как [Подробнее](url).
-5. Если не знаешь — честно скажи.
-6. Отвечай завершённо, не обрывай.
-7. Ты — эксперт. Дай самое лучшее, что нашёл.
+ПРАВИЛА:
+1. Отвечай коротко (2-4 предложения).
+2. Используй эмодзи 😊🔥.
+3. Будь дружелюбным.
+4. Если есть контекст — используй его.
+5. Отвечай завершённо.
 """
     messages = [{"role": "system", "content": system_prompt}]
     for h in history[-20:]:
         messages.append({"role": h["role"], "content": h["content"]})
     messages.append({"role": "user", "content": text})
-    
     try:
         response = deepseek.chat.completions.create(
             model="deepseek-v4-flash",
             messages=messages,
             temperature=0.85,
-            max_tokens=500,
+            max_tokens=700,
             timeout=30
         )
         return response.choices[0].message.content
     except Exception as e:
         logger.error(f"❌ Ошибка DeepSeek: {e}")
-        return None
+        return "😅 Извини, что-то пошло не так. Попробуй ещё раз."
 
 # ============================================================
 # ГОЛОС И ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -278,47 +271,54 @@ async def deepseek_process(user_id, text):
         user_name = get_fact(user_id, "name")
         user_city = get_fact(user_id, "city")
         
-        # === ПРОСТЫЕ КОМАНДЫ ===
+        # === ВРЕМЯ ===
         if any(word in text.lower() for word in ["время", "сколько времени", "который час"]):
             return get_current_time()
         
+        # === ИМЯ ===
         if any(word in text.lower() for word in ["как меня зовут", "моё имя"]):
-            return f"Тебя зовут **{user_name}** 😊" if user_name else "Я пока не знаю твоего имени — расскажешь?"
+            return f"Тебя зовут **{user_name}** 😊" if user_name else "Я не знаю твоего имени."
         
+        # === ГОРОД ===
         if any(word in text.lower() for word in ["где я живу", "мой город"]):
-            return f"Ты из **{user_city}** 😊" if user_city else "Я пока не знаю, откуда ты — расскажи, если хочешь!"
+            return f"Ты из **{user_city}** 😊" if user_city else "Я не знаю, откуда ты."
         
+        # === ПОИСК В ИСТОРИИ ===
         if any(word in text.lower() for word in ["говорили", "раньше", "помнишь", "вспомни"]):
             results = search_all_history(user_id, text)
             if results:
                 history_text = "\n".join([f"{h['role']}: {h['content'][:100]}..." for h in results[:5]])
-                return f"🔍 Нашёл в нашей истории:\n\n{history_text}"
+                return f"🔍 Нашёл в истории:\n\n{history_text}"
             else:
-                return "Не припомню такого в нашей истории 😊"
+                return "Ничего не нашёл в истории 😊"
         
         # === НОВОСТИ ===
-        news_triggers = ["новост", "сегодня", "произошл", "случил", "событи", "склады", "атак", "пожар", "взрыв", "трамп", "мобилизац"]
+        news_triggers = ["новост", "сегодня", "произошл", "случил", "событи", "склады", "атак", "пожар", "взрыв"]
         if any(word in text.lower() for word in news_triggers):
             logger.info(f"📰 Новости: '{text}'")
             news = await news_reader.get_news(text, limit=10)
             
             if news:
-                context = "📰 Вот свежие новости по твоему запросу:\n\n"
-                for i, item in enumerate(news[:5], 1):
-                    context += f"{i}. **{item['title']}**\n   {item['description'][:150]}...\n   Источник: {item['source'].capitalize()}\n   Ссылка: {item['link']}\n\n"
+                best = news[0]
+                reply = f"📰 **{best['title']}**\n\n"
+                reply += f"{best['description'][:200]}...\n\n"
+                reply += f"🔗 [Читать полностью]({best['link']})\n"
+                reply += f"📌 Источник: {best['source'].capitalize()}"
                 
-                reply = await deepseek_analyze(text, get_recent_history(user_id, limit=50), user_name, user_city, context)
-                return reply or "😊 Не нашёл свежих новостей по этой теме. Попробуй уточнить!"
+                if len(news) > 1:
+                    reply += "\n\n📌 **Другие новости по теме:**\n"
+                    for item in news[1:3]:
+                        reply += f"• [{item['title'][:60]}...]({item['link']})\n"
+                return reply
             else:
-                return "😊 Не нашёл свежих новостей по этой теме. Попробуй уточнить!"
+                return "😊 Не нашёл свежих новостей по этому запросу. Попробуй уточнить тему или дату! 🔍"
         
-        # === ПОИСК ===
+        # === ПОИСК В ИНТЕРНЕТЕ ===
         search_triggers = [
             "найди", "поищи", "найти", "покажи", "где", "сайт", "фильм", 
             "клиника", "адрес", "маршрут", "ссылка", "цены", "билеты", 
             "купить", "скидки", "товар", "отель", "ресторан", "погода",
-            "машина", "квартира", "дом", "работа", "вакансия", "курс",
-            "видео", "кино", "сериал", "онлайн", "расстояние"
+            "машина", "квартира", "дом", "работа", "вакансия", "курс"
         ]
         if any(word in text.lower() for word in search_triggers):
             logger.info(f"🔍 Поиск: '{text}'")
@@ -330,26 +330,74 @@ async def deepseek_process(user_id, text):
             results = await searcher.search(query, max_results=15)
             
             if results:
-                context = "🔍 Вот что я нашёл по твоему запросу:\n\n"
-                for i, res in enumerate(results[:10], 1):
-                    price = f" ({res['price']} ₽)" if res.get('price', 0) > 0 else ""
-                    title = res['title'] if res['title'] else "Результат"
-                    snippet = res['snippet'][:150] if res['snippet'] else ""
-                    context += f"{i}. **{title}**{price}\n   {snippet}...\n   Ссылка: {res['url']}\n\n"
+                # === ЕСЛИ ТОВАРЫ ===
+                if any(word in text.lower() for word in ["валтберис", "wildberries", "озон", "маркетплейс", "купить", "носки", "товар"]):
+                    best = None
+                    for res in results:
+                        if res.get("url") and res["url"] != "#":
+                            if res.get("price", 0) > 0:
+                                best = res
+                                break
+                    if not best:
+                        best = results[0]
+                    
+                    if best and best.get("url") and best["url"] != "#":
+                        reply = f"🛒 **Нашёл для тебя хороший вариант!**\n\n"
+                        reply += f"📦 {best['title'] or 'Товар'}\n"
+                        if best.get("price", 0) > 0:
+                            reply += f"💰 Цена: **{best['price']} ₽**\n"
+                        reply += f"\n🔗 [Посмотреть товар]({best['url']})\n"
+                        reply += "\n💡 Если не подходит — скажи, поищу другие варианты!"
+                        return reply
+                    else:
+                        return "🛒 Нашёл несколько вариантов, но не смог выбрать лучший. Попробуй уточнить запрос!"
                 
-                reply = await deepseek_analyze(text, get_recent_history(user_id, limit=50), user_name, user_city, context)
-                if reply:
-                    return reply
-                else:
-                    # Если DeepSeek не ответил — показываем первый результат
-                    best = results[0]
-                    return f"🔍 Нашёл результат:\n\n📌 {best['title']}\n🔗 [Подробнее]({best['url']})"
+                # === ВИДЕО / ФИЛЬМЫ ===
+                if any(word in text.lower() for word in ["видео", "фильм", "кино", "сериал", "онлайн", "форсаж"]):
+                    best = None
+                    for res in results:
+                        if res.get("url") and res["url"] != "#":
+                            best = res
+                            break
+                    if best:
+                        reply = f"🎬 **Нашёл для тебя!**\n\n"
+                        reply += f"📌 {best['title']}\n\n"
+                        reply += f"🔗 [Смотреть онлайн]({best['url']})\n"
+                        reply += "\n💡 Если не то — уточни, какую именно часть или фильм ищешь!"
+                        return reply
+                    else:
+                        return "🎬 Похоже, я не смог найти конкретную ссылку. Попробуй уточнить название или спроси про другую тему!"
+                
+                # === ВСЁ ОСТАЛЬНОЕ ===
+                analysis = analyzer.analyze(results, text)
+                reply = await responder.generate_response(analysis, text, user_name, user_city)
+                
+                if not reply or len(reply.strip()) < 10:
+                    best = None
+                    for res in results:
+                        if res.get("url") and res["url"] != "#":
+                            best = res
+                            break
+                    if best:
+                        reply = f"🔍 **Нашёл для тебя результат:**\n\n"
+                        reply += f"📌 {best['title']}\n"
+                        if best.get("price", 0) > 0:
+                            reply += f"💰 Цена: **{best['price']} ₽**\n"
+                        reply += f"\n🔗 [Подробнее]({best['url']})\n"
+                        reply += "\n💡 Если не то — уточни, пожалуйста!"
+                    else:
+                        reply = "😊 Не нашёл ничего подходящего. Попробуй переформулировать!"
+                return reply
             else:
-                return "😊 Не нашёл ничего по этому запросу. Попробуй переформулировать!"
+                context = "Поиск в интернете не дал результатов."
+                reply = await deepseek_chat_with_context(text, get_recent_history(user_id, limit=50), user_name, user_city, context)
+                if not reply or len(reply.strip()) < 5:
+                    reply = "😊 Не нашёл ничего по этому запросу. Попробуй переформулировать или уточнить — я рядом!"
+                return reply
         
         # === ОБЫЧНЫЙ ДИАЛОГ ===
         history = get_recent_history(user_id, limit=50)
-        return await deepseek_analyze(text, history, user_name, user_city, "Нет контекста, просто поболтай с пользователем.")
+        return await deepseek_chat_with_context(text, history, user_name, user_city, "")
         
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
@@ -403,7 +451,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA — VIP-ВЕРСИЯ (ЭТАЛОН)"}
+    return {"status": "AURA — МНОГОАГЕНТНАЯ ВЕРСИЯ (RENDER)"}
 
 if __name__ == "__main__":
     import uvicorn
