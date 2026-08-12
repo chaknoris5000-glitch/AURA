@@ -241,6 +241,15 @@ async def deepseek_process(user_id, text):
             results = await searcher.search(query, max_results=15)
             
             if results:
+                # === ЕСЛИ ЗАПРОС ПРО ТОВАРЫ (Wildberries, Ozon, маркетплейсы) — СРАЗУ ПОКАЗЫВАЕМ ССЫЛКИ ===
+                if any(word in text.lower() for word in ["валтберис", "wildberries", "озон", "маркетплейс", "купить", "носки", "товар"]):
+                    reply = "🔍 Вот ссылки на найденные товары:\n\n"
+                    for i, res in enumerate(results[:5], 1):
+                        price_text = f" — {res['price']} ₽" if res.get("price", 0) > 0 else ""
+                        reply += f"{i}. [{res['title']}]({res['url']}){price_text}\n"
+                    return reply
+                
+                # === ИНАЧЕ — АНАЛИЗИРУЕМ ЧЕРЕЗ АГЕНТОВ ===
                 analysis = analyzer.analyze(results, text)
                 reply = await responder.generate_response(analysis, text, user_name, user_city)
                 if not reply or len(reply.strip()) < 10:
