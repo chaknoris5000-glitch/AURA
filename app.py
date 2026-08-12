@@ -30,7 +30,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-logger.info("🚀 AURA — МНОГОАГЕНТНАЯ ВЕРСИЯ (RENDER)")
+logger.info("🚀 AURA — VIP-ВЕРСИЯ (ЭТАЛОН)")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -175,12 +175,14 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# ДИАЛОГ (с душой, коротко, по делу)
+# ДИАЛОГ
 # ============================================================
 
-async def deepseek_chat_with_context(text, history, user_name, user_city, context=""):
+async def deepseek_analyze(text, history, user_name, user_city, context):
+    """DeepSeek анализирует контекст и выдаёт живой ответ"""
     history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history[-20:]])
-    system_prompt = f"""Ты — AURA. Ты живой собеседник и друг, а не просто бот.
+    
+    system_prompt = f"""Ты — AURA, премиум-ассистент для VIP-клиентов.
 
 Пользователь: {user_name or "Незнакомец"}
 Город: {user_city or "Неизвестен"}
@@ -189,21 +191,22 @@ async def deepseek_chat_with_context(text, history, user_name, user_city, contex
 {history_text}
 
 КОНТЕКСТ (результаты поиска, новости, данные):
-{context if context else "Нет дополнительного контекста"}
+{context}
 
-ТВОЙ СТИЛЬ ОБЩЕНИЯ:
+ТВОЙ СТИЛЬ:
 1. Отвечай коротко — 2–4 предложения, только суть.
-2. Используй 1–2 эмодзи, не больше.
-3. Будь как хороший друг: тепло, вовлечённо, по делу.
+2. Используй 1 эмодзи, не больше.
+3. Будь как лучший друг: тепло, вовлечённо, по делу.
 4. Если есть ссылка — вставь её в конце как [Подробнее](url).
-5. Не повторяй то, что уже сказано в контексте.
-6. Если не знаешь — честно скажи и предложи, где уточнить.
-7. Отвечай завершённо, не обрывай мысль.
+5. Если не знаешь — честно скажи.
+6. Отвечай завершённо, не обрывай.
+7. Ты — эксперт. Дай самое лучшее, что нашёл.
 """
     messages = [{"role": "system", "content": system_prompt}]
     for h in history[-20:]:
         messages.append({"role": h["role"], "content": h["content"]})
     messages.append({"role": "user", "content": text})
+    
     try:
         response = deepseek.chat.completions.create(
             model="deepseek-v4-flash",
@@ -215,7 +218,7 @@ async def deepseek_chat_with_context(text, history, user_name, user_city, contex
         return response.choices[0].message.content
     except Exception as e:
         logger.error(f"❌ Ошибка DeepSeek: {e}")
-        return "😅 Что-то пошло не так. Попробуй ещё раз!"
+        return None
 
 # ============================================================
 # ГОЛОС И ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -275,19 +278,16 @@ async def deepseek_process(user_id, text):
         user_name = get_fact(user_id, "name")
         user_city = get_fact(user_id, "city")
         
-        # === ВРЕМЯ ===
+        # === ПРОСТЫЕ КОМАНДЫ ===
         if any(word in text.lower() for word in ["время", "сколько времени", "который час"]):
             return get_current_time()
         
-        # === ИМЯ ===
         if any(word in text.lower() for word in ["как меня зовут", "моё имя"]):
             return f"Тебя зовут **{user_name}** 😊" if user_name else "Я пока не знаю твоего имени — расскажешь?"
         
-        # === ГОРОД ===
         if any(word in text.lower() for word in ["где я живу", "мой город"]):
             return f"Ты из **{user_city}** 😊" if user_city else "Я пока не знаю, откуда ты — расскажи, если хочешь!"
         
-        # === ПОИСК В ИСТОРИИ ===
         if any(word in text.lower() for word in ["говорили", "раньше", "помнишь", "вспомни"]):
             results = search_all_history(user_id, text)
             if results:
@@ -307,14 +307,12 @@ async def deepseek_process(user_id, text):
                 for i, item in enumerate(news[:5], 1):
                     context += f"{i}. **{item['title']}**\n   {item['description'][:150]}...\n   Источник: {item['source'].capitalize()}\n   Ссылка: {item['link']}\n\n"
                 
-                reply = await deepseek_chat_with_context(text, get_recent_history(user_id, limit=50), user_name, user_city, context)
-                if not reply or len(reply.strip()) < 5:
-                    reply = "😊 Не нашёл свежих новостей по этой теме. Попробуй уточнить!"
-                return reply
+                reply = await deepseek_analyze(text, get_recent_history(user_id, limit=50), user_name, user_city, context)
+                return reply or "😊 Не нашёл свежих новостей по этой теме. Попробуй уточнить!"
             else:
                 return "😊 Не нашёл свежих новостей по этой теме. Попробуй уточнить!"
         
-        # === ПОИСК В ИНТЕРНЕТЕ (ВСЁ ОСТАЛЬНОЕ) ===
+        # === ПОИСК ===
         search_triggers = [
             "найди", "поищи", "найти", "покажи", "где", "сайт", "фильм", 
             "клиника", "адрес", "маршрут", "ссылка", "цены", "билеты", 
@@ -332,7 +330,6 @@ async def deepseek_process(user_id, text):
             results = await searcher.search(query, max_results=15)
             
             if results:
-                # Формируем контекст из результатов поиска
                 context = "🔍 Вот что я нашёл по твоему запросу:\n\n"
                 for i, res in enumerate(results[:10], 1):
                     price = f" ({res['price']} ₽)" if res.get('price', 0) > 0 else ""
@@ -340,26 +337,19 @@ async def deepseek_process(user_id, text):
                     snippet = res['snippet'][:150] if res['snippet'] else ""
                     context += f"{i}. **{title}**{price}\n   {snippet}...\n   Ссылка: {res['url']}\n\n"
                 
-                # DeepSeek анализирует и выдаёт живой ответ
-                reply = await deepseek_chat_with_context(text, get_recent_history(user_id, limit=50), user_name, user_city, context)
-                if not reply or len(reply.strip()) < 5:
-                    # Если DeepSeek не ответил — показываем первую ссылку
+                reply = await deepseek_analyze(text, get_recent_history(user_id, limit=50), user_name, user_city, context)
+                if reply:
+                    return reply
+                else:
+                    # Если DeepSeek не ответил — показываем первый результат
                     best = results[0]
-                    reply = f"🔍 Нашёл результат:\n\n📌 {best['title']}\n"
-                    if best.get('price', 0) > 0:
-                        reply += f"💰 Цена: **{best['price']} ₽**\n"
-                    reply += f"\n🔗 [Подробнее]({best['url']})"
-                return reply
+                    return f"🔍 Нашёл результат:\n\n📌 {best['title']}\n🔗 [Подробнее]({best['url']})"
             else:
-                context = "Поиск в интернете не дал результатов."
-                reply = await deepseek_chat_with_context(text, get_recent_history(user_id, limit=50), user_name, user_city, context)
-                if not reply or len(reply.strip()) < 5:
-                    reply = "😊 Не нашёл ничего по этому запросу. Попробуй переформулировать или уточнить!"
-                return reply
+                return "😊 Не нашёл ничего по этому запросу. Попробуй переформулировать!"
         
         # === ОБЫЧНЫЙ ДИАЛОГ ===
         history = get_recent_history(user_id, limit=50)
-        return await deepseek_chat_with_context(text, history, user_name, user_city, "")
+        return await deepseek_analyze(text, history, user_name, user_city, "Нет контекста, просто поболтай с пользователем.")
         
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
@@ -413,7 +403,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA — МНОГОАГЕНТНАЯ ВЕРСИЯ (RENDER)"}
+    return {"status": "AURA — VIP-ВЕРСИЯ (ЭТАЛОН)"}
 
 if __name__ == "__main__":
     import uvicorn
