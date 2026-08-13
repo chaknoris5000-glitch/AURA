@@ -30,8 +30,9 @@ DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GIS_API_KEY = os.getenv("GIS_API_KEY")  # Ключ 2ГИС (демо)
 
-logger.info("🚀 AURA — VIP-ВЕРСИЯ (С ПОНИМАНИЕМ)")
+logger.info("🚀 AURA — VIP-ВЕРСИЯ (С 2ГИС)")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -49,6 +50,49 @@ analyzer = Analyzer()
 responder = Responder(deepseek)
 
 app = FastAPI()
+
+# ============================================================
+# 2ГИС API — ПОИСК ОРГАНИЗАЦИЙ
+# ============================================================
+
+async def search_organization(query: str, city: str = "Белово") -> dict:
+    """Ищет организацию через 2ГИС API"""
+    if not GIS_API_KEY:
+        return {"error": "Нет ключа 2ГИС"}
+    
+    # Формируем запрос к Places API
+    url = "https://catalog.api.2gis.com/3.0/items"
+    params = {
+        "q": query,
+        "city_name": city,
+        "type": "branch",
+        "sort": "rating",
+        "page_size": 1,
+        "fields": "items.name,items.address,items.phones,items.site,items.schedule,items.rating,items.reviews_count",
+        "key": GIS_API_KEY
+    }
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, params=params, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                items = data.get("result", {}).get("items", [])
+                if items:
+                    item = items[0]
+                    result = {
+                        "name": item.get("name", "Неизвестно"),
+                        "address": item.get("address", {}).get("full_name", "Адрес не указан"),
+                        "phones": [p.get("number") for p in item.get("phones", []) if p.get("number")],
+                        "site": item.get("site", ""),
+                        "rating": item.get("rating", {}).get("value", 0),
+                        "reviews": item.get("reviews_count", 0)
+                    }
+                    return result
+            return {"error": "Не найдено"}
+    except Exception as e:
+        logger.error(f"❌ Ошибка 2ГИС: {e}")
+        return {"error": str(e)}
 
 # ============================================================
 # НОВОСТНОЙ АГЕНТ (RSS)
@@ -228,8 +272,8 @@ async def understand_query(text: str, user_name: str, user_city: str) -> dict:
 Запрос: "{text}"
 
 Определи, что нужно сделать:
-1. Если пользователь спрашивает о прошлых разговорах, фактах или личной информации — ответь "history".
-2. Если пользователь просит найти что-то в интернете (товары, цены, фильмы, новости, погоду) — ответь "internet".
+1. Если пользователь спрашивает о прошлых разговорах, фактах или личной информации (слова: "помнишь", "вспомни", "напомни", "говорили", "искал", "просил", "в памяти", "история", "раньше") — ответь "history".
+2. Если пользователь просит найти что-то в интернете (товары, цены, фильмы, новости, погоду, билеты) — ответь "internet".
 3. Если это обычный разговор — ответь "chat".
 
 Ответь строго одним словом: history, internet или chat.
@@ -408,10 +452,7 @@ async def deepseek_process(user_id, text):
         intent = await understand_query(text, user_name, user_city)
         logger.info(f"🧠 Понимание запроса: {intent['action']}")
         
-        # === ШАГ 2: КОНТЕКСТ ===
-        history = await get_full_context(user_id, text, limit_recent=30)
-        
-        # === ШАГ 3: ИСТОРИЯ ===
+        # === ШАГ 2: ИСТОРИЯ ===
         if intent['action'] == 'history':
             history_results = search_all_history(user_id, text)
             if history_results:
@@ -422,6 +463,28 @@ async def deepseek_process(user_id, text):
                 return f"{greeting}\n\n{reply}" if greeting else reply
             else:
                 intent['action'] = 'internet'
+        
+        # === ШАГ 3: 2ГИС (ОРГАНИЗАЦИИ) ===
+        org_triggers = ["клиника", "поликлиника", "больница", "врач", "стоматолог", "аптека", "магазин", "салон", "ресторан", "кафе"]
+        if any(word in text.lower() for word in org_triggers):
+            logger.info(f"🏥 2ГИС: '{text}'")
+            city = user_city or "Белово"
+            result = await search_organization(text, city)
+            
+            if result and "error" not in result:
+                reply = f"🏥 **{result['name']}**\n\n"
+                reply += f"📍 {result['address']}\n"
+                if result['phones']:
+                    reply += f"📞 {', '.join(result['phones'][:3])}\n"
+                if result['site']:
+                    reply += f"🌐 [{result['site']}]({result['site']})\n"
+                if result['rating'] > 0:
+                    reply += f"⭐ {result['rating']} / 5  ({result['reviews']} отзывов)\n"
+                reply += "\n💡 Если не то — уточни запрос!"
+                return f"{greeting}\n\n{reply}" if greeting else reply
+            else:
+                reply = "😊 Не нашёл организацию по этому запросу. Попробуй уточнить название или город — я помогу!"
+                return f"{greeting}\n\n{reply}" if greeting else reply
         
         # === ШАГ 4: ИНТЕРНЕТ ===
         if intent['action'] == 'internet':
@@ -435,7 +498,7 @@ async def deepseek_process(user_id, text):
                         f"• {item['title']}\n  {item['description'][:150]}...\n  Источник: {item['source'].capitalize()}\n  Ссылка: {item['link']}"
                         for item in news
                     ])
-                    reply = await deepseek_chat_with_context(text, history, user_name, user_city, context, is_first_today)
+                    reply = await deepseek_chat_with_context(text, get_full_context(user_id, text), user_name, user_city, context, is_first_today)
                     return f"{greeting}\n\n{reply}" if greeting else reply
                 else:
                     reply = "😊 По этой теме свежих новостей не нашёл. Попробуй уточнить!"
@@ -457,14 +520,14 @@ async def deepseek_process(user_id, text):
                     context += f"   {r['snippet'][:200]}\n"
                     context += f"   🔗 Ссылка: {r['url']}\n\n"
                 
-                reply = await deepseek_chat_with_context(text, history, user_name, user_city, context, is_first_today)
+                reply = await deepseek_chat_with_context(text, get_full_context(user_id, text), user_name, user_city, context, is_first_today)
                 return f"{greeting}\n\n{reply}" if greeting else reply
             else:
                 reply = "😊 Не нашёл ничего по этому запросу. Попробуй переформулировать!"
                 return f"{greeting}\n\n{reply}" if greeting else reply
         
         # === ШАГ 5: ОБЫЧНЫЙ ДИАЛОГ ===
-        reply = await deepseek_chat_with_context(text, history, user_name, user_city, "", is_first_today)
+        reply = await deepseek_chat_with_context(text, get_full_context(user_id, text), user_name, user_city, "", is_first_today)
         return f"{greeting}\n\n{reply}" if greeting else reply
         
     except Exception as e:
@@ -519,7 +582,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA — VIP-ВЕРСИЯ (С ПОНИМАНИЕМ)"}
+    return {"status": "AURA — VIP-ВЕРСИЯ (С 2ГИС)"}
 
 if __name__ == "__main__":
     import uvicorn
