@@ -30,9 +30,9 @@ DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GIS_API_KEY = os.getenv("GIS_API_KEY")  # Ключ 2ГИС (демо)
+GIS_API_KEY = os.getenv("GIS_API_KEY")
 
-logger.info("🚀 AURA — VIP-ВЕРСИЯ (С 2ГИС)")
+logger.info("🚀 AURA — VIP-ВЕРСИЯ (С 2ГИС, ИСПРАВЛЕННАЯ)")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -56,11 +56,9 @@ app = FastAPI()
 # ============================================================
 
 async def search_organization(query: str, city: str = "Белово") -> dict:
-    """Ищет организацию через 2ГИС API"""
     if not GIS_API_KEY:
         return {"error": "Нет ключа 2ГИС"}
     
-    # Формируем запрос к Places API
     url = "https://catalog.api.2gis.com/3.0/items"
     params = {
         "q": query,
@@ -498,7 +496,14 @@ async def deepseek_process(user_id, text):
                         f"• {item['title']}\n  {item['description'][:150]}...\n  Источник: {item['source'].capitalize()}\n  Ссылка: {item['link']}"
                         for item in news
                     ])
-                    reply = await deepseek_chat_with_context(text, get_full_context(user_id, text), user_name, user_city, context, is_first_today)
+                    reply = await deepseek_chat_with_context(
+                        text, 
+                        await get_full_context(user_id, text), 
+                        user_name, 
+                        user_city, 
+                        context, 
+                        is_first_today
+                    )
                     return f"{greeting}\n\n{reply}" if greeting else reply
                 else:
                     reply = "😊 По этой теме свежих новостей не нашёл. Попробуй уточнить!"
@@ -520,14 +525,28 @@ async def deepseek_process(user_id, text):
                     context += f"   {r['snippet'][:200]}\n"
                     context += f"   🔗 Ссылка: {r['url']}\n\n"
                 
-                reply = await deepseek_chat_with_context(text, get_full_context(user_id, text), user_name, user_city, context, is_first_today)
+                reply = await deepseek_chat_with_context(
+                    text, 
+                    await get_full_context(user_id, text), 
+                    user_name, 
+                    user_city, 
+                    context, 
+                    is_first_today
+                )
                 return f"{greeting}\n\n{reply}" if greeting else reply
             else:
                 reply = "😊 Не нашёл ничего по этому запросу. Попробуй переформулировать!"
                 return f"{greeting}\n\n{reply}" if greeting else reply
         
         # === ШАГ 5: ОБЫЧНЫЙ ДИАЛОГ ===
-        reply = await deepseek_chat_with_context(text, get_full_context(user_id, text), user_name, user_city, "", is_first_today)
+        reply = await deepseek_chat_with_context(
+            text, 
+            await get_full_context(user_id, text), 
+            user_name, 
+            user_city, 
+            "", 
+            is_first_today
+        )
         return f"{greeting}\n\n{reply}" if greeting else reply
         
     except Exception as e:
@@ -582,7 +601,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA — VIP-ВЕРСИЯ (С 2ГИС)"}
+    return {"status": "AURA — VIP-ВЕРСИЯ (С 2ГИС, ИСПРАВЛЕННАЯ)"}
 
 if __name__ == "__main__":
     import uvicorn
