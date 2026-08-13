@@ -195,10 +195,10 @@ def get_recent_history(user_id, limit=50):
         return []
 
 def search_all_history(user_id, query):
+    """Поиск по всей истории через умное сравнение"""
     if not supabase:
         return []
     try:
-        # Загружаем ВСЮ историю пользователя
         res = supabase.table("history")\
             .select("role, content, created_at")\
             .eq("user_id", user_id)\
@@ -208,7 +208,6 @@ def search_all_history(user_id, query):
         if not res.data:
             return []
         
-        # Фильтруем по схожести
         from difflib import SequenceMatcher
         
         def similarity(a, b):
@@ -220,8 +219,7 @@ def search_all_history(user_id, query):
             if similarity(query, msg["content"]) > threshold:
                 filtered.append(msg)
         
-        # Возвращаем топ-10 самых релевантных
-        return filtered[:10]
+        return filtered[:15]  # Топ-15 релевантных сообщений
     except Exception as e:
         logger.error(f"❌ Ошибка поиска в истории: {e}")
         return []
@@ -288,18 +286,25 @@ async def get_full_context(user_id: str, query: str, limit_recent: int = 30) -> 
     return all_messages
 
 # ============================================================
-# ПОНИМАНИЕ ЗАПРОСА
+# ПОНИМАНИЕ ЗАПРОСА (УЛУЧШЕННОЕ)
 # ============================================================
 
 async def understand_query(text: str, user_name: str, user_city: str) -> dict:
-    prompt = f"""Ты — AURA. Ты анализируешь запрос пользователя.
+    prompt = f"""Ты — AURA. Анализируешь запрос пользователя.
 
 Запрос: "{text}"
 
-Определи, что нужно сделать:
-1. Если пользователь спрашивает о прошлых разговорах, фактах или личной информации (слова: "помнишь", "вспомни", "напомни", "говорили", "искал", "просил", "в памяти", "история", "раньше", "поищи в памяти", "найди в истории") — ответь "history".
-2. Если пользователь просит найти что-то в интернете (товары, цены, фильмы, новости, погоду, билеты, адрес, телефон) — ответь "internet".
-3. Если это обычный разговор — ответь "chat".
+ОПРЕДЕЛИ ТИП ЗАПРОСА СТРОГО ПО ПРИЗНАКАМ:
+
+1. HISTORY — если пользователь:
+   - спрашивает о прошлом: "помнишь", "вспомни", "напомни", "говорили", "искал", "просил", "в памяти", "история", "раньше", "неделю назад", "дней назад", "месяц назад", "тогда"
+   - упоминает старые разговоры: "мы обсуждали", "ты говорил", "я просил", "какие фильмы я искал", "что я искал"
+
+2. INTERNET — если пользователь:
+   - ищет актуальную информацию: "найди", "поищи", "сколько стоит", "цены", "погода", "новости", "билеты", "купить", "сравни"
+   - спрашивает про внешний мир: "что происходит", "как дела на рынке", "где купить"
+
+3. CHAT — если это обычный разговор, шутка, приветствие, вопрос про тебя.
 
 Ответь строго одним словом: history, internet или chat.
 """
@@ -352,7 +357,7 @@ async def generate_greeting(user_name: str, user_city: str) -> str:
         return "Привет! Как дела? 😊"
 
 # ============================================================
-# ДИАЛОГ
+# ДИАЛОГ (С УВЕЛИЧЕННЫМИ ТОКЕНАМИ)
 # ============================================================
 
 async def deepseek_chat_with_context(text, history, user_name, user_city, context="", is_first_today=False):
@@ -434,7 +439,7 @@ async def deepseek_chat_with_context(text, history, user_name, user_city, contex
             model="deepseek-v4-flash",
             messages=messages,
             temperature=0.85,
-            max_tokens=300,
+            max_tokens=400,  # Увеличено с 300 до 400
             timeout=60
         )
         return response.choices[0].message.content
@@ -520,13 +525,11 @@ async def deepseek_process(user_id, text):
         if intent['action'] == 'history':
             history_results = search_all_history(user_id, text)
             if history_results:
-                # Формируем контекст из истории
                 history_context = "Вот что я нашёл в истории:\n\n"
                 for h in history_results[:5]:
                     role = "Пользователь" if h["role"] == "user" else "AURA"
                     history_context += f"**{role}**: {h['content'][:200]}\n\n"
                 
-                # Передаём в DeepSeek для красивого ответа
                 reply = await deepseek_chat_with_context(
                     text, 
                     await get_full_context(user_id, text), 
