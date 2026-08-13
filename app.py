@@ -198,22 +198,30 @@ def search_all_history(user_id, query):
     if not supabase:
         return []
     try:
-        words = query.lower().split()
-        conditions = []
-        for word in words:
-            if len(word) > 2:
-                conditions.append(f"content.ilike.%{word}%")
-        if not conditions:
-            return []
-        query_builder = supabase.table("history")\
+        # Загружаем ВСЮ историю пользователя
+        res = supabase.table("history")\
             .select("role, content, created_at")\
             .eq("user_id", user_id)\
             .order("created_at", desc=True)\
-            .limit(30)
-        for cond in conditions:
-            query_builder = query_builder.or_(cond)
-        res = query_builder.execute()
-        return res.data if res.data else []
+            .execute()
+        
+        if not res.data:
+            return []
+        
+        # Фильтруем по схожести
+        from difflib import SequenceMatcher
+        
+        def similarity(a, b):
+            return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+        
+        threshold = 0.3
+        filtered = []
+        for msg in res.data:
+            if similarity(query, msg["content"]) > threshold:
+                filtered.append(msg)
+        
+        # Возвращаем топ-10 самых релевантных
+        return filtered[:10]
     except Exception as e:
         logger.error(f"❌ Ошибка поиска в истории: {e}")
         return []
