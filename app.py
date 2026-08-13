@@ -213,13 +213,13 @@ def search_all_history(user_id, query):
         def similarity(a, b):
             return SequenceMatcher(None, a.lower(), b.lower()).ratio()
         
-        threshold = 0.3
+        threshold = 0.25
         filtered = []
         for msg in res.data:
             if similarity(query, msg["content"]) > threshold:
                 filtered.append(msg)
         
-        return filtered[:15]  # Топ-15 релевантных сообщений
+        return filtered[:15]
     except Exception as e:
         logger.error(f"❌ Ошибка поиска в истории: {e}")
         return []
@@ -286,43 +286,37 @@ async def get_full_context(user_id: str, query: str, limit_recent: int = 30) -> 
     return all_messages
 
 # ============================================================
-# ПОНИМАНИЕ ЗАПРОСА (УЛУЧШЕННОЕ)
+# ПОНИМАНИЕ ЗАПРОСА (ЖЁСТКИЙ ПЕРЕХВАТ)
 # ============================================================
 
 async def understand_query(text: str, user_name: str, user_city: str) -> dict:
-    prompt = f"""Ты — AURA. Анализируешь запрос пользователя.
-
-Запрос: "{text}"
-
-ОПРЕДЕЛИ ТИП ЗАПРОСА СТРОГО ПО ПРИЗНАКАМ:
-
-1. HISTORY — если пользователь:
-   - спрашивает о прошлом: "помнишь", "вспомни", "напомни", "говорили", "искал", "просил", "в памяти", "история", "раньше", "неделю назад", "дней назад", "месяц назад", "тогда"
-   - упоминает старые разговоры: "мы обсуждали", "ты говорил", "я просил", "какие фильмы я искал", "что я искал"
-
-2. INTERNET — если пользователь:
-   - ищет актуальную информацию: "найди", "поищи", "сколько стоит", "цены", "погода", "новости", "билеты", "купить", "сравни"
-   - спрашивает про внешний мир: "что происходит", "как дела на рынке", "где купить"
-
-3. CHAT — если это обычный разговор, шутка, приветствие, вопрос про тебя.
-
-Ответь строго одним словом: history, internet или chat.
-"""
-    try:
-        response = deepseek.chat.completions.create(
-            model="deepseek-v4-flash",
-            messages=[{"role": "system", "content": prompt}],
-            temperature=0.1,
-            max_tokens=10,
-            timeout=10
-        )
-        result = response.choices[0].message.content.strip().lower()
-        if result in ["history", "internet", "chat"]:
-            return {"action": result}
+    """Определяет тип запроса без DeepSeek — по ключевым словам"""
+    text_lower = text.lower()
+    
+    # Жёсткие ключевые слова для истории
+    history_words = [
+        "помнишь", "вспомни", "напомни", "говорили", "искал", "просил",
+        "память", "история", "раньше", "неделю назад", "дней назад",
+        "месяц назад", "тогда", "мы обсуждали", "ты говорил", "просил",
+        "какие фильмы", "какие билеты", "что я говорил",
+        "найди в истории", "вспомни что", "было дело"
+    ]
+    
+    if any(word in text_lower for word in history_words):
+        return {"action": "history"}
+    
+    # Ключевые слова для интернета
+    internet_words = [
+        "найди", "поищи", "сколько стоит", "цены", "погода",
+        "новости", "билеты", "купить", "сравни", "где купить",
+        "актуальные", "сейчас", "сегодня", "курс"
+    ]
+    
+    if any(word in text_lower for word in internet_words):
         return {"action": "internet"}
-    except Exception as e:
-        logger.error(f"❌ Ошибка понимания запроса: {e}")
-        return {"action": "internet"}
+    
+    # Всё остальное — чат
+    return {"action": "chat"}
 
 # ============================================================
 # ПРИВЕТСТВИЕ РАЗ В ДЕНЬ
@@ -357,7 +351,7 @@ async def generate_greeting(user_name: str, user_city: str) -> str:
         return "Привет! Как дела? 😊"
 
 # ============================================================
-# ДИАЛОГ (С УВЕЛИЧЕННЫМИ ТОКЕНАМИ)
+# ДИАЛОГ (С ЗАЩИТОЙ ОТ ОБРЫВОВ)
 # ============================================================
 
 async def deepseek_chat_with_context(text, history, user_name, user_city, context="", is_first_today=False):
@@ -425,9 +419,10 @@ async def deepseek_chat_with_context(text, history, user_name, user_city, contex
 4. Используй 1–2 эмодзи, не больше.
 5. Учитывай всю историю разговора — не теряй нить.
 6. Не повторяйся, не мусоль.
-7. Отвечай завершённо, не обрывай мысль.
-8. {greeting_instruction}
-9. Если в контексте есть ссылки — обязательно вставь их в ответ в виде [текст](url).
+7. Отвечай завершённо, не обрывай мысль. Обязательно ставь точку в конце.
+8. Если не успеваешь закончить — сократи начало, но финал должен быть чётким.
+9. {greeting_instruction}
+10. Если в контексте есть ссылки — обязательно вставь их в ответ в виде [текст](url).
 """
     messages = [{"role": "system", "content": system_prompt}]
     for h in history[-30:]:
@@ -439,10 +434,16 @@ async def deepseek_chat_with_context(text, history, user_name, user_city, contex
             model="deepseek-v4-flash",
             messages=messages,
             temperature=0.85,
-            max_tokens=400,  # Увеличено с 300 до 400
+            max_tokens=400,
             timeout=60
         )
-        return response.choices[0].message.content
+        reply = response.choices[0].message.content
+        
+        # === ЗАЩИТА ОТ ОБРЫВОВ ===
+        if reply and reply[-1] not in ['.', '!', '?']:
+            reply += "..."
+        
+        return reply
     except Exception as e:
         logger.error(f"❌ Ошибка DeepSeek: {e}")
         return "😅 Что-то пошло не так. Попробуй ещё раз."
