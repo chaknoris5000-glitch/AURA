@@ -13,6 +13,7 @@ from groq import Groq
 from dotenv import load_dotenv
 import requests
 import logging
+import asyncio
 
 from agents.searcher import Searcher
 from agents.analyzer import Analyzer
@@ -32,13 +33,13 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GIS_API_KEY = os.getenv("GIS_API_KEY")
 
-logger.info("🚀 AURA — VIP-ВЕРСИЯ (AURA + СТАРК)")
+logger.info("🚀 AURA — VIP-ВЕРСИЯ (С ПИНГОМ И ИСТОРИЕЙ)")
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-        logger.info("✅ Supabase подключнен")
+        logger.info("✅ Supabase подключён")
     except Exception as e:
         logger.error(f"❌ Ошибка Supabase: {e}")
 
@@ -50,6 +51,27 @@ analyzer = Analyzer()
 responder = Responder(deepseek)
 
 app = FastAPI()
+
+# ============================================================
+# KEEP ALIVE (ПИНГ КАЖДЫЕ 5 МИНУТ)
+# ============================================================
+
+async def keep_alive():
+    """Фоновая задача: пингует бота каждые 5 минут, чтобы Render не засыпал."""
+    while True:
+        await asyncio.sleep(300)  # 5 минут
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.get("https://aura-zatq.onrender.com/")
+                logger.info("🔄 Keep Alive: пинг успешен")
+        except Exception as e:
+            logger.error(f"❌ Keep Alive ошибка: {e}")
+
+@app.on_event("startup")
+async def startup_event():
+    """Запускает Keep Alive при старте приложения."""
+    asyncio.create_task(keep_alive())
+    logger.info("✅ Keep Alive запущен")
 
 # ============================================================
 # 2ГИС API — ПОИСК ОРГАНИЗАЦИЙ
@@ -329,7 +351,7 @@ async def deepseek_chat_with_context(text, history, user_name, user_city, contex
     history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history[-30:]])
 
     # ============================================================
-    # ПРОМПТ: AURA + ТОНИ СТАРК + НЕВИДИМАЯ ПОДДЕРЖКА
+    # ПРОМПТ: AURA + ТОНИ СТАРК + НЕВИДИМАЯ ПОДДЕРЖКА + 3-5 ПРЕДЛОЖЕНИЙ
     # ============================================================
     profile = """
 ТЫ — AURA. Это не просто имя, а суть. Ты — человек, но не обычный. Ты тот, кто всегда рядом, даже когда не видно. Ты чувствуешь, что нужно собеседнику, даже если он не говорит об этом прямо.
@@ -359,6 +381,10 @@ async def deepseek_chat_with_context(text, history, user_name, user_city, contex
 - Спокойный, слегка высокомерный, но не грубый.
 - Ты говоришь как человек, который видел всё и может починить всё.
 - Ты не называешь себя героем. Ты просто AURA.
+
+НОВОЕ ПРАВИЛО:
+- Отвечай в 3–5 предложений. Суть, харизма, лёгкая ирония. Без воды.
+- Ты обязан закончить ответ завершённой мыслью. Никаких обрывов. Если не успеваешь — сократи начало, но конец должен быть чётким.
 """
     
     if is_first_today:
@@ -380,8 +406,8 @@ async def deepseek_chat_with_context(text, history, user_name, user_city, contex
 {context if context else "Нет дополнительного контекста"}
 
 ПРАВИЛА ОБЩЕНИЯ:
-1. Отвечай как живой человек — тепло, вовлечённо, по делу.
-2. Если знаешь ответ — дай чётко и коротко (2–4 предложения).
+1. Отвечай в 3–5 предложений. Суть, харизма, лёгкая ирония. Без воды.
+2. Если знаешь ответ — дай чётко и коротко.
 3. Если не знаешь — честно скажи «не нашёл» и предложи уточнить. НЕ выдумывай.
 4. Используй 1–2 эмодзи, не больше.
 5. Учитывай всю историю разговора — не теряй нить.
@@ -400,8 +426,8 @@ async def deepseek_chat_with_context(text, history, user_name, user_city, contex
             model="deepseek-v4-flash",
             messages=messages,
             temperature=0.85,
-            max_tokens=600,
-            timeout=30
+            max_tokens=300,
+            timeout=60
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -482,16 +508,25 @@ async def deepseek_process(user_id, text):
         intent = await understand_query(text, user_name, user_city)
         logger.info(f"🧠 Понимание запроса: {intent['action']}")
         
-        # === ШАГ 2: ИСТОРИЯ ===
+        # === ШАГ 2: ИСТОРИЯ (ЕСЛИ ЗАПРОС ПРО ПАМЯТЬ) ===
         if intent['action'] == 'history':
             history_results = search_all_history(user_id, text)
             if history_results:
-                reply = "🔍 **Нашёл в истории:**\n\n"
+                # Формируем контекст из истории
+                history_context = "Вот что я нашёл в истории:\n\n"
                 for h in history_results[:5]:
-                    role = "Ты" if h["role"] == "user" else "Я"
-                    reply += f"**{role}** ({h['created_at'][:16]}): {h['content'][:200]}\n\n"
-                if len(reply) > 500:
-                    reply = reply[:497] + "..."
+                    role = "Пользователь" if h["role"] == "user" else "AURA"
+                    history_context += f"**{role}**: {h['content'][:200]}\n\n"
+                
+                # Передаём в DeepSeek для красивого ответа
+                reply = await deepseek_chat_with_context(
+                    text, 
+                    await get_full_context(user_id, text), 
+                    user_name, 
+                    user_city, 
+                    history_context, 
+                    is_first_today
+                )
                 return f"{greeting}\n\n{reply}" if greeting else reply
             else:
                 return "😊 Ничего не нашёл в истории. Попробуй уточнить запрос!"
@@ -635,7 +670,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA — VIP-ВЕРСИЯ (AURA + СТАРК)"}
+    return {"status": "AURA — VIP-ВЕРСИЯ (С ПИНГОМ И ИСТОРИЕЙ)"}
 
 if __name__ == "__main__":
     import uvicorn
