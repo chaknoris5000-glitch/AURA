@@ -4,6 +4,7 @@ import httpx
 import asyncio
 import logging
 from datetime import datetime, timedelta
+import pytz
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from supabase import create_client
@@ -47,22 +48,30 @@ app = FastAPI()
 user_states = {}
 
 # ============================================================
-# ТОЧНОЕ ВРЕМЯ (С ПОВТОРОМ И ЗАПАСНЫМ ОТВЕТОМ)
+# ТОЧНОЕ ВРЕМЯ (ЧЕРЕЗ PYTZ)
 # ============================================================
 
-async def get_exact_time() -> str:
-    for attempt in range(2):
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get("https://worldtimeapi.org/api/timezone/Europe/Moscow", timeout=5)
-                data = response.json()
-                return data["datetime"][11:16]
-        except Exception:
-            if attempt == 0:
-                await asyncio.sleep(1)
-            else:
-                return "не могу узнать точное время, посмотри на телефоне"
-    return "не могу узнать точное время, посмотри на телефоне"
+def get_time_for_city(city: str = "Москва") -> str:
+    timezone_map = {
+        "москва": "Europe/Moscow",
+        "белово": "Asia/Novokuznetsk",
+        "новокузнецк": "Asia/Novokuznetsk",
+        "кемерово": "Asia/Novokuznetsk",
+        "новосибирск": "Asia/Novosibirsk",
+        "екатеринбург": "Asia/Yekaterinburg",
+        "казань": "Europe/Moscow",
+        "санкт-петербург": "Europe/Moscow",
+        "владивосток": "Asia/Vladivostok",
+        "иркутск": "Asia/Irkutsk",
+        "красноярск": "Asia/Krasnoyarsk",
+        "омск": "Asia/Omsk",
+        "самара": "Europe/Samara",
+        "калининград": "Europe/Kaliningrad",
+    }
+    tz_name = timezone_map.get(city.lower(), "Europe/Moscow")
+    tz = pytz.timezone(tz_name)
+    now = datetime.now(tz)
+    return now.strftime("%H:%M")
 
 # ============================================================
 # РАБОТА С ПАМЯТЬЮ (FACTS)
@@ -148,7 +157,7 @@ async def detect_emotion(text: str) -> dict:
         return {"emotion": "спокойствие", "confidence": 0.5}
 
 # ============================================================
-# ИСТОРИЯ СООБЩЕНИЙ
+# ИСТОРИЯ СООБЩЕНИЙ (С УВЕЛИЧЕННЫМ ЛИМИТОМ)
 # ============================================================
 
 def save_message(user_id, role, content):
@@ -165,6 +174,7 @@ def save_message(user_id, role, content):
         logger.error(f"❌ Ошибка сохранения: {e}")
 
 def get_recent_history(user_id, limit=20):
+    """Для обычного контекста — последние 20 сообщений."""
     if not supabase:
         return []
     try:
@@ -177,6 +187,25 @@ def get_recent_history(user_id, limit=20):
         return list(reversed(res.data)) if res.data else []
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки: {e}")
+        return []
+
+def search_history(user_id, query, days_ago=None, limit=5):
+    """Поиск по всей истории (до 1000 сообщений) по ключевым словам и датам."""
+    if not supabase:
+        return []
+    try:
+        builder = supabase.table("history")\
+            .select("role, content, created_at")\
+            .eq("user_id", user_id)
+        if days_ago:
+            cutoff = datetime.now() - timedelta(days=days_ago)
+            builder = builder.gte("created_at", cutoff.isoformat())
+        if query:
+            builder = builder.ilike("content", f"%{query}%")
+        res = builder.order("created_at", desc=True).limit(limit).execute()
+        return list(reversed(res.data)) if res.data else []
+    except Exception as e:
+        logger.error(f"❌ Ошибка поиска в истории: {e}")
         return []
 
 def save_emotion(user_id, emotion, confidence):
@@ -193,7 +222,7 @@ def save_emotion(user_id, emotion, confidence):
         logger.error(f"❌ Ошибка сохранения эмоции: {e}")
 
 # ============================================================
-# 2ГИС (ЖЁСТКИЙ ПОИСК, БЕЗ ГАЛЛЮЦИНАЦИЙ)
+# 2ГИС (С РАСШИРЕННЫМ СПИСКОМ ТРИГГЕРОВ)
 # ============================================================
 
 async def search_organization(query: str, city: str = "Белово") -> dict:
@@ -201,7 +230,7 @@ async def search_organization(query: str, city: str = "Белово") -> dict:
         return {"error": "Нет ключа 2ГИС"}
     
     # Чистим запрос от стоп-слов
-    stop_words = ["найди", "поищи", "пожалуйста", "надо", "нужна", "нужен", "найти", "покажи", "скинь", "дай", "где", "адрес", "телефон", "сайт", "контакты"]
+    stop_words = ["найди", "поищи", "пожалуйста", "надо", "нужна", "нужен", "найти", "покажи", "скинь", "дай", "где", "адрес", "телефон", "сайт", "контакты", "мне", "надо", "найти", "помоги"]
     clean_query = " ".join([word for word in query.lower().split() if word not in stop_words])
     
     url = "https://catalog.api.2gis.com/3.0/items"
@@ -210,7 +239,7 @@ async def search_organization(query: str, city: str = "Белово") -> dict:
         "city_name": city,
         "type": "branch",
         "sort": "rating",
-        "page_size": 1,
+        "page_size": 3,
         "fields": "items.name,items.address,items.phones,items.site,items.schedule,items.rating,items.reviews_count",
         "key": GIS_API_KEY
     }
@@ -222,19 +251,11 @@ async def search_organization(query: str, city: str = "Белово") -> dict:
                 data = response.json()
                 items = data.get("result", {}).get("items", [])
                 if items:
-                    item = items[0]
-                    return {
-                        "name": item.get("name", "Неизвестно"),
-                        "address": item.get("address", {}).get("full_name", "Адрес не указан"),
-                        "phones": [p.get("number") for p in item.get("phones", []) if p.get("number")],
-                        "site": item.get("site", ""),
-                        "rating": item.get("rating", {}).get("value", 0),
-                        "reviews": item.get("reviews_count", 0)
-                    }
-            return {"error": "Не найдено"}
+                    return items
+            return []
     except Exception as e:
         logger.error(f"❌ Ошибка 2ГИС: {e}")
-        return {"error": str(e)}
+        return []
 
 # ============================================================
 # ОСНОВНАЯ ЛОГИКА (С ПОВТОРНЫМ ЗАПРОСОМ ПРИ ОШИБКЕ JSON)
@@ -249,6 +270,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
     elif emotion == "радость":
         emotion_instruction = "Пользователь в хорошем настроении. Отвечай живо, с юмором, поддерживай лёгкость."
     
+    # === ПРОВЕРКА НА ЗАПРОС В ИСТОРИЮ ===
     memory_triggers = ["помнишь", "напомни", "вспомни", "подскажи", "что я говорил", "что я просил", "на той неделе", "в прошлый раз"]
     if any(word in text.lower() for word in memory_triggers):
         query_words = [w for w in text.split() if len(w) > 2 and w.lower() not in memory_triggers]
@@ -260,22 +282,22 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
             days_ago = 30
         elif "вчера" in text.lower():
             days_ago = 1
-        if query or days_ago:
-            results = search_history(user_id, query, days_ago)
-            if results:
-                memory_context = "\n".join([f"{h['role']}: {h['content']}" for h in results[-5:]])
-                return {
-                    "reply": f"📜 Нашёл:\n\n{memory_context}",
-                    "score": 0,
-                    "offer_trial": False
-                }
-            else:
-                return {
-                    "reply": "📭 Не нашёл. Уточни, о чём речь.",
-                    "score": 0,
-                    "offer_trial": False
-                }
+        results = search_history(user_id, query, days_ago, limit=5)
+        if results:
+            memory_context = "\n".join([f"{h['role']}: {h['content']}" for h in results])
+            return {
+                "reply": f"📜 Нашёл в истории:\n\n{memory_context}",
+                "score": 0,
+                "offer_trial": False
+            }
+        else:
+            return {
+                "reply": "📭 Не нашёл ничего по этому запросу в истории. Уточни, о чём именно ты говорил.",
+                "score": 0,
+                "offer_trial": False
+            }
     
+    # === ПОЛУЧАЕМ ИМЯ И ГОРОД ===
     user_name = get_fact(user_id, "name")
     user_city = get_fact(user_id, "city")
     
@@ -376,7 +398,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# WEBHOOK (С ЖЁСТКИМ 2ГИС)
+# WEBHOOK
 # ============================================================
 
 @app.post("/webhook")
@@ -401,28 +423,37 @@ async def webhook(request: Request):
         # === ТОЧНОЕ ВРЕМЯ ===
         time_keywords = ["время", "сколько время", "который час", "точное время", "часы"]
         if any(word in text.lower() for word in time_keywords):
-            time_str = await get_exact_time()
-            await send_message(user_id, f"⏰ Сейчас {time_str} по Москве.")
+            user_city = get_fact(user_id, "city") or "Москва"
+            time_str = get_time_for_city(user_city)
+            await send_message(user_id, f"⏰ Сейчас {time_str} по местному времени ({user_city}).")
             return JSONResponse({"ok": True})
         
-        # === ПОИСК ОРГАНИЗАЦИЙ (2ГИС) — ЖЁСТКИЙ ПЕРЕХВАТ ===
-        # Ищем корни слов, чтобы поймать любые падежи
+        # === ПОИСК ОРГАНИЗАЦИЙ (2ГИС) ===
         org_triggers = ["клиник", "поликлиник", "больниц", "аптек", "отель", "гостиниц", "кафе", "ресторан", "салон", "стоматолог", "медцентр", "ветеринар", "зоомагазин", "гинеколог", "невролог", "кардиолог", "травматолог", "лаборатор", "анализ", "узи", "мрт", "кт", "рентген", "эндокринолог", "офтальмолог", "лор", "хирург"]
         if any(word in text.lower() for word in org_triggers):
             user_city = get_fact(user_id, "city") or "Белово"
-            result = await search_organization(text, user_city)
+            items = await search_organization(text, user_city)
             
-            if result and "error" not in result:
-                reply = f"🏥 **{result['name']}**\n\n📍 {result['address']}\n"
-                if result['phones']:
-                    reply += f"📞 {', '.join(result['phones'][:3])}\n"
-                if result['site']:
-                    reply += f"🌐 [Сайт]({result['site']})\n"
-                if result['rating'] > 0:
-                    reply += f"⭐ {result['rating']} / 5  ({result['reviews']} отзывов)"
+            if items and len(items) > 0:
+                reply = "🏥 **Нашёл в 2ГИС:**\n\n"
+                for i, item in enumerate(items[:3], 1):
+                    name = item.get("name", "Неизвестно")
+                    address = item.get("address", {}).get("full_name", "Адрес не указан")
+                    phones = [p.get("number") for p in item.get("phones", []) if p.get("number")]
+                    site = item.get("site", "")
+                    rating = item.get("rating", {}).get("value", 0)
+                    reviews = item.get("reviews_count", 0)
+                    
+                    reply += f"{i}. **{name}**\n📍 {address}\n"
+                    if phones:
+                        reply += f"📞 {', '.join(phones[:2])}\n"
+                    if site:
+                        reply += f"🌐 [Сайт]({site})\n"
+                    if rating > 0:
+                        reply += f"⭐ {rating} / 5  ({reviews} отзывов)\n"
+                    reply += "\n"
                 await send_message(user_id, reply)
             else:
-                # Короткий ответ, если не нашлось
                 await send_message(
                     user_id,
                     f"😊 Не нашёл «{text}» в {user_city}. Проверь в 2ГИС или справочной 122."
