@@ -111,10 +111,10 @@ async def detect_emotion(text: str) -> dict:
         prompt = f"""
 Проанализируй эмоцию в сообщении пользователя: "{text}"
 Верни JSON с двумя полями:
-- emotion: одна из (радость, грусть, гнев, страх, удивление, отвращение, спокойствие)
-- confidence: число от 0 до 1
+- emotion: jedna z (radost, grust, gnev, strach, udivlenie, otvrashenie, spokoystvie)
+- confidence: chislo ot 0 do 1
 
-Ответь строго JSON.
+Otvety strog JSON.
 """
         response = deepseek.chat.completions.create(
             model="deepseek-chat",
@@ -213,7 +213,7 @@ async def search_organization(query: str, city: str = "Белово") -> dict:
         return {"error": str(e)}
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА (С ПРАВИЛАМИ ДЛЯ ПЛАНОВ)
+# ОСНОВНАЯ ЛОГИКА (С ПРАВКОЙ ПО ССЫЛКАМ)
 # ============================================================
 
 async def deepseek_interview(user_id: int, text: str, step: int, history: list, emotion: str = "спокойствие") -> dict:
@@ -289,6 +289,11 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 - Указывай точные времена и действия (не общие советы).
 - Сохраняй стиль Тони Старка — живой, с иронией, без воды.
 
+ПРАВИЛА ДЛЯ ССЫЛОК:
+Если пользователь просит ссылку на конкретный товар, фильм или место — дай её.
+Если точной ссылки нет — дай ссылку на поиск с предустановленным фильтром или инструкцию, как найти за 30 секунд.
+Не уходи в общие советы, если человек явно просит ссылку.
+
 ПРАВИЛА ОТВЕТОВ:
 1. **МАКСИМУМ 3 ПРЕДЛОЖЕНИЯ** на один смысловой блок. Без воды.
 2. **СНАЧАЛА ПОЛЬЗА:** дай конкретный ответ (цифры, маршруты, цены).
@@ -305,7 +310,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 
 ОТВЕТЬ ТОЛЬКО JSON:
 {{
-    "reply": "твой ответ (с абзацами, маркерами ✅ 🔹 💎 ⚡ и жирными цифрами)",
+    "reply": "твой ответ (с абзацами, маркерами ✅ 🔹 💎 ⚡, жирными цифрами и ссылками, если просят)",
     "score": число_от_0_до_100,
     "offer_trial": false
 }}
