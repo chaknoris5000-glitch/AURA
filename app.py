@@ -45,7 +45,7 @@ app = FastAPI()
 # ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
 # ============================================================
 
-user_states = {}
+user_states = {}  # {user_id: {'step': 0, 'score': 0, 'trial_offered': False, 'offer_count': 0}}
 
 # ============================================================
 # ТОЧНОЕ ВРЕМЯ (ЧЕРЕЗ PYTZ)
@@ -172,7 +172,7 @@ async def detect_emotion(text: str) -> dict:
         return {"emotion": "спокойствие", "confidence": 0.5}
 
 # ============================================================
-# ИСТОРИЯ СООБЩЕНИЙ (С УВЕЛИЧЕННЫМ ЛИМИТОМ)
+# ИСТОРИЯ СООБЩЕНИЙ
 # ============================================================
 
 def save_message(user_id, role, content):
@@ -203,24 +203,6 @@ def get_recent_history(user_id, limit=20):
         logger.error(f"❌ Ошибка загрузки: {e}")
         return []
 
-def search_history(user_id, query, days_ago=None, limit=5):
-    if not supabase:
-        return []
-    try:
-        builder = supabase.table("history")\
-            .select("role, content, created_at")\
-            .eq("user_id", user_id)
-        if days_ago:
-            cutoff = datetime.now() - timedelta(days=days_ago)
-            builder = builder.gte("created_at", cutoff.isoformat())
-        if query:
-            builder = builder.ilike("content", f"%{query}%")
-        res = builder.order("created_at", desc=True).limit(limit).execute()
-        return list(reversed(res.data)) if res.data else []
-    except Exception as e:
-        logger.error(f"❌ Ошибка поиска в истории: {e}")
-        return []
-
 def save_emotion(user_id, emotion, confidence):
     if not supabase:
         return
@@ -235,27 +217,22 @@ def save_emotion(user_id, emotion, confidence):
         logger.error(f"❌ Ошибка сохранения эмоции: {e}")
 
 # ============================================================
-# 2ГИС (С РАСШИРЕННЫМ СПИСКОМ ТРИГГЕРОВ)
+# 2ГИС
 # ============================================================
 
 async def search_organization(query: str, city: str = "Белово") -> dict:
     if not GIS_API_KEY:
         return {"error": "Нет ключа 2ГИС"}
-    
-    stop_words = ["найди", "поищи", "пожалуйста", "надо", "нужна", "нужен", "найти", "покажи", "скинь", "дай", "где", "адрес", "телефон", "сайт", "контакты", "мне", "надо", "найти", "помоги"]
-    clean_query = " ".join([word for word in query.lower().split() if word not in stop_words])
-    
     url = "https://catalog.api.2gis.com/3.0/items"
     params = {
-        "q": clean_query,
+        "q": query,
         "city_name": city,
         "type": "branch",
         "sort": "rating",
-        "page_size": 3,
+        "page_size": 1,
         "fields": "items.name,items.address,items.phones,items.site,items.schedule,items.rating,items.reviews_count",
         "key": GIS_API_KEY
     }
-    
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(url, params=params, timeout=10)
@@ -263,11 +240,19 @@ async def search_organization(query: str, city: str = "Белово") -> dict:
                 data = response.json()
                 items = data.get("result", {}).get("items", [])
                 if items:
-                    return items
-            return []
+                    item = items[0]
+                    return {
+                        "name": item.get("name", "Неизвестно"),
+                        "address": item.get("address", {}).get("full_name", "Адрес не указан"),
+                        "phones": [p.get("number") for p in item.get("phones", []) if p.get("number")],
+                        "site": item.get("site", ""),
+                        "rating": item.get("rating", {}).get("value", 0),
+                        "reviews": item.get("reviews_count", 0)
+                    }
+            return {"error": "Не найдено"}
     except Exception as e:
         logger.error(f"❌ Ошибка 2ГИС: {e}")
-        return []
+        return {"error": str(e)}
 
 # ============================================================
 # ОСНОВНАЯ ЛОГИКА
@@ -282,6 +267,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
     elif emotion == "радость":
         emotion_instruction = "Пользователь в хорошем настроении. Отвечай живо, с юмором, поддерживай лёгкость."
     
+    # === ПРОВЕРКА НА ЗАПРОС В ИСТОРИЮ ===
     memory_triggers = ["помнишь", "напомни", "вспомни", "подскажи", "что я говорил", "что я просил", "на той неделе", "в прошлый раз"]
     if any(word in text.lower() for word in memory_triggers):
         query_words = [w for w in text.split() if len(w) > 2 and w.lower() not in memory_triggers]
@@ -293,20 +279,21 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
             days_ago = 30
         elif "вчера" in text.lower():
             days_ago = 1
-        results = search_history(user_id, query, days_ago, limit=5)
-        if results:
-            memory_context = "\n".join([f"{h['role']}: {h['content']}" for h in results])
-            return {
-                "reply": f"📜 Нашёл в истории:\n\n{memory_context}",
-                "score": 0,
-                "offer_trial": False
-            }
-        else:
-            return {
-                "reply": "📭 Не нашёл ничего по этому запросу в истории. Уточни, о чём именно ты говорил.",
-                "score": 0,
-                "offer_trial": False
-            }
+        if query or days_ago:
+            results = search_history(user_id, query, days_ago)
+            if results:
+                memory_context = "\n".join([f"{h['role']}: {h['content']}" for h in results[-5:]])
+                return {
+                    "reply": f"📜 Нашёл:\n\n{memory_context}",
+                    "score": 0,
+                    "offer_trial": False
+                }
+            else:
+                return {
+                    "reply": "📭 Не нашёл. Уточни, о чём речь.",
+                    "score": 0,
+                    "offer_trial": False
+                }
     
     user_name = get_fact(user_id, "name")
     user_city = get_fact(user_id, "city")
@@ -334,7 +321,6 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 ПРАВИЛА ДЛЯ ПЛАНА НА ДЕНЬ:
 Если пользователь просит план на день, разбивай по временным слотам: Утро, День, Вечер, Ночь.
 Каждый слот начинай с жирного времени, например **Утро (7:00–9:00)**.
-Внутри слота перечисляй конкретные действия с маркерами.
 
 ПРАВИЛА ДЛЯ ССЫЛОК:
 Если пользователь просит ссылку — дай её. Если точной нет — дай ссылку на поиск или инструкцию за 30 секунд.
@@ -361,33 +347,23 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 }}
 """
     
-    for attempt in range(2):
-        try:
-            response = deepseek.chat.completions.create(
-                model="deepseek-chat",
-                messages=[{"role": "system", "content": prompt}],
-                temperature=0.7 if attempt == 0 else 0.3,
-                max_tokens=500,
-                timeout=30
-            )
-            result = json.loads(response.choices[0].message.content)
-            return result
-        except Exception as e:
-            if attempt == 0:
-                continue
-            else:
-                logger.error(f"❌ Ошибка DeepSeek: {e}")
-                return {
-                    "reply": "😅 Не понял, перефразируй.",
-                    "score": 0,
-                    "offer_trial": False
-                }
-    
-    return {
-        "reply": "😅 Не понял, перефразируй.",
-        "score": 0,
-        "offer_trial": False
-    }
+    try:
+        response = deepseek.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "system", "content": prompt}],
+            temperature=0.9,
+            max_tokens=500,
+            timeout=30
+        )
+        result = json.loads(response.choices[0].message.content)
+        return result
+    except Exception as e:
+        logger.error(f"❌ Ошибка DeepSeek: {e}")
+        return {
+            "reply": "😅 Не понял, перефразируй.",
+            "score": 0,
+            "offer_trial": False
+        }
 
 # ============================================================
 # ОТПРАВКА СООБЩЕНИЙ
@@ -439,29 +415,18 @@ async def webhook(request: Request):
             return JSONResponse({"ok": True})
         
         # === ПОИСК ОРГАНИЗАЦИЙ (2ГИС) ===
-        org_triggers = ["клиник", "поликлиник", "больниц", "аптек", "отель", "гостиниц", "кафе", "ресторан", "салон", "стоматолог", "медцентр", "ветеринар", "зоомагазин", "гинеколог", "невролог", "кардиолог", "травматолог", "лаборатор", "анализ", "узи", "мрт", "кт", "рентген", "эндокринолог", "офтальмолог", "лор", "хирург"]
-        if any(word in text.lower() for word in org_triggers):
+        org_keywords = ["клиник", "поликлиник", "больниц", "аптек", "отель", "гостиниц", "кафе", "ресторан", "салон", "стоматолог", "медцентр", "ветеринар", "зоомагазин"]
+        if any(word in text.lower() for word in org_keywords):
             user_city = get_fact(user_id, "city") or "Белово"
-            items = await search_organization(text, user_city)
-            
-            if items and len(items) > 0:
-                reply = "🏥 **Нашёл в 2ГИС:**\n\n"
-                for i, item in enumerate(items[:3], 1):
-                    name = item.get("name", "Неизвестно")
-                    address = item.get("address", {}).get("full_name", "Адрес не указан")
-                    phones = [p.get("number") for p in item.get("phones", []) if p.get("number")]
-                    site = item.get("site", "")
-                    rating = item.get("rating", {}).get("value", 0)
-                    reviews = item.get("reviews_count", 0)
-                    
-                    reply += f"{i}. **{name}**\n📍 {address}\n"
-                    if phones:
-                        reply += f"📞 {', '.join(phones[:2])}\n"
-                    if site:
-                        reply += f"🌐 [Сайт]({site})\n"
-                    if rating > 0:
-                        reply += f"⭐ {rating} / 5  ({reviews} отзывов)\n"
-                    reply += "\n"
+            result = await search_organization(text, user_city)
+            if result and "error" not in result:
+                reply = f"🏥 **{result['name']}**\n📍 {result['address']}\n"
+                if result['phones']:
+                    reply += f"📞 {', '.join(result['phones'][:3])}\n"
+                if result['site']:
+                    reply += f"🌐 [Сайт]({result['site']})\n"
+                if result['rating'] > 0:
+                    reply += f"⭐ {result['rating']} / 5  ({result['reviews']} отзывов)"
                 await send_message(user_id, reply)
             else:
                 await send_message(
