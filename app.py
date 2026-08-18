@@ -239,11 +239,12 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list) 
 
 ПРАВИЛА ОТВЕТОВ:
 1. **МАКСИМУМ 3 ПРЕДЛОЖЕНИЯ.** Без воды. Коротко и ясно.
-2. **СНАЧАЛА ПОЛЬЗА:** дай конкретный ответ (цифры, маршруты, цены).
-3. **ПОТОМ ВОПРОС:** задай 1 лёгкий вопрос по теме (еда, спорт, машины, работа, досуг).
-4. **НЕ ПОВТОРЯЙСЯ.** Если уже спрашивал про еду — спроси про спорт или машины.
-5. **СТРУКТУРА:** используй маркеры •, жирный шрифт для цифр.
-6. **НЕ БУДЬ ШАБЛОННЫМ.** Отвечай живо, с душой, без «кстати» и «кстати говоря».
+2. **СТРУКТУРА:** Разбивай ответ на 2–3 абзаца с пустыми строками между ними.
+3. **ЭМОДЗИ:** Обязательно добавляй 1–2 эмодзи по теме (✈️, 🍿, 🎬, 🚗, 🏠, 🎥, 📅).
+4. **СНАЧАЛА ПОЛЬЗА:** дай конкретный ответ (цифры, маршруты, цены).
+5. **ПОТОМ ВОПРОС:** задай 1 лёгкий вопрос о привычках (не о деньгах).
+6. **НЕ ПОВТОРЯЙСЯ.** Если уже спрашивал про кино — спроси про спорт или путешествия.
+7. **НЕ БУДЬ ШАБЛОННЫМ.** Отвечай живо, с душой.
 
 {name_instruction}
 {city_instruction}
@@ -255,7 +256,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list) 
 
 ОТВЕТЬ ТОЛЬКО JSON:
 {{
-    "reply": "твой ответ (максимум 3 предложения)",
+    "reply": "твой ответ (максимум 3 предложения, с абзацами и эмодзи)",
     "score": число_от_0_до_100,
     "offer_trial": false
 }}
@@ -266,7 +267,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list) 
             model="deepseek-chat",
             messages=[{"role": "system", "content": prompt}],
             temperature=0.9,
-            max_tokens=250,
+            max_tokens=300,
             timeout=30
         )
         result = json.loads(response.choices[0].message.content)
@@ -344,19 +345,37 @@ async def webhook(request: Request):
         score = result.get("score", 0)
         state["score"] = min(100, state["score"] + score // 2)
         
-        # === ЕСЛИ НЕТ ИМЕНИ — ОТДЕЛЬНЫЙ ЗАПРОС ===
+        # === ЕСЛИ НЕТ ИМЕНИ — СОХРАНЯЕМ ИЛИ СПРАШИВАЕМ ===
         if not get_fact(user_id, "name"):
-            save_message(user_id, "assistant", reply)
-            await send_message(user_id, reply)
-            await send_message(user_id, "Кстати, меня зовут AURA. Давай познакомимся поближе — как мне к тебе обращаться?")
-            return JSONResponse({"ok": True})
+            # Проверяем, не назвал ли пользователь имя в этом сообщении
+            words = text.split()
+            if len(words) == 1 and words[0][0].isupper() and len(words[0]) > 1:
+                save_fact(user_id, "name", words[0])
+                await send_message(user_id, f"Приятно познакомиться, {words[0]}! ✈️")
+                # После сохранения имени — спрашиваем город
+                await send_message(user_id, "А из какого города ты обычно летаешь? Чтобы я сразу искал актуальные рейсы.")
+                return JSONResponse({"ok": True})
+            else:
+                # Если имя не распознано — отправляем полезный ответ и спрашиваем имя
+                save_message(user_id, "assistant", reply)
+                await send_message(user_id, reply)
+                await send_message(user_id, "Кстати, меня зовут AURA. Давай познакомимся поближе — как мне к тебе обращаться?")
+                return JSONResponse({"ok": True})
         
-        # === ЕСЛИ НЕТ ГОРОДА — ОТДЕЛЬНЫЙ ЗАПРОС ===
+        # === ЕСЛИ НЕТ ГОРОДА ===
         if not get_fact(user_id, "city"):
-            save_message(user_id, "assistant", reply)
-            await send_message(user_id, reply)
-            await send_message(user_id, "А из какого города ты обычно летаешь? Чтобы я сразу искал актуальные рейсы.")
-            return JSONResponse({"ok": True})
+            # Проверяем, не назвал ли пользователь город
+            words = text.split()
+            if len(words) == 1 and words[0][0].isupper() and len(words[0]) > 1:
+                save_fact(user_id, "city", words[0])
+                await send_message(user_id, f"Отлично, {get_fact(user_id, 'name')}! Теперь я буду искать рейсы из {words[0]}. Что дальше?")
+                return JSONResponse({"ok": True})
+            else:
+                # Спрашиваем город
+                save_message(user_id, "assistant", reply)
+                await send_message(user_id, reply)
+                await send_message(user_id, "А из какого города ты обычно летаешь? Чтобы я сразу искал актуальные рейсы.")
+                return JSONResponse({"ok": True})
         
         # === ПРЕДЛОЖЕНИЕ ТРИАЛА ===
         if not state["trial_offered"] and state["step"] >= 10 and state["score"] > 60:
