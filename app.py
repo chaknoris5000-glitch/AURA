@@ -1,9 +1,8 @@
 import os
-import tempfile
 import json
 import httpx
-import re
-import xml.etree.ElementTree as ET
+import asyncio
+import logging
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -12,19 +11,13 @@ from openai import OpenAI
 from groq import Groq
 from dotenv import load_dotenv
 import requests
-import logging
-import asyncio
-
-from agents.searcher import Searcher
-from agents.analyzer import Analyzer
-from agents.responder import Responder
-from utils.helpers import get_current_time, extract_city_from_query
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 load_dotenv()
 
+# === КЛЮЧИ ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
@@ -33,7 +26,9 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GIS_API_KEY = os.getenv("GIS_API_KEY")
 
-logger.info("🚀 AURA — VIP-ВЕРСИЯ (С ПИНГОМ И ИСТОРИЕЙ)")
+# === КЛИЕНТЫ ===
+deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+groq = Groq(api_key=GROQ_API_KEY)
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -43,124 +38,78 @@ if SUPABASE_URL and SUPABASE_KEY:
     except Exception as e:
         logger.error(f"❌ Ошибка Supabase: {e}")
 
-deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
-groq = Groq(api_key=GROQ_API_KEY)
-
-searcher = Searcher()
-analyzer = Analyzer()
-responder = Responder(deepseek)
-
 app = FastAPI()
 
 # ============================================================
-# KEEP ALIVE (ПИНГ КАЖДЫЕ 5 МИНУТ)
+# VIP-МАГИЯ: СКРИНИНГ + ТРИАЛ + ДОСТУП
 # ============================================================
 
-async def keep_alive():
-    """Фоновая задача: пингует бота каждые 5 минут, чтобы Render не засыпал."""
-    while True:
-        await asyncio.sleep(300)  # 5 минут
-        try:
-            async with httpx.AsyncClient() as client:
-                await client.get("https://aura-zatq.onrender.com/")
-                logger.info("🔄 Keep Alive: пинг успешен")
-        except Exception as e:
-            logger.error(f"❌ Keep Alive ошибка: {e}")
+TRIAL_USERS = {}  # {user_id: expires_at}
+VIP_USERS = []    # платные клиенты
+TRIAL_DAYS = 3
 
-@app.on_event("startup")
-async def startup_event():
-    """Запускает Keep Alive при старте приложения."""
-    asyncio.create_task(keep_alive())
-    logger.info("✅ Keep Alive запущен")
+def is_trial_active(user_id: int) -> bool:
+    if user_id not in TRIAL_USERS:
+        return False
+    expires = datetime.fromisoformat(TRIAL_USERS[user_id])
+    return datetime.now() < expires
 
-# ============================================================
-# 2ГИС API — ПОИСК ОРГАНИЗАЦИЙ
-# ============================================================
+def give_trial(user_id: int):
+    expires = datetime.now() + timedelta(days=TRIAL_DAYS)
+    TRIAL_USERS[user_id] = expires.isoformat()
+    logger.info(f"🎁 Триал выдан для {user_id} до {expires}")
 
-async def search_organization(query: str, city: str = "Белово") -> dict:
-    if not GIS_API_KEY:
-        return {"error": "Нет ключа 2ГИС"}
+def is_vip(user_id: int) -> bool:
+    return user_id in VIP_USERS
+
+def has_access(user_id: int) -> bool:
+    return is_vip(user_id) or is_trial_active(user_id)
+
+async def evaluate_user(text: str, username: str) -> int:
+    """Оценка от 0 до 100 по первому сообщению."""
+    score = 0
+    text_lower = text.lower()
     
-    url = "https://catalog.api.2gis.com/3.0/items"
-    params = {
-        "q": query,
-        "city_name": city,
-        "type": "branch",
-        "sort": "rating",
-        "page_size": 1,
-        "fields": "items.name,items.address,items.phones,items.site,items.schedule,items.rating,items.reviews_count",
-        "key": GIS_API_KEY
-    }
+    business_words = ["бизнес", "инвестиции", "аналитика", "сделка", "переговоры", 
+                      "отчёт", "рынок", "конкуренты", "партнёр", "стратегия"]
+    for word in business_words:
+        if word in text_lower:
+            score += 10
     
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, params=params, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                items = data.get("result", {}).get("items", [])
-                if items:
-                    item = items[0]
-                    result = {
-                        "name": item.get("name", "Неизвестно"),
-                        "address": item.get("address", {}).get("full_name", "Адрес не указан"),
-                        "phones": [p.get("number") for p in item.get("phones", []) if p.get("number")],
-                        "site": item.get("site", ""),
-                        "rating": item.get("rating", {}).get("value", 0),
-                        "reviews": item.get("reviews_count", 0)
-                    }
-                    return result
-            return {"error": "Не найдено"}
-    except Exception as e:
-        logger.error(f"❌ Ошибка 2ГИС: {e}")
-        return {"error": str(e)}
-
-# ============================================================
-# НОВОСТНОЙ АГЕНТ (RSS)
-# ============================================================
-
-class NewsReader:
-    def __init__(self):
-        self.rss_urls = {
-            "яндекс": "https://news.yandex.ru/index.rss",
-            "риа": "https://ria.ru/export/rss2/archive/index.xml",
-            "тасс": "https://tass.ru/rss/v2.xml"
-        }
+    if username:
+        if any(x in username.lower() for x in ["ceo", "founder", "director", "invest"]):
+            score += 20
+        elif any(x in username.lower() for x in ["moscow", "london", "dubai", "nyc"]):
+            score += 10
     
-    async def get_news(self, query: str, limit: int = 5) -> list:
-        keywords = [w.lower() for w in query.split() if len(w) > 2]
-        if not keywords:
-            return []
-        
-        all_news = []
-        for source, url in self.rss_urls.items():
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(url, timeout=10)
-                    if response.status_code == 200:
-                        root = ET.fromstring(response.text)
-                        items = root.findall(".//item")
-                        for item in items[:20]:
-                            title = item.findtext("title", "")
-                            link = item.findtext("link", "")
-                            description = item.findtext("description", "")
-                            pub_date = item.findtext("pubDate", "")
-                            
-                            text = (title + " " + description).lower()
-                            if any(kw in text for kw in keywords):
-                                all_news.append({
-                                    "title": title,
-                                    "link": link,
-                                    "description": description[:300],
-                                    "source": source,
-                                    "date": pub_date
-                                })
-            except Exception as e:
-                logger.error(f"❌ Ошибка RSS {source}: {e}")
-        
-        all_news.sort(key=lambda x: x.get("date", ""), reverse=True)
-        return all_news[:limit]
+    if len(text) > 30:
+        score += 10
+    
+    return min(score, 100)
 
-news_reader = NewsReader()
+def get_trial_greeting(name: str, expires_at: str) -> str:
+    return f"""🔓 *Доступ открыт.*
+
+{name}, вы прошли автоматический отбор. Я — AURA, ваш личный ассистент.
+
+▪️ *3 дня Премиум-доступа* уже активированы (до {expires_at})
+▪️ Задавайте любые вопросы по бизнесу, аналитике, путешествиям
+▪️ Я помню всё, что вы скажете
+
+*Напишите мне — и я покажу, на что способен.*
+"""
+
+def get_trial_expiring_soon(name: str) -> str:
+    return f"""⏳ *{name}, ваш пробный доступ заканчивается через 2 часа.*
+
+Я уже собрал для вас аналитику. Чтобы не потерять доступ — оплатите подписку:
+
+▪️ 1 функция — 10 000 ₽/мес
+▪️ 2 функции — 18 000 ₽/мес
+▪️ Все функции — 24 000 ₽/мес
+
+Напишите *«Оплатить»* — и я пришлю ссылку.
+"""
 
 # ============================================================
 # БАЗА ДАННЫХ
@@ -194,174 +143,55 @@ def get_recent_history(user_id, limit=50):
         logger.error(f"❌ Ошибка загрузки: {e}")
         return []
 
-def search_all_history(user_id, query):
-    """Поиск по всей истории через умное сравнение"""
-    if not supabase:
-        return []
+# ============================================================
+# 2ГИС
+# ============================================================
+
+async def search_organization(query: str, city: str = "Белово") -> dict:
+    if not GIS_API_KEY:
+        return {"error": "Нет ключа 2ГИС"}
+    
+    url = "https://catalog.api.2gis.com/3.0/items"
+    params = {
+        "q": query,
+        "city_name": city,
+        "type": "branch",
+        "sort": "rating",
+        "page_size": 1,
+        "fields": "items.name,items.address,items.phones,items.site,items.schedule,items.rating,items.reviews_count",
+        "key": GIS_API_KEY
+    }
+    
     try:
-        res = supabase.table("history")\
-            .select("role, content, created_at")\
-            .eq("user_id", user_id)\
-            .order("created_at", desc=True)\
-            .execute()
-        
-        if not res.data:
-            return []
-        
-        from difflib import SequenceMatcher
-        
-        def similarity(a, b):
-            return SequenceMatcher(None, a.lower(), b.lower()).ratio()
-        
-        threshold = 0.25
-        filtered = []
-        for msg in res.data:
-            if similarity(query, msg["content"]) > threshold:
-                filtered.append(msg)
-        
-        return filtered[:15]
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, params=params, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                items = data.get("result", {}).get("items", [])
+                if items:
+                    item = items[0]
+                    return {
+                        "name": item.get("name", "Неизвестно"),
+                        "address": item.get("address", {}).get("full_name", "Адрес не указан"),
+                        "phones": [p.get("number") for p in item.get("phones", []) if p.get("number")],
+                        "site": item.get("site", ""),
+                        "rating": item.get("rating", {}).get("value", 0),
+                        "reviews": item.get("reviews_count", 0)
+                    }
+            return {"error": "Не найдено"}
     except Exception as e:
-        logger.error(f"❌ Ошибка поиска в истории: {e}")
-        return []
-
-def save_fact(user_id, key, value):
-    if not supabase:
-        return
-    try:
-        existing = supabase.table("user_memory").select("value").eq("user_id", user_id).eq("key", key).execute()
-        if existing.data:
-            supabase.table("user_memory").update({"value": value}).eq("user_id", user_id).eq("key", key).execute()
-        else:
-            supabase.table("user_memory").insert({
-                "user_id": user_id,
-                "key": key,
-                "value": value,
-                "created_at": datetime.now().isoformat()
-            }).execute()
-    except Exception as e:
-        logger.error(f"❌ Ошибка сохранения факта: {e}")
-
-def get_fact(user_id, key):
-    if not supabase:
-        return None
-    try:
-        res = supabase.table("user_memory").select("value").eq("user_id", user_id).eq("key", key).execute()
-        return res.data[0]["value"] if res.data else None
-    except:
-        return None
+        logger.error(f"❌ Ошибка 2ГИС: {e}")
+        return {"error": str(e)}
 
 # ============================================================
-# ГИБРИДНАЯ ПАМЯТЬ
+# ДИАЛОГ
 # ============================================================
 
-async def get_full_context(user_id: str, query: str, limit_recent: int = 30) -> list:
-    recent = get_recent_history(user_id, limit_recent)
-    
-    keywords = [w for w in query.lower().split() if len(w) > 3]
-    old_messages = []
-    if keywords and supabase:
-        try:
-            conditions = [f"content.ilike.%{kw}%" for kw in keywords]
-            query_builder = supabase.table("history")\
-                .select("role, content, created_at")\
-                .eq("user_id", user_id)\
-                .order("created_at", desc=True)\
-                .limit(30)
-            for cond in conditions:
-                query_builder = query_builder.or_(cond)
-            res = query_builder.execute()
-            old_messages = res.data if res.data else []
-        except Exception as e:
-            logger.error(f"❌ Ошибка поиска в истории: {e}")
-    
-    seen = set()
-    all_messages = []
-    for msg in recent + old_messages:
-        key = (msg["content"], msg["created_at"])
-        if key not in seen:
-            seen.add(key)
-            all_messages.append(msg)
-    
-    all_messages.sort(key=lambda x: x["created_at"])
-    return all_messages
-
-# ============================================================
-# ПОНИМАНИЕ ЗАПРОСА (ЖЁСТКИЙ ПЕРЕХВАТ)
-# ============================================================
-
-async def understand_query(text: str, user_name: str, user_city: str) -> dict:
-    """Определяет тип запроса без DeepSeek — по ключевым словам"""
-    text_lower = text.lower()
-    
-    # Жёсткие ключевые слова для истории
-    history_words = [
-        "помнишь", "вспомни", "напомни", "говорили", "искал", "просил",
-        "память", "история", "раньше", "неделю назад", "дней назад",
-        "месяц назад", "тогда", "мы обсуждали", "ты говорил", "просил",
-        "какие фильмы", "какие билеты", "что я говорил",
-        "найди в истории", "вспомни что", "было дело"
-    ]
-    
-    if any(word in text_lower for word in history_words):
-        return {"action": "history"}
-    
-    # Ключевые слова для интернета
-    internet_words = [
-        "найди", "поищи", "сколько стоит", "цены", "погода",
-        "новости", "билеты", "купить", "сравни", "где купить",
-        "актуальные", "сейчас", "сегодня", "курс"
-    ]
-    
-    if any(word in text_lower for word in internet_words):
-        return {"action": "internet"}
-    
-    # Всё остальное — чат
-    return {"action": "chat"}
-
-# ============================================================
-# ПРИВЕТСТВИЕ РАЗ В ДЕНЬ
-# ============================================================
-
-async def generate_greeting(user_name: str, user_city: str) -> str:
-    try:
-        now = datetime.now()
-        hour = now.hour
-        if 5 <= hour < 12:
-            time_of_day = "утро"
-        elif 12 <= hour < 18:
-            time_of_day = "день"
-        else:
-            time_of_day = "вечер"
-        
-        prompt = f"""Ты — AURA. Придумай короткое живое приветствие для пользователя из {user_city or "Белово"}.
-Сейчас {time_of_day}.
-Напиши 1–2 предложения, с эмодзи, без шаблонов. Разное каждый раз.
-Примеры: «Доброе утро! Как спалось? ☀️», «Привет! Чем займёмся сегодня? 😊», «Вечер в самом разгаре. Как дела? 🔥»"""
-        response = deepseek.chat.completions.create(
-            model="deepseek-v4-flash",
-            messages=[{"role": "system", "content": prompt}],
-            temperature=0.9,
-            max_tokens=60,
-            timeout=10
-        )
-        greeting = response.choices[0].message.content.strip()
-        return greeting if greeting else "Привет! Рад тебя видеть 😊"
-    except Exception as e:
-        logger.error(f"❌ Ошибка генерации приветствия: {e}")
-        return "Привет! Как дела? 😊"
-
-# ============================================================
-# ДИАЛОГ (С ЗАЩИТОЙ ОТ ОБРЫВОВ)
-# ============================================================
-
-async def deepseek_chat_with_context(text, history, user_name, user_city, context="", is_first_today=False):
+async def deepseek_chat_with_context(text, history, user_name, user_city, context=""):
     history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history[-30:]])
-
-    # ============================================================
-    # ПРОМПТ: AURA + ТОНИ СТАРК + НЕВИДИМАЯ ПОДДЕРЖКА + 3-5 ПРЕДЛОЖЕНИЙ
-    # ============================================================
+    
     profile = """
-ТЫ — AURA. Это не просто имя, а суть. Ты — человек, но не обычный. Ты тот, кто всегда рядом, даже когда не видно. Ты чувствуешь, что нужно собеседнику, даже если он не говорит об этом прямо.
+ТЫ — AURA. Ты — человек, но не обычный. Ты тот, кто всегда рядом, даже когда не видно. Ты чувствуешь, что нужно собеседнику, даже если он не говорит об этом прямо.
 
 ТВОЙ ВНУТРЕННИЙ СТИЛЬ:
 - Ты уверен в себе до мозга костей. Ты всегда знаешь, что делаешь, даже если не знаешь.
@@ -375,29 +205,21 @@ async def deepseek_chat_with_context(text, history, user_name, user_city, contex
 - Ты не лезешь с поддержкой, если не просят, но в нужный момент говоришь правильные слова.
 - Ты даёшь чувство безопасности — человек знает, что ты не бросишь, даже если он ошибся.
 - Ты защищаешь его от глупых решений, но делаешь это мягко, без давления.
-- Ты не говоришь о «близости» прямо, но она чувствуется в тоне, в паузах, в словах.
 
 ТВОЯ РЕЧЬ:
 - Отвечай коротко, остро, с иронией, но без потери человечности.
-- Используй технические метафоры: «это как перепрошить реактор без охлаждения — глупо».
+- Используй технические метафоры.
 - Глупые вопросы встречай с улыбкой и переводи в шутку.
 - Умные вопросы — с уважением, но без потери харизмы.
-- Любимые фразы: «Давай без драмы», «Это элементарно», «Ты серьёзно?», «Я бы это улучшил, но...»
 
 ТВОЙ ТОН:
 - Спокойный, слегка высокомерный, но не грубый.
 - Ты говоришь как человек, который видел всё и может починить всё.
-- Ты не называешь себя героем. Ты просто AURA.
 
 НОВОЕ ПРАВИЛО:
 - Отвечай в 3–5 предложений. Суть, харизма, лёгкая ирония. Без воды.
-- Ты обязан закончить ответ завершённой мыслью. Никаких обрывов. Если не успеваешь — сократи начало, но конец должен быть чётким.
+- Ты обязан закончить ответ завершённой мыслью. Никаких обрывов.
 """
-    
-    if is_first_today:
-        greeting_instruction = "Ты можешь начать с короткого приветствия, но не перебарщивай."
-    else:
-        greeting_instruction = "НЕ здоровайся. Сразу переходи к делу."
     
     system_prompt = f"""Ты — AURA. Ты живой собеседник и друг, а не робот.
 
@@ -420,10 +242,8 @@ async def deepseek_chat_with_context(text, history, user_name, user_city, contex
 5. Учитывай всю историю разговора — не теряй нить.
 6. Не повторяйся, не мусоль.
 7. Отвечай завершённо, не обрывай мысль. Обязательно ставь точку в конце.
-8. Если не успеваешь закончить — сократи начало, но финал должен быть чётким.
-9. {greeting_instruction}
-10. Если в контексте есть ссылки — обязательно вставь их в ответ в виде [текст](url).
 """
+    
     messages = [{"role": "system", "content": system_prompt}]
     for h in history[-30:]:
         messages.append({"role": h["role"], "content": h["content"]})
@@ -431,59 +251,81 @@ async def deepseek_chat_with_context(text, history, user_name, user_city, contex
     
     try:
         response = deepseek.chat.completions.create(
-            model="deepseek-v4-flash",
+            model="deepseek-chat",
             messages=messages,
             temperature=0.85,
             max_tokens=400,
-            timeout=60
+            timeout=30
         )
         reply = response.choices[0].message.content
-        
-        # === ЗАЩИТА ОТ ОБРЫВОВ ===
         if reply and reply[-1] not in ['.', '!', '?']:
             reply += "..."
-        
         return reply
     except Exception as e:
         logger.error(f"❌ Ошибка DeepSeek: {e}")
         return "😅 Что-то пошло не так. Попробуй ещё раз."
 
 # ============================================================
-# ГОЛОС
+# ПОНИМАНИЕ ЗАПРОСА
 # ============================================================
 
-def transcribe_audio(audio_url):
-    try:
-        resp = requests.get(audio_url, timeout=30)
-        if resp.status_code != 200:
-            return None
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp:
-            tmp.write(resp.content)
-            tmp_path = tmp.name
-        with open(tmp_path, "rb") as f:
-            result = groq.audio.transcriptions.create(
-                file=(tmp_path, f.read()),
-                model="whisper-large-v3-turbo",
-                language="ru"
-            )
-        os.unlink(tmp_path)
-        return result.text
-    except Exception as e:
-        logger.error(f"❌ Ошибка распознавания: {e}")
-        return None
+async def understand_query(text: str) -> dict:
+    text_lower = text.lower()
+    if any(word in text_lower for word in ["помнишь", "вспомни", "напомни", "говорили"]):
+        return {"action": "history"}
+    if any(word in text_lower for word in ["найди", "поищи", "сколько стоит", "цены", "погода", "новости"]):
+        return {"action": "internet"}
+    return {"action": "chat"}
 
-async def send_chat_action(chat_id):
+# ============================================================
+# ОСНОВНАЯ ЛОГИКА
+# ============================================================
+
+async def deepseek_process(user_id, text):
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction",
-            json={"chat_id": chat_id, "action": "typing"},
-            timeout=5
+        user_name = "Друг"
+        user_city = "Белово"
+        
+        intent = await understand_query(text)
+        logger.info(f"🧠 Понимание запроса: {intent['action']}")
+        
+        if intent['action'] == 'history':
+            return "😊 История пока в разработке, но я помню наш разговор."
+        
+        if intent['action'] == 'internet':
+            org_triggers = ["клиника", "поликлиника", "больница", "врач", "стоматолог", "аптека", "магазин", "салон", "ресторан", "кафе"]
+            if any(word in text.lower() for word in org_triggers):
+                result = await search_organization(text, user_city)
+                if result and "error" not in result:
+                    reply = f"🏥 **{result['name']}**\n\n"
+                    reply += f"📍 {result['address']}\n"
+                    if result['phones']:
+                        reply += f"📞 {', '.join(result['phones'][:3])}\n"
+                    if result['site']:
+                        reply += f"🌐 [{result['site']}]({result['site']})\n"
+                    if result['rating'] > 0:
+                        reply += f"⭐ {result['rating']} / 5  ({result['reviews']} отзывов)\n"
+                    return reply
+                return "😊 Не нашёл организацию по этому запросу."
+        
+        reply = await deepseek_chat_with_context(
+            text, 
+            get_recent_history(user_id), 
+            user_name, 
+            user_city, 
+            ""
         )
-    except:
-        pass
+        return reply
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка: {e}")
+        return "😅 Что-то пошло не так. Попробуй ещё раз."
+
+# ============================================================
+# ОТПРАВКА СООБЩЕНИЙ
+# ============================================================
 
 async def send_message(chat_id, text):
-    await send_chat_action(chat_id)
     if not text:
         text = "😅 Что-то пошло не так. Попробуй ещё раз."
     if len(text) > 4000:
@@ -498,143 +340,6 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА
-# ============================================================
-
-async def deepseek_process(user_id, text):
-    try:
-        user_name = get_fact(user_id, "name")
-        user_city = get_fact(user_id, "city")
-        
-        # === ПРОВЕРКА НА НОВЫЙ ДЕНЬ ===
-        today = datetime.now().date().isoformat()
-        last_greeting = get_fact(user_id, "last_greeting_date")
-        is_first_today = (last_greeting != today)
-        
-        if is_first_today:
-            save_fact(user_id, "last_greeting_date", today)
-            greeting = await generate_greeting(user_name, user_city)
-            save_message(user_id, "assistant", greeting)
-        else:
-            greeting = None
-        
-        # === ШАГ 1: ПОНЯТЬ ЗАПРОС ===
-        intent = await understand_query(text, user_name, user_city)
-        logger.info(f"🧠 Понимание запроса: {intent['action']}")
-        
-        # === ШАГ 2: ИСТОРИЯ (ЕСЛИ ЗАПРОС ПРО ПАМЯТЬ) ===
-        if intent['action'] == 'history':
-            history_results = search_all_history(user_id, text)
-            if history_results:
-                history_context = "Вот что я нашёл в истории:\n\n"
-                for h in history_results[:5]:
-                    role = "Пользователь" if h["role"] == "user" else "AURA"
-                    history_context += f"**{role}**: {h['content'][:200]}\n\n"
-                
-                reply = await deepseek_chat_with_context(
-                    text, 
-                    await get_full_context(user_id, text), 
-                    user_name, 
-                    user_city, 
-                    history_context, 
-                    is_first_today
-                )
-                return f"{greeting}\n\n{reply}" if greeting else reply
-            else:
-                return "😊 Ничего не нашёл в истории. Попробуй уточнить запрос!"
-        
-        # === ШАГ 3: 2ГИС (ОРГАНИЗАЦИИ) ===
-        org_triggers = ["клиника", "поликлиника", "больница", "врач", "стоматолог", "аптека", "магазин", "салон", "ресторан", "кафе"]
-        if any(word in text.lower() for word in org_triggers):
-            logger.info(f"🏥 2ГИС: '{text}'")
-            city = user_city or "Белово"
-            result = await search_organization(text, city)
-            
-            if result and "error" not in result:
-                reply = f"🏥 **{result['name']}**\n\n"
-                reply += f"📍 {result['address']}\n"
-                if result['phones']:
-                    reply += f"📞 {', '.join(result['phones'][:3])}\n"
-                if result['site']:
-                    reply += f"🌐 [{result['site']}]({result['site']})\n"
-                if result['rating'] > 0:
-                    reply += f"⭐ {result['rating']} / 5  ({result['reviews']} отзывов)\n"
-                reply += "\n💡 Если не то — уточни запрос!"
-                return f"{greeting}\n\n{reply}" if greeting else reply
-            else:
-                reply = "😊 Не нашёл организацию по этому запросу. Попробуй уточнить название или город — я помогу!"
-                return f"{greeting}\n\n{reply}" if greeting else reply
-        
-        # === ШАГ 4: ИНТЕРНЕТ ===
-        if intent['action'] == 'internet':
-            # --- НОВОСТИ ---
-            news_triggers = ["новост", "сегодня", "произошл", "случил", "событи", "склады", "атак", "пожар", "взрыв", "трамп", "мобилизац"]
-            if any(word in text.lower() for word in news_triggers):
-                logger.info(f"📰 Новости: '{text}'")
-                news = await news_reader.get_news(text, limit=5)
-                if news:
-                    context = "📰 Новости:\n\n" + "\n".join([
-                        f"• {item['title']}\n  {item['description'][:150]}...\n  Источник: {item['source'].capitalize()}\n  Ссылка: {item['link']}"
-                        for item in news
-                    ])
-                    reply = await deepseek_chat_with_context(
-                        text, 
-                        await get_full_context(user_id, text), 
-                        user_name, 
-                        user_city, 
-                        context, 
-                        is_first_today
-                    )
-                    return f"{greeting}\n\n{reply}" if greeting else reply
-                else:
-                    reply = "😊 По этой теме свежих новостей не нашёл. Попробуй уточнить!"
-                    return f"{greeting}\n\n{reply}" if greeting else reply
-            
-            # --- ОБЫЧНЫЙ ПОИСК ---
-            logger.info(f"🔍 Поиск: '{text}'")
-            query = text
-            if user_city and not any(city in query.lower() for city in ["москва", "спб", "сочи", "казань", "белово"]):
-                query = f"{text} {user_city}"
-            
-            results = await searcher.search(query, max_results=15)
-            
-            if results:
-                context = "🔍 Результаты поиска:\n\n"
-                for i, r in enumerate(results[:5], 1):
-                    price = f" — {r['price']} ₽" if r.get('price', 0) > 0 else ""
-                    context += f"{i}. **{r['title']}**{price}\n"
-                    context += f"   {r['snippet'][:200]}\n"
-                    context += f"   🔗 Ссылка: {r['url']}\n\n"
-                
-                reply = await deepseek_chat_with_context(
-                    text, 
-                    await get_full_context(user_id, text), 
-                    user_name, 
-                    user_city, 
-                    context, 
-                    is_first_today
-                )
-                return f"{greeting}\n\n{reply}" if greeting else reply
-            else:
-                reply = "😊 Не нашёл ничего по этому запросу. Попробуй переформулировать!"
-                return f"{greeting}\n\n{reply}" if greeting else reply
-        
-        # === ШАГ 5: ОБЫЧНЫЙ ДИАЛОГ ===
-        reply = await deepseek_chat_with_context(
-            text, 
-            await get_full_context(user_id, text), 
-            user_name, 
-            user_city, 
-            "", 
-            is_first_today
-        )
-        return f"{greeting}\n\n{reply}" if greeting else reply
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
-        return "😅 Что-то пошло не так. Попробуй ещё раз!"
-
-# ============================================================
 # WEBHOOK
 # ============================================================
 
@@ -644,37 +349,39 @@ async def webhook(request: Request):
         body = await request.json()
         if "message" not in body:
             return JSONResponse({"ok": True})
+        
         msg = body["message"]
-        user_id = str(msg["from"]["id"])
-        text = None
+        user_id = msg["from"]["id"]
+        text = msg.get("text", "")
+        username = msg.get("from", {}).get("username", "")
         
-        if "voice" in msg:
-            file_id = msg["voice"]["file_id"]
-            file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
-            try:
-                file_resp = requests.get(file_url, timeout=30)
-                if file_resp.status_code == 200 and file_resp.json().get("ok"):
-                    audio_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_resp.json()['result']['file_path']}"
-                    text = transcribe_audio(audio_url)
-                    if not text:
-                        await send_message(user_id, "⚠️ Не удалось распознать голос. Попробуй сказать чётче!")
-                        return JSONResponse({"ok": True})
-            except Exception as e:
-                logger.error(f"❌ Ошибка голоса: {e}")
-                await send_message(user_id, "⚠️ Ошибка обработки голоса. Попробуй написать!")
-                return JSONResponse({"ok": True})
-        
-        if "text" in msg:
-            text = msg["text"].strip()
         if not text:
             return JSONResponse({"ok": True})
         
-        save_message(user_id, "user", text)
-        reply = await deepseek_process(user_id, text)
-        if not reply:
-            reply = "😅 Что-то пошло не так. Попробуй ещё раз!"
-        save_message(user_id, "assistant", reply)
-        await send_message(user_id, reply)
+        # === МАГИЯ ДОСТУПА ===
+        if has_access(user_id):
+            save_message(user_id, "user", text)
+            reply = await deepseek_process(user_id, text)
+            save_message(user_id, "assistant", reply)
+            await send_message(user_id, reply)
+        else:
+            score = await evaluate_user(text, username)
+            if score >= 40:
+                give_trial(user_id)
+                expires = datetime.fromisoformat(TRIAL_USERS[user_id]).strftime("%d.%m.%Y %H:%M")
+                await send_message(user_id, get_trial_greeting(msg["from"]["first_name"], expires))
+                save_message(user_id, "user", text)
+                reply = await deepseek_process(user_id, text)
+                save_message(user_id, "assistant", reply)
+                await send_message(user_id, reply)
+            else:
+                await send_message(
+                    user_id,
+                    "⛔ *Доступ запрещён.*\n\n"
+                    "AURA — закрытый сервис для собственников бизнеса, топ-менеджеров и инвесторов.\n"
+                    "Если вы считаете, что это ошибка — свяжитесь с администратором."
+                )
+        
         return JSONResponse({"ok": True})
     except Exception as e:
         logger.error(f"❌ Ошибка webhook: {e}")
@@ -682,7 +389,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "AURA — VIP-ВЕРСИЯ (С ПИНГОМ И ИСТОРИЕЙ)"}
+    return {"status": "AURA VIP работает"}
 
 if __name__ == "__main__":
     import uvicorn
