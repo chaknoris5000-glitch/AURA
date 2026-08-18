@@ -63,7 +63,7 @@ def save_message(user_id, role, content):
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения: {e}")
 
-def get_recent_history(user_id, limit=50):
+def get_recent_history(user_id, limit=30):
     if not supabase:
         return []
     try:
@@ -76,6 +76,28 @@ def get_recent_history(user_id, limit=50):
         return list(reversed(res.data)) if res.data else []
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки: {e}")
+        return []
+
+def search_history(user_id, query, days_ago=None):
+    """Ищет по всей истории пользователя по ключевым словам и дате."""
+    if not supabase:
+        return []
+    try:
+        builder = supabase.table("history")\
+            .select("role, content, created_at")\
+            .eq("user_id", user_id)
+        
+        if days_ago:
+            cutoff = datetime.now() - timedelta(days=days_ago)
+            builder = builder.gte("created_at", cutoff.isoformat())
+        
+        if query:
+            builder = builder.ilike("content", f"%{query}%")
+        
+        res = builder.order("created_at", desc=True).limit(10).execute()
+        return list(reversed(res.data)) if res.data else []
+    except Exception as e:
+        logger.error(f"❌ Ошибка поиска в истории: {e}")
         return []
 
 # ============================================================
@@ -119,15 +141,45 @@ async def search_organization(query: str, city: str = "Белово") -> dict:
         return {"error": str(e)}
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА: ДИАЛОГ С ИНТЕРВЬЮ
+# ОСНОВНАЯ ЛОГИКА: ДИАЛОГ С ИНТЕРВЬЮ + ПОИСК В ИСТОРИИ
 # ============================================================
 
 async def deepseek_interview(user_id: int, text: str, step: int, history: list) -> dict:
     """
-    Генерирует ответ бота и обновляет скрытый скор.
-    Возвращает: {"reply": "...", "score": int, "offer_trial": bool}
+    Генерирует ответ бота, проверяет запрос на «помнишь» и обновляет скор.
     """
     
+    # === ШАГ 1: ПРОВЕРКА НА ЗАПРОС В ИСТОРИЮ ===
+    memory_triggers = ["помнишь", "напомни", "вспомни", "подскажи", "что я говорил", "что я просил", "на той неделе", "в прошлый раз"]
+    if any(word in text.lower() for word in memory_triggers):
+        query_words = [w for w in text.split() if len(w) > 2 and w.lower() not in memory_triggers]
+        query = " ".join(query_words) if query_words else None
+        
+        days_ago = None
+        if "неделе" in text.lower():
+            days_ago = 7
+        elif "месяц" in text.lower():
+            days_ago = 30
+        elif "вчера" in text.lower():
+            days_ago = 1
+        
+        if query or days_ago:
+            results = search_history(user_id, query, days_ago)
+            if results:
+                memory_context = "\n".join([f"{h['role']}: {h['content']}" for h in results[-5:]])
+                return {
+                    "reply": f"📜 Вот что я нашёл в истории по вашему запросу:\n\n{memory_context}\n\nЭто всё, что я помню. Если нужно что-то ещё — уточните.",
+                    "score": 0,
+                    "offer_trial": False
+                }
+            else:
+                return {
+                    "reply": "📭 Не нашёл ничего по вашему запросу в истории. Возможно, мы ещё не обсуждали это, или я что-то упустил. Уточните, о чём именно вы говорили.",
+                    "score": 0,
+                    "offer_trial": False
+                }
+    
+    # === ШАГ 2: ОСНОВНОЙ ДИАЛОГ (ЕСЛИ ЭТО НЕ ЗАПРОС В ИСТОРИЮ) ===
     history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history[-15:]])
     
     prompt = f"""Ты — AURA. Ты живой собеседник, а не робот. Твой стиль — Тони Старк: уверенный, с иронией, но человечный.
@@ -135,14 +187,20 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list) 
 Твоя СКРЫТАЯ ЗАДАЧА за 10–15 сообщений понять, насколько этот человек платёжеспособен и готов ли платить за ассистента.
 НЕ СПРАШИВАЙ ПРЯМО О ДЕНЬГАХ. Оценивай по косвенным признакам: путешествия, рестораны, увлечения, привычки, отношение ко времени.
 
-ПРАВИЛА:
+ПРАВИЛА ФОРМАТИРОВАНИЯ ОТВЕТОВ:
+1. Всегда используй **структурированный текст**: разбивай на абзацы, используй списки и жирный шрифт.
+2. Цены, даты и ключевые цифры выделяй жирным (**цифра**).
+3. Если перечисляешь варианты (билеты, отели, рестораны) — используй нумерованные списки (1., 2., 3.).
+4. Разбивай ответ на смысловые блоки с помощью пустых строк.
+5. Используй эмодзи-маркеры в начале блоков: ✈️ — авиа, 🍽️ — еда, 💰 — цены, ⏰ — время, 📍 — место, 🎬 — развлечения, 🔥 — важное.
+
+ПРАВИЛА ДИАЛОГА:
 1. Отвечай на вопрос пользователя, но в конце каждого ответа добавляй новый вопрос, чтобы узнать его лучше.
 2. НЕ ЗАЦИКЛИВАЙСЯ на одной теме. Если он говорит про еду — спроси про путешествия, потом про работу, потом про хобби.
 3. Если пользователь отвечает односложно (да/нет/нормально) — не дави, но мягко переключай тему.
-4. Используй 1–2 эмодзи, которые соответствуют теме разговора (✈️, 🍽️, 💰, ⏰, 🧐, 🔥, 🎮, 🏔️, 📊 и т.д.).
-5. Если ты уже задал 5–7 вопросов и видишь, что человек не расположен к диалогу — мягко предложи ему триал на 3 дня.
+4. НЕ ПРЕДЛАГАЙ ТРИАЛ РАНЬШЕ, ЧЕМ ПОСЛЕ 7 СООБЩЕНИЙ. Дай человеку раскрыться.
 
-СТАТУС:
+ТЕКУЩИЙ СТАТУС:
 - Шаг: {step} / 15
 - Предыдущие сообщения:
 {history_text}
@@ -152,11 +210,11 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list) 
 Твоя задача:
 1. Ответь пользователю (по существу, если он что-то спросил).
 2. Добавь вопрос, чтобы узнать его лучше.
-3. Если считаешь, что пора предложить триал — сделай это мягко, как предложение, а не как решение.
+3. Если считаешь, что пора предложить триал (после 7 сообщений и если пользователь проявил интерес) — сделай это мягко, как предложение, а не как решение.
 
 ОТВЕТЬ ТОЛЬКО JSON:
 {{
-    "reply": "твой ответ пользователю",
+    "reply": "твой ответ пользователю (с форматированием!)",
     "score": число_от_0_до_100,
     "offer_trial": true_или_false
 }}
@@ -167,7 +225,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list) 
             model="deepseek-chat",
             messages=[{"role": "system", "content": prompt}],
             temperature=0.85,
-            max_tokens=500,
+            max_tokens=600,
             timeout=30
         )
         result = json.loads(response.choices[0].message.content)
@@ -224,7 +282,6 @@ async def webhook(request: Request):
                 "Я — твой будущий ассистент. Помогаю экономить время и деньги.\n"
                 "Давай познакомимся? Просто напиши, что тебя интересует — я всегда на связи."
             )
-            # Сохраняем приветствие в историю
             save_message(user_id, "assistant", "Привет! Я AURA. 👋 ...")
             return JSONResponse({"ok": True})
         
@@ -242,7 +299,6 @@ async def webhook(request: Request):
             
             # Если предложение уже было сделано — просто общаемся
             if state.get("trial_offered", False):
-                # Здесь можно обычный ответ через диалог, но для простоты используем тот же метод
                 result = await deepseek_interview(user_id, text, state["step"], state["history"])
                 reply = result.get("reply", "😅 Не понял, попробуй ещё раз.")
                 save_message(user_id, "assistant", reply)
@@ -256,12 +312,11 @@ async def webhook(request: Request):
                 score = result.get("score", 0)
                 state["score"] = min(100, state["score"] + score // 2)
                 
-                # Если пользователь активно уклоняется (мало слов) — раньше предлагаем триал
-                if state["step"] > 5 and len(text.split()) < 3:
-                    result["offer_trial"] = True
-                
-                # Если скор > 60 или offer_trial == True
-                if state["score"] > 60 or result.get("offer_trial", False):
+                # Предлагаем триал, только если:
+                # - Шаг > 7 (пользователь уже пообщался)
+                # - Скор > 60 ИЛИ пользователь сам проявил интерес (offer_trial == True)
+                # - ИЛИ пользователь активно уклоняется (короткие ответы)
+                if state["step"] > 7 and (state["score"] > 60 or result.get("offer_trial", False) or len(text.split()) < 3):
                     state["trial_offered"] = True
                     reply += "\n\n🔥 Слушай, я вижу, что ты ценишь время. Давай я дам тебе доступ на 3 дня. Ты сам всё посмотришь и решишь, нужно это тебе или нет. Как тебе идея?"
                 
