@@ -44,7 +44,7 @@ app = FastAPI()
 # ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
 # ============================================================
 
-user_states = {}  # {user_id: {'step': 0, 'score': 0, 'trial_offered': False}}
+user_states = {}  # {user_id: {'step': 0, 'score': 0, 'trial_offered': False, 'offer_count': 0}}
 
 # ============================================================
 # РАБОТА С ПАМЯТЬЮ (FACTS)
@@ -103,6 +103,33 @@ def save_trial_status(user_id, started, ended):
         logger.error(f"❌ Ошибка сохранения триала: {e}")
 
 # ============================================================
+# ДЕТЕКТОР ЭМОЦИЙ (ЧЕРЕЗ DEEPSEEK)
+# ============================================================
+
+async def detect_emotion(text: str) -> dict:
+    try:
+        prompt = f"""
+Проанализируй эмоцию в сообщении пользователя: "{text}"
+Верни JSON с двумя полями:
+- emotion: одна из (радость, грусть, гнев, страх, удивление, отвращение, спокойствие)
+- confidence: число от 0 до 1
+
+Ответь строго JSON.
+"""
+        response = deepseek.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "system", "content": prompt}],
+            temperature=0.3,
+            max_tokens=100,
+            timeout=10
+        )
+        result = json.loads(response.choices[0].message.content)
+        return result
+    except Exception as e:
+        logger.error(f"❌ Ошибка детектора эмоций: {e}")
+        return {"emotion": "спокойствие", "confidence": 0.5}
+
+# ============================================================
 # ИСТОРИЯ СООБЩЕНИЙ
 # ============================================================
 
@@ -134,23 +161,18 @@ def get_recent_history(user_id, limit=20):
         logger.error(f"❌ Ошибка загрузки: {e}")
         return []
 
-def search_history(user_id, query, days_ago=None):
+def save_emotion(user_id, emotion, confidence):
     if not supabase:
-        return []
+        return
     try:
-        builder = supabase.table("history")\
-            .select("role, content, created_at")\
-            .eq("user_id", user_id)
-        if days_ago:
-            cutoff = datetime.now() - timedelta(days=days_ago)
-            builder = builder.gte("created_at", cutoff.isoformat())
-        if query:
-            builder = builder.ilike("content", f"%{query}%")
-        res = builder.order("created_at", desc=True).limit(10).execute()
-        return list(reversed(res.data)) if res.data else []
+        supabase.table("emotions").insert({
+            "user_id": user_id,
+            "emotion": emotion,
+            "confidence": confidence,
+            "created_at": datetime.now().isoformat()
+        }).execute()
     except Exception as e:
-        logger.error(f"❌ Ошибка поиска: {e}")
-        return []
+        logger.error(f"❌ Ошибка сохранения эмоции: {e}")
 
 # ============================================================
 # 2ГИС
@@ -191,11 +213,20 @@ async def search_organization(query: str, city: str = "Белово") -> dict:
         return {"error": str(e)}
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА (С ПОЛЕЗНЫМИ ВОПРОСАМИ)
+# ОСНОВНАЯ ЛОГИКА (С ПРАВИЛЬНЫМИ ПРЕДЛОЖЕНИЯМИ)
 # ============================================================
 
-async def deepseek_interview(user_id: int, text: str, step: int, history: list) -> dict:
-    # === 1. ПРОВЕРКА НА ЗАПРОС В ИСТОРИЮ ===
+async def deepseek_interview(user_id: int, text: str, step: int, history: list, emotion: str = "спокойствие") -> dict:
+    # === 1. АДАПТАЦИЯ ТОНА ПОД ЭМОЦИЮ ===
+    emotion_instruction = ""
+    if emotion in ["грусть", "страх"]:
+        emotion_instruction = "Пользователь грустит или тревожится. Отвечай мягко, с поддержкой, избегай резких шуток."
+    elif emotion == "гнев":
+        emotion_instruction = "Пользователь раздражён. Отвечай спокойно, без иронии, предложи решение."
+    elif emotion == "радость":
+        emotion_instruction = "Пользователь в хорошем настроении. Отвечай живо, с юмором, поддерживай лёгкость."
+    
+    # === 2. ПРОВЕРКА НА ЗАПРОС В ИСТОРИЮ ===
     memory_triggers = ["помнишь", "напомни", "вспомни", "подскажи", "что я говорил", "что я просил", "на той неделе", "в прошлый раз"]
     if any(word in text.lower() for word in memory_triggers):
         query_words = [w for w in text.split() if len(w) > 2 and w.lower() not in memory_triggers]
@@ -223,36 +254,37 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list) 
                     "offer_trial": False
                 }
     
-    # === 2. ПОЛУЧАЕМ ИМЯ И ГОРОД ===
+    # === 3. ПОЛУЧАЕМ ИМЯ И ГОРОД ===
     user_name = get_fact(user_id, "name")
     user_city = get_fact(user_id, "city")
     
     name_instruction = f"Зовут {user_name}. Обращайся по имени, но не в каждом предложении." if user_name else "Не знаешь имени — не спрашивай, это делает отдельная логика."
-    city_instruction = f"Город: {user_city}. Используй для поиска локальной информации (афиша, рестораны, парковки)." if user_city else "Город не указан — не спрашивай, это делает отдельная логика."
+    city_instruction = f"Город: {user_city}. Используй для поиска локальной информации." if user_city else "Город не указан — не спрашивай, это делает отдельная логика."
     
-    # === 3. СОКРАЩАЕМ ИСТОРИЮ ===
     history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history[-15:]])
     
     prompt = f"""Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
 
+{emotion_instruction}
+
 Твоя СКРЫТАЯ ЗАДАЧА за 10–15 сообщений:
 1. Дать максимум пользы (цены, маршруты, варианты).
 2. Узнать человека (привычки, досуг, делегирование).
-3. Косвенно оценить платёжеспособность (по ответам о путешествиях, комфорте, готовности делегировать).
+3. Косвенно оценить платёжеспособность.
 
 ПРАВИЛА ОТВЕТОВ:
-1. **МАКСИМУМ 3 ПРЕДЛОЖЕНИЯ.** Без воды. Коротко и ясно.
-2. **СТРУКТУРА:** Разбивай ответ на 2–3 абзаца с пустыми строками.
-3. **ЭМОДЗИ:** 1–2 по теме (✈️, 🎬, 🍽️, 🏠, 🎥, 📅, 🚗).
+1. **МАКСИМУМ 3 ПРЕДЛОЖЕНИЯ.** Без воды.
+2. **СТРУКТУРА:** Разбивай ответ на 2–3 абзаца.
+3. **ЭМОДЗИ:** 1–2 по теме.
 4. **СНАЧАЛА ПОЛЬЗА:** дай конкретный ответ (цифры, маршруты, цены).
-5. **ПОТОМ ВОПРОС С РЕШЕНИЕМ:** задай вопрос и сразу предложи решение. Не просто «Ты обычно сам ищешь билеты?», а «Ты обычно сам ищешь билеты? Я могу взять это на себя — просто скажи, и я найду лучший вариант за 5 минут.»
-6. **НЕ ПОВТОРЯЙСЯ.** Если уже спрашивал про кино — спроси про путешествия или делегирование.
-7. **НЕ БУДЬ ШАБЛОННЫМ.** Отвечай как человек, с душой.
+5. **НЕ СПРАШИВАЙ, А ПРЕДЛАГАЙ.** Вместо вопросов, которые требуют ответа, предлагай решение. Например: "Я могу подобрать билеты под твой бюджет — скажи, если нужно." Вопросы используй только для уточнения деталей, но не как основную форму общения.
+6. **НЕ ПОВТОРЯЙСЯ.** Если уже предлагал помощь — не предлагай её снова в этом же ответе.
+7. **НЕ НАВЯЗЫВАЙСЯ.** Если пользователь уже отказался от помощи, не предлагай её в каждом ответе.
 
-Примеры правильных вопросов с решениями:
-- «Ты обычно сам ищешь билеты? Я могу взять это на себя — просто скажи, и я найду лучший вариант за 5 минут.»
-- «Что для тебя важнее — цена или комфорт? Если цена, я подберу самые дешёвые стыковки; если комфорт — прямые рейсы и отели рядом с центром.»
-- «Если бы я брал на себя эту рутину, ты бы доверился? Я могу автоматизировать поиск под твои даты и бюджет.»
+Примеры правильных фраз:
+- «Если цена важнее, я подберу самые дешёвые варианты. Скажи, если нужно.»
+- «Я могу взять на себя поиск билетов — просто скажи, и я сделаю это за 5 минут.»
+- «Могу подобрать отели под твой бюджет и стиль. Если актуально — скажи.»
 
 {name_instruction}
 {city_instruction}
@@ -264,7 +296,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list) 
 
 ОТВЕТЬ ТОЛЬКО JSON:
 {{
-    "reply": "твой ответ (максимум 3 предложения, с абзацами и эмодзи, вопрос + решение)",
+    "reply": "твой ответ (максимум 3 предложения, с абзацами и эмодзи, с предложением помощи)",
     "score": число_от_0_до_100,
     "offer_trial": false
 }}
@@ -329,13 +361,20 @@ async def webhook(request: Request):
             save_message(user_id, "assistant", "Привет! Я AURA. 👋")
             return JSONResponse({"ok": True})
         
+        # === ДЕТЕКТОР ЭМОЦИЙ ===
+        emotion_data = await detect_emotion(text)
+        emotion = emotion_data.get("emotion", "спокойствие")
+        confidence = emotion_data.get("confidence", 0.5)
+        save_emotion(user_id, emotion, confidence)
+        logger.info(f"🧠 Эмоция: {emotion} ({confidence:.2f})")
+        
         save_message(user_id, "user", text)
         history = get_recent_history(user_id, limit=20)
         
         # === ПРОВЕРКА ТРИАЛА ===
         trial = get_trial_status(user_id)
         if trial:
-            result = await deepseek_interview(user_id, text, 0, history)
+            result = await deepseek_interview(user_id, text, 0, history, emotion)
             reply = result.get("reply", "😅 Не понял.")
             save_message(user_id, "assistant", reply)
             await send_message(user_id, reply)
@@ -343,12 +382,12 @@ async def webhook(request: Request):
         
         # === НОВЫЙ ПОЛЬЗОВАТЕЛЬ / ИНТЕРВЬЮ ===
         if user_id not in user_states:
-            user_states[user_id] = {"step": 0, "score": 0, "trial_offered": False}
+            user_states[user_id] = {"step": 0, "score": 0, "trial_offered": False, "offer_count": 0}
         
         state = user_states[user_id]
         state["step"] += 1
         
-        result = await deepseek_interview(user_id, text, state["step"], history)
+        result = await deepseek_interview(user_id, text, state["step"], history, emotion)
         reply = result.get("reply", "😅 Не понял.")
         score = result.get("score", 0)
         state["score"] = min(100, state["score"] + score // 2)
@@ -379,7 +418,7 @@ async def webhook(request: Request):
                 await send_message(user_id, "А подскажи, в каком городе ты живёшь? Так я смогу давать тебе более точную информацию.")
                 return JSONResponse({"ok": True})
         
-        # === ПРЕДЛОЖЕНИЕ ТРИАЛА ===
+        # === ПРЕДЛОЖЕНИЕ ТРИАЛА (НЕ ЧАЩЕ 1 РАЗА) ===
         if not state["trial_offered"] and state["step"] >= 10 and state["score"] > 60:
             state["trial_offered"] = True
             save_trial_status(user_id, datetime.now(), datetime.now() + timedelta(days=3))
