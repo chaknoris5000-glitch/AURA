@@ -52,6 +52,7 @@ user_states = {}
 # ============================================================
 
 def get_time_for_city(city: str = "Москва") -> str:
+    """Возвращает текущее время в формате ЧЧ:ММ для указанного города."""
     timezone_map = {
         "москва": "Europe/Moscow",
         "белово": "Asia/Novokuznetsk",
@@ -67,6 +68,20 @@ def get_time_for_city(city: str = "Москва") -> str:
         "омск": "Asia/Omsk",
         "самара": "Europe/Samara",
         "калининград": "Europe/Kaliningrad",
+        "сочи": "Europe/Moscow",
+        "ростов-на-дону": "Europe/Moscow",
+        "краснодар": "Europe/Moscow",
+        "воронеж": "Europe/Moscow",
+        "нижний новгород": "Europe/Moscow",
+        "челябинск": "Asia/Yekaterinburg",
+        "уфа": "Asia/Yekaterinburg",
+        "пермь": "Asia/Yekaterinburg",
+        "тюмень": "Asia/Yekaterinburg",
+        "томск": "Asia/Novokuznetsk",
+        "барнаул": "Asia/Novokuznetsk",
+        "кемерово": "Asia/Novokuznetsk",
+        "новокузнецк": "Asia/Novokuznetsk",
+        "белово": "Asia/Novokuznetsk",
     }
     tz_name = timezone_map.get(city.lower(), "Europe/Moscow")
     tz = pytz.timezone(tz_name)
@@ -174,7 +189,6 @@ def save_message(user_id, role, content):
         logger.error(f"❌ Ошибка сохранения: {e}")
 
 def get_recent_history(user_id, limit=20):
-    """Для обычного контекста — последние 20 сообщений."""
     if not supabase:
         return []
     try:
@@ -190,7 +204,6 @@ def get_recent_history(user_id, limit=20):
         return []
 
 def search_history(user_id, query, days_ago=None, limit=5):
-    """Поиск по всей истории (до 1000 сообщений) по ключевым словам и датам."""
     if not supabase:
         return []
     try:
@@ -229,7 +242,6 @@ async def search_organization(query: str, city: str = "Белово") -> dict:
     if not GIS_API_KEY:
         return {"error": "Нет ключа 2ГИС"}
     
-    # Чистим запрос от стоп-слов
     stop_words = ["найди", "поищи", "пожалуйста", "надо", "нужна", "нужен", "найти", "покажи", "скинь", "дай", "где", "адрес", "телефон", "сайт", "контакты", "мне", "надо", "найти", "помоги"]
     clean_query = " ".join([word for word in query.lower().split() if word not in stop_words])
     
@@ -258,7 +270,7 @@ async def search_organization(query: str, city: str = "Белово") -> dict:
         return []
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА (С ПОВТОРНЫМ ЗАПРОСОМ ПРИ ОШИБКЕ JSON)
+# ОСНОВНАЯ ЛОГИКА
 # ============================================================
 
 async def deepseek_interview(user_id: int, text: str, step: int, history: list, emotion: str = "спокойствие") -> dict:
@@ -270,7 +282,6 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
     elif emotion == "радость":
         emotion_instruction = "Пользователь в хорошем настроении. Отвечай живо, с юмором, поддерживай лёгкость."
     
-    # === ПРОВЕРКА НА ЗАПРОС В ИСТОРИЮ ===
     memory_triggers = ["помнишь", "напомни", "вспомни", "подскажи", "что я говорил", "что я просил", "на той неделе", "в прошлый раз"]
     if any(word in text.lower() for word in memory_triggers):
         query_words = [w for w in text.split() if len(w) > 2 and w.lower() not in memory_triggers]
@@ -297,7 +308,6 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
                 "offer_trial": False
             }
     
-    # === ПОЛУЧАЕМ ИМЯ И ГОРОД ===
     user_name = get_fact(user_id, "name")
     user_city = get_fact(user_id, "city")
     
