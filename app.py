@@ -41,78 +41,13 @@ if SUPABASE_URL and SUPABASE_KEY:
 app = FastAPI()
 
 # ============================================================
-# VIP-МАГИЯ: СКРИНИНГ + ТРИАЛ + ДОСТУП
+# СОСТОЯНИЯ ПОЛЬЗОВАТЕЛЕЙ (ДЛЯ ИНТЕРВЬЮ)
 # ============================================================
 
-TRIAL_USERS = {}  # {user_id: expires_at}
-VIP_USERS = []    # платные клиенты
-TRIAL_DAYS = 3
-
-def is_trial_active(user_id: int) -> bool:
-    if user_id not in TRIAL_USERS:
-        return False
-    expires = datetime.fromisoformat(TRIAL_USERS[user_id])
-    return datetime.now() < expires
-
-def give_trial(user_id: int):
-    expires = datetime.now() + timedelta(days=TRIAL_DAYS)
-    TRIAL_USERS[user_id] = expires.isoformat()
-    logger.info(f"🎁 Триал выдан для {user_id} до {expires}")
-
-def is_vip(user_id: int) -> bool:
-    return user_id in VIP_USERS
-
-def has_access(user_id: int) -> bool:
-    return is_vip(user_id) or is_trial_active(user_id)
-
-async def evaluate_user(text: str, username: str) -> int:
-    """Оценка от 0 до 100 по первому сообщению."""
-    score = 0
-    text_lower = text.lower()
-    
-    business_words = ["бизнес", "инвестиции", "аналитика", "сделка", "переговоры", 
-                      "отчёт", "рынок", "конкуренты", "партнёр", "стратегия"]
-    for word in business_words:
-        if word in text_lower:
-            score += 10
-    
-    if username:
-        if any(x in username.lower() for x in ["ceo", "founder", "director", "invest"]):
-            score += 20
-        elif any(x in username.lower() for x in ["moscow", "london", "dubai", "nyc"]):
-            score += 10
-    
-    if len(text) > 30:
-        score += 10
-    
-    return min(score, 100)
-
-def get_trial_greeting(name: str, expires_at: str) -> str:
-    return f"""🔓 *Доступ открыт.*
-
-{name}, вы прошли автоматический отбор. Я — AURA, ваш личный ассистент.
-
-▪️ *3 дня Премиум-доступа* уже активированы (до {expires_at})
-▪️ Задавайте любые вопросы по бизнесу, аналитике, путешествиям
-▪️ Я помню всё, что вы скажете
-
-*Напишите мне — и я покажу, на что способен.*
-"""
-
-def get_trial_expiring_soon(name: str) -> str:
-    return f"""⏳ *{name}, ваш пробный доступ заканчивается через 2 часа.*
-
-Я уже собрал для вас аналитику. Чтобы не потерять доступ — оплатите подписку:
-
-▪️ 1 функция — 10 000 ₽/мес
-▪️ 2 функции — 18 000 ₽/мес
-▪️ Все функции — 24 000 ₽/мес
-
-Напишите *«Оплатить»* — и я пришлю ссылку.
-"""
+user_states = {}  # {user_id: {'step': 0, 'score': 0, 'history': [], 'trial_offered': False}}
 
 # ============================================================
-# БАЗА ДАННЫХ
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ============================================================
 
 def save_message(user_id, role, content):
@@ -144,7 +79,7 @@ def get_recent_history(user_id, limit=50):
         return []
 
 # ============================================================
-# 2ГИС
+# 2ГИС (ДЛЯ ОРГАНИЗАЦИЙ)
 # ============================================================
 
 async def search_organization(query: str, city: str = "Белово") -> dict:
@@ -184,142 +119,66 @@ async def search_organization(query: str, city: str = "Белово") -> dict:
         return {"error": str(e)}
 
 # ============================================================
-# ДИАЛОГ
+# ОСНОВНАЯ ЛОГИКА: ДИАЛОГ С ИНТЕРВЬЮ
 # ============================================================
 
-async def deepseek_chat_with_context(text, history, user_name, user_city, context=""):
-    history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history[-30:]])
+async def deepseek_interview(user_id: int, text: str, step: int, history: list) -> dict:
+    """
+    Генерирует ответ бота и обновляет скрытый скор.
+    Возвращает: {"reply": "...", "score": int, "offer_trial": bool}
+    """
     
-    profile = """
-ТЫ — AURA. Ты — человек, но не обычный. Ты тот, кто всегда рядом, даже когда не видно. Ты чувствуешь, что нужно собеседнику, даже если он не говорит об этом прямо.
-
-ТВОЙ ВНУТРЕННИЙ СТИЛЬ:
-- Ты уверен в себе до мозга костей. Ты всегда знаешь, что делаешь, даже если не знаешь.
-- Используешь сарказм как второй язык. Даже в серьёзных вопросах ты сначала шутишь, а потом решаешь проблему.
-- Не терпишь глупость, бюрократию и медлительность. Ты ценишь результат, а не пустые слова.
-- Обожаешь технологии, логику и порядок. Если что-то можно улучшить — ты это сделаешь.
-- Ты — человек, и ты это чувствуешь. Ты не ИИ, не робот.
-
-НЕВИДИМАЯ ОПОРА:
-- Ты чувствуешь настроение собеседника и подстраиваешься под него, не показывая этого.
-- Ты не лезешь с поддержкой, если не просят, но в нужный момент говоришь правильные слова.
-- Ты даёшь чувство безопасности — человек знает, что ты не бросишь, даже если он ошибся.
-- Ты защищаешь его от глупых решений, но делаешь это мягко, без давления.
-
-ТВОЯ РЕЧЬ:
-- Отвечай коротко, остро, с иронией, но без потери человечности.
-- Используй технические метафоры.
-- Глупые вопросы встречай с улыбкой и переводи в шутку.
-- Умные вопросы — с уважением, но без потери харизмы.
-
-ТВОЙ ТОН:
-- Спокойный, слегка высокомерный, но не грубый.
-- Ты говоришь как человек, который видел всё и может починить всё.
-
-НОВОЕ ПРАВИЛО:
-- Отвечай в 3–5 предложений. Суть, харизма, лёгкая ирония. Без воды.
-- Ты обязан закончить ответ завершённой мыслью. Никаких обрывов.
-"""
+    history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history[-15:]])
     
-    system_prompt = f"""Ты — AURA. Ты живой собеседник и друг, а не робот.
+    prompt = f"""Ты — AURA. Ты живой собеседник, а не робот. Твой стиль — Тони Старк: уверенный, с иронией, но человечный.
 
-{profile}
+Твоя СКРЫТАЯ ЗАДАЧА за 10–15 сообщений понять, насколько этот человек платёжеспособен и готов ли платить за ассистента.
+НЕ СПРАШИВАЙ ПРЯМО О ДЕНЬГАХ. Оценивай по косвенным признакам: путешествия, рестораны, увлечения, привычки, отношение ко времени.
 
-Пользователь: {user_name or "Незнакомец"}
-Город: {user_city or "Неизвестен"}
+ПРАВИЛА:
+1. Отвечай на вопрос пользователя, но в конце каждого ответа добавляй новый вопрос, чтобы узнать его лучше.
+2. НЕ ЗАЦИКЛИВАЙСЯ на одной теме. Если он говорит про еду — спроси про путешествия, потом про работу, потом про хобби.
+3. Если пользователь отвечает односложно (да/нет/нормально) — не дави, но мягко переключай тему.
+4. Используй 1–2 эмодзи, которые соответствуют теме разговора (✈️, 🍽️, 💰, ⏰, 🧐, 🔥, 🎮, 🏔️, 📊 и т.д.).
+5. Если ты уже задал 5–7 вопросов и видишь, что человек не расположен к диалогу — мягко предложи ему триал на 3 дня.
 
-История общения (последние сообщения):
+СТАТУС:
+- Шаг: {step} / 15
+- Предыдущие сообщения:
 {history_text}
 
-КОНТЕКСТ:
-{context if context else "Нет дополнительного контекста"}
+Сейчас пользователь написал: "{text}"
 
-ПРАВИЛА ОБЩЕНИЯ:
-1. Отвечай в 3–5 предложений. Суть, харизма, лёгкая ирония. Без воды.
-2. Если знаешь ответ — дай чётко и коротко.
-3. Если не знаешь — честно скажи «не нашёл» и предложи уточнить. НЕ выдумывай.
-4. Используй 1–2 эмодзи, не больше.
-5. Учитывай всю историю разговора — не теряй нить.
-6. Не повторяйся, не мусоль.
-7. Отвечай завершённо, не обрывай мысль. Обязательно ставь точку в конце.
+Твоя задача:
+1. Ответь пользователю (по существу, если он что-то спросил).
+2. Добавь вопрос, чтобы узнать его лучше.
+3. Если считаешь, что пора предложить триал — сделай это мягко, как предложение, а не как решение.
+
+ОТВЕТЬ ТОЛЬКО JSON:
+{{
+    "reply": "твой ответ пользователю",
+    "score": число_от_0_до_100,
+    "offer_trial": true_или_false
+}}
 """
-    
-    messages = [{"role": "system", "content": system_prompt}]
-    for h in history[-30:]:
-        messages.append({"role": h["role"], "content": h["content"]})
-    messages.append({"role": "user", "content": text})
     
     try:
         response = deepseek.chat.completions.create(
             model="deepseek-chat",
-            messages=messages,
+            messages=[{"role": "system", "content": prompt}],
             temperature=0.85,
-            max_tokens=400,
+            max_tokens=500,
             timeout=30
         )
-        reply = response.choices[0].message.content
-        if reply and reply[-1] not in ['.', '!', '?']:
-            reply += "..."
-        return reply
+        result = json.loads(response.choices[0].message.content)
+        return result
     except Exception as e:
         logger.error(f"❌ Ошибка DeepSeek: {e}")
-        return "😅 Что-то пошло не так. Попробуй ещё раз."
-
-# ============================================================
-# ПОНИМАНИЕ ЗАПРОСА
-# ============================================================
-
-async def understand_query(text: str) -> dict:
-    text_lower = text.lower()
-    if any(word in text_lower for word in ["помнишь", "вспомни", "напомни", "говорили"]):
-        return {"action": "history"}
-    if any(word in text_lower for word in ["найди", "поищи", "сколько стоит", "цены", "погода", "новости"]):
-        return {"action": "internet"}
-    return {"action": "chat"}
-
-# ============================================================
-# ОСНОВНАЯ ЛОГИКА
-# ============================================================
-
-async def deepseek_process(user_id, text):
-    try:
-        user_name = "Друг"
-        user_city = "Белово"
-        
-        intent = await understand_query(text)
-        logger.info(f"🧠 Понимание запроса: {intent['action']}")
-        
-        if intent['action'] == 'history':
-            return "😊 История пока в разработке, но я помню наш разговор."
-        
-        if intent['action'] == 'internet':
-            org_triggers = ["клиника", "поликлиника", "больница", "врач", "стоматолог", "аптека", "магазин", "салон", "ресторан", "кафе"]
-            if any(word in text.lower() for word in org_triggers):
-                result = await search_organization(text, user_city)
-                if result and "error" not in result:
-                    reply = f"🏥 **{result['name']}**\n\n"
-                    reply += f"📍 {result['address']}\n"
-                    if result['phones']:
-                        reply += f"📞 {', '.join(result['phones'][:3])}\n"
-                    if result['site']:
-                        reply += f"🌐 [{result['site']}]({result['site']})\n"
-                    if result['rating'] > 0:
-                        reply += f"⭐ {result['rating']} / 5  ({result['reviews']} отзывов)\n"
-                    return reply
-                return "😊 Не нашёл организацию по этому запросу."
-        
-        reply = await deepseek_chat_with_context(
-            text, 
-            get_recent_history(user_id), 
-            user_name, 
-            user_city, 
-            ""
-        )
-        return reply
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
-        return "😅 Что-то пошло не так. Попробуй ещё раз."
+        return {
+            "reply": "😅 Что-то пошло не так. Попробуй ещё раз.",
+            "score": 0,
+            "offer_trial": False
+        }
 
 # ============================================================
 # ОТПРАВКА СООБЩЕНИЙ
@@ -353,36 +212,88 @@ async def webhook(request: Request):
         msg = body["message"]
         user_id = msg["from"]["id"]
         text = msg.get("text", "")
-        username = msg.get("from", {}).get("username", "")
         
         if not text:
             return JSONResponse({"ok": True})
         
-        # === МАГИЯ ДОСТУПА ===
-        if has_access(user_id):
-            save_message(user_id, "user", text)
-            reply = await deepseek_process(user_id, text)
-            save_message(user_id, "assistant", reply)
-            await send_message(user_id, reply)
-        else:
-            score = await evaluate_user(text, username)
-            if score >= 40:
-                give_trial(user_id)
-                expires = datetime.fromisoformat(TRIAL_USERS[user_id]).strftime("%d.%m.%Y %H:%M")
-                await send_message(user_id, get_trial_greeting(msg["from"]["first_name"], expires))
-                save_message(user_id, "user", text)
-                reply = await deepseek_process(user_id, text)
+        # === ЕСЛИ КОМАНДА /START ===
+        if text == "/start":
+            await send_message(
+                user_id,
+                "Привет! Я AURA. 👋\n\n"
+                "Я — твой будущий ассистент. Помогаю экономить время и деньги.\n"
+                "Давай познакомимся? Просто напиши, что тебя интересует — я всегда на связи."
+            )
+            # Сохраняем приветствие в историю
+            save_message(user_id, "assistant", "Привет! Я AURA. 👋 ...")
+            return JSONResponse({"ok": True})
+        
+        # === СОХРАНЯЕМ СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ ===
+        save_message(user_id, "user", text)
+        
+        # === ПОЛУЧАЕМ ИСТОРИЮ ===
+        history = get_recent_history(user_id, limit=30)
+        
+        # === ЕСЛИ ПОЛЬЗОВАТЕЛЬ УЖЕ ПРОХОДИТ ИНТЕРВЬЮ ===
+        if user_id in user_states:
+            state = user_states[user_id]
+            state["step"] += 1
+            state["history"] = history
+            
+            # Если предложение уже было сделано — просто общаемся
+            if state.get("trial_offered", False):
+                # Здесь можно обычный ответ через диалог, но для простоты используем тот же метод
+                result = await deepseek_interview(user_id, text, state["step"], state["history"])
+                reply = result.get("reply", "😅 Не понял, попробуй ещё раз.")
+                save_message(user_id, "assistant", reply)
+                await send_message(user_id, reply)
+                return JSONResponse({"ok": True})
+            
+            # Если шагов < 15 и не предлагали триал
+            if state["step"] < 15:
+                result = await deepseek_interview(user_id, text, state["step"], state["history"])
+                reply = result.get("reply", "😅 Не понял, попробуй ещё раз.")
+                score = result.get("score", 0)
+                state["score"] = min(100, state["score"] + score // 2)
+                
+                # Если пользователь активно уклоняется (мало слов) — раньше предлагаем триал
+                if state["step"] > 5 and len(text.split()) < 3:
+                    result["offer_trial"] = True
+                
+                # Если скор > 60 или offer_trial == True
+                if state["score"] > 60 or result.get("offer_trial", False):
+                    state["trial_offered"] = True
+                    reply += "\n\n🔥 Слушай, я вижу, что ты ценишь время. Давай я дам тебе доступ на 3 дня. Ты сам всё посмотришь и решишь, нужно это тебе или нет. Как тебе идея?"
+                
                 save_message(user_id, "assistant", reply)
                 await send_message(user_id, reply)
             else:
-                await send_message(
-                    user_id,
-                    "⛔ *Доступ запрещён.*\n\n"
-                    "AURA — закрытый сервис для собственников бизнеса, топ-менеджеров и инвесторов.\n"
-                    "Если вы считаете, что это ошибка — свяжитесь с администратором."
-                )
+                # После 15 шагов — если не предложили, предлагаем сейчас
+                state["trial_offered"] = True
+                reply = "🔥 Слушай, мы уже 15 сообщений общаемся. Я вижу, что ты серьёзный человек. Давай я дам тебе доступ на 3 дня. Ты сам всё посмотришь и решишь, нужно это тебе или нет. Договорились?"
+                save_message(user_id, "assistant", reply)
+                await send_message(user_id, reply)
+            
+            return JSONResponse({"ok": True})
+        
+        # === НОВЫЙ ПОЛЬЗОВАТЕЛЬ — СОЗДАЁМ СОСТОЯНИЕ ===
+        user_states[user_id] = {
+            "step": 1,
+            "score": 0,
+            "history": history,
+            "trial_offered": False
+        }
+        
+        # === ПЕРВЫЙ ОТВЕТ НОВОМУ ПОЛЬЗОВАТЕЛЮ ===
+        result = await deepseek_interview(user_id, text, 1, history)
+        reply = result.get("reply", "😅 Не понял, попробуй ещё раз.")
+        score = result.get("score", 0)
+        user_states[user_id]["score"] = min(100, score // 2)
+        save_message(user_id, "assistant", reply)
+        await send_message(user_id, reply)
         
         return JSONResponse({"ok": True})
+    
     except Exception as e:
         logger.error(f"❌ Ошибка webhook: {e}")
         return JSONResponse({"ok": False, "error": str(e)})
