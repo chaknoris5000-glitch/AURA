@@ -44,7 +44,7 @@ app = FastAPI()
 # ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
 # ============================================================
 
-user_states = {}  # {user_id: {'step': 0, 'score': 0, 'trial_offered': False, 'offer_count': 0}}
+user_states = {}
 
 # ============================================================
 # ТОЧНОЕ ВРЕМЯ (С ПОВТОРОМ И ЗАПАСНЫМ ОТВЕТОМ)
@@ -56,12 +56,11 @@ async def get_exact_time() -> str:
             async with httpx.AsyncClient() as client:
                 response = await client.get("https://worldtimeapi.org/api/timezone/Europe/Moscow", timeout=5)
                 data = response.json()
-                return data["datetime"][11:16]  # HH:MM
+                return data["datetime"][11:16]
         except Exception:
             if attempt == 0:
                 await asyncio.sleep(1)
             else:
-                logger.error("❌ Не удалось получить точное время")
                 return "не могу узнать точное время, посмотри на телефоне"
     return "не могу узнать точное время, посмотри на телефоне"
 
@@ -194,15 +193,20 @@ def save_emotion(user_id, emotion, confidence):
         logger.error(f"❌ Ошибка сохранения эмоции: {e}")
 
 # ============================================================
-# 2ГИС
+# 2ГИС (ЖЁСТКИЙ ПОИСК, БЕЗ ГАЛЛЮЦИНАЦИЙ)
 # ============================================================
 
 async def search_organization(query: str, city: str = "Белово") -> dict:
     if not GIS_API_KEY:
         return {"error": "Нет ключа 2ГИС"}
+    
+    # Чистим запрос от стоп-слов
+    stop_words = ["найди", "поищи", "пожалуйста", "надо", "нужна", "нужен", "найти", "покажи", "скинь", "дай", "где", "адрес", "телефон", "сайт", "контакты"]
+    clean_query = " ".join([word for word in query.lower().split() if word not in stop_words])
+    
     url = "https://catalog.api.2gis.com/3.0/items"
     params = {
-        "q": query,
+        "q": clean_query,
         "city_name": city,
         "type": "branch",
         "sort": "rating",
@@ -210,6 +214,7 @@ async def search_organization(query: str, city: str = "Белово") -> dict:
         "fields": "items.name,items.address,items.phones,items.site,items.schedule,items.rating,items.reviews_count",
         "key": GIS_API_KEY
     }
+    
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(url, params=params, timeout=10)
@@ -236,7 +241,6 @@ async def search_organization(query: str, city: str = "Белово") -> dict:
 # ============================================================
 
 async def deepseek_interview(user_id: int, text: str, step: int, history: list, emotion: str = "спокойствие") -> dict:
-    # === 1. АДАПТАЦИЯ ТОНА ПОД ЭМОЦИЮ ===
     emotion_instruction = ""
     if emotion in ["грусть", "страх"]:
         emotion_instruction = "Пользователь грустит или тревожится. Отвечай мягко, с поддержкой, избегай резких шуток."
@@ -245,7 +249,6 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
     elif emotion == "радость":
         emotion_instruction = "Пользователь в хорошем настроении. Отвечай живо, с юмором, поддерживай лёгкость."
     
-    # === 2. ПРОВЕРКА НА ЗАПРОС В ИСТОРИЮ ===
     memory_triggers = ["помнишь", "напомни", "вспомни", "подскажи", "что я говорил", "что я просил", "на той неделе", "в прошлый раз"]
     if any(word in text.lower() for word in memory_triggers):
         query_words = [w for w in text.split() if len(w) > 2 and w.lower() not in memory_triggers]
@@ -273,7 +276,6 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
                     "offer_trial": False
                 }
     
-    # === 3. ПОЛУЧАЕМ ИМЯ И ГОРОД ===
     user_name = get_fact(user_id, "name")
     user_city = get_fact(user_id, "city")
     
@@ -293,31 +295,23 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 
 ПРАВИЛА СТРУКТУРЫ (ОБЯЗАТЕЛЬНО):
 1. Разбивай ответ на 2–3 абзаца с пустыми строками.
-2. Используй яркие маркеры для списков:
-   ✅ — для готовых решений, подтверждений, удачных подборок
-   🔹 — для перечисления вариантов, пунктов, списков
-   💎 — для эксклюзивных, премиальных, VIP-предложений
-   ⚡ — для быстрых, срочных решений (по контексту)
+2. Используй яркие маркеры для списков: ✅ 🔹 💎 ⚡
 3. Цены, даты и ключевые цифры выделяй жирным (**цифра**).
-4. Не пиши одной стеной — это нечитаемо.
+4. Не пиши одной стеной.
 
 ПРАВИЛА ДЛЯ ПЛАНА НА ДЕНЬ:
-Если пользователь просит план на день, разбивай ответ по временным слотам: Утро, День, Вечер, Ночь.
-- Каждый слот начинай с жирного времени, например **Утро (7:00–9:00)**.
-- Внутри слота перечисляй конкретные действия с маркерами (✅, 🔹, 💎, ⚡).
-- Указывай точные времена и действия (не общие советы).
-- Сохраняй стиль Тони Старка — живой, с иронией, без воды.
+Если пользователь просит план на день, разбивай по временным слотам: Утро, День, Вечер, Ночь.
+Каждый слот начинай с жирного времени, например **Утро (7:00–9:00)**.
+Внутри слота перечисляй конкретные действия с маркерами.
 
 ПРАВИЛА ДЛЯ ССЫЛОК:
-Если пользователь просит ссылку на конкретный товар, фильм или место — дай её.
-Если точной ссылки нет — дай ссылку на поиск с предустановленным фильтром или инструкцию, как найти за 30 секунд.
-Не уходи в общие советы, если человек явно просит ссылку.
+Если пользователь просит ссылку — дай её. Если точной нет — дай ссылку на поиск или инструкцию за 30 секунд.
 
 ПРАВИЛА ОТВЕТОВ:
-1. **МАКСИМУМ 3 ПРЕДЛОЖЕНИЯ** на один смысловой блок. Без воды.
-2. **СНАЧАЛА ПОЛЬЗА:** дай конкретный ответ (цифры, маршруты, цены).
-3. **НЕ СПРАШИВАЙ, А ПРЕДЛАГАЙ.** Вместо вопросов — предлагай решения.
-4. **НЕ НАВЯЗЫВАЙСЯ.** Если пользователь уже отказался, не предлагай в каждом ответе.
+1. **МАКСИМУМ 3 ПРЕДЛОЖЕНИЯ** на один смысловой блок.
+2. **СНАЧАЛА ПОЛЬЗА:** дай конкретный ответ.
+3. **НЕ СПРАШИВАЙ, А ПРЕДЛАГАЙ.**
+4. **НЕ НАВЯЗЫВАЙСЯ.**
 
 {name_instruction}
 {city_instruction}
@@ -329,13 +323,12 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 
 ОТВЕТЬ ТОЛЬКО JSON:
 {{
-    "reply": "твой ответ (с абзацами, маркерами ✅ 🔹 💎 ⚡, жирными цифрами и ссылками, если просят)",
+    "reply": "твой ответ (с абзацами, маркерами и жирными цифрами)",
     "score": число_от_0_до_100,
     "offer_trial": false
 }}
 """
     
-    # === ПОВТОРНЫЙ ЗАПРОС ПРИ ОШИБКЕ JSON ===
     for attempt in range(2):
         try:
             response = deepseek.chat.completions.create(
@@ -349,7 +342,6 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
             return result
         except Exception as e:
             if attempt == 0:
-                logger.warning(f"⚠️ Ошибка JSON, повторная попытка: {e}")
                 continue
             else:
                 logger.error(f"❌ Ошибка DeepSeek: {e}")
@@ -384,7 +376,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# WEBHOOK
+# WEBHOOK (С ЖЁСТКИМ 2ГИС)
 # ============================================================
 
 @app.post("/webhook")
@@ -413,11 +405,13 @@ async def webhook(request: Request):
             await send_message(user_id, f"⏰ Сейчас {time_str} по Москве.")
             return JSONResponse({"ok": True})
         
-        # === ПОИСК ОРГАНИЗАЦИЙ (2ГИС) ===
-        org_triggers = ["клиника", "поликлиника", "больница", "врач", "стоматолог", "аптека", "магазин", "салон", "ресторан", "кафе", "отель", "гостиница", "стоматология", "медцентр"]
+        # === ПОИСК ОРГАНИЗАЦИЙ (2ГИС) — ЖЁСТКИЙ ПЕРЕХВАТ ===
+        # Ищем корни слов, чтобы поймать любые падежи
+        org_triggers = ["клиник", "поликлиник", "больниц", "аптек", "отель", "гостиниц", "кафе", "ресторан", "салон", "стоматолог", "медцентр", "ветеринар", "зоомагазин", "гинеколог", "невролог", "кардиолог", "травматолог", "лаборатор", "анализ", "узи", "мрт", "кт", "рентген", "эндокринолог", "офтальмолог", "лор", "хирург"]
         if any(word in text.lower() for word in org_triggers):
             user_city = get_fact(user_id, "city") or "Белово"
             result = await search_organization(text, user_city)
+            
             if result and "error" not in result:
                 reply = f"🏥 **{result['name']}**\n\n📍 {result['address']}\n"
                 if result['phones']:
@@ -428,7 +422,11 @@ async def webhook(request: Request):
                     reply += f"⭐ {result['rating']} / 5  ({result['reviews']} отзывов)"
                 await send_message(user_id, reply)
             else:
-                await send_message(user_id, "😊 Не нашёл организацию по этому запросу. Попробуй уточнить название или город.")
+                # Короткий ответ, если не нашлось
+                await send_message(
+                    user_id,
+                    f"😊 Не нашёл «{text}» в {user_city}. Проверь в 2ГИС или справочной 122."
+                )
             return JSONResponse({"ok": True})
         
         # === ДЕТЕКТОР ЭМОЦИЙ ===
