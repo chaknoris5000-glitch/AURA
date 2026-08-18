@@ -41,6 +41,12 @@ if SUPABASE_URL and SUPABASE_KEY:
 app = FastAPI()
 
 # ============================================================
+# ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
+# ============================================================
+
+user_states = {}  # {user_id: {'step': 0, 'score': 0, 'trial_offered': False}}
+
+# ============================================================
 # РАБОТА С ПАМЯТЬЮ (FACTS)
 # ============================================================
 
@@ -318,7 +324,6 @@ async def webhook(request: Request):
         # === ПРОВЕРКА ТРИАЛА ===
         trial = get_trial_status(user_id)
         if trial:
-            # Триал уже был — просто общаемся
             result = await deepseek_interview(user_id, text, 0, history)
             reply = result.get("reply", "😅 Не понял.")
             save_message(user_id, "assistant", reply)
