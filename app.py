@@ -47,19 +47,23 @@ app = FastAPI()
 user_states = {}  # {user_id: {'step': 0, 'score': 0, 'trial_offered': False, 'offer_count': 0}}
 
 # ============================================================
-# ТОЧНОЕ ВРЕМЯ (ЧЕРЕЗ API)
+# ТОЧНОЕ ВРЕМЯ (С ПОВТОРОМ И ЗАПАСНЫМ ОТВЕТОМ)
 # ============================================================
 
 async def get_exact_time() -> str:
-    """Возвращает текущее время по Москве."""
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get("https://worldtimeapi.org/api/timezone/Europe/Moscow", timeout=5)
-            data = response.json()
-            return data["datetime"][11:16]  # HH:MM
-    except Exception as e:
-        logger.error(f"❌ Ошибка получения времени: {e}")
-        return "не могу узнать точное время"
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get("https://worldtimeapi.org/api/timezone/Europe/Moscow", timeout=5)
+                data = response.json()
+                return data["datetime"][11:16]  # HH:MM
+        except Exception:
+            if attempt == 0:
+                await asyncio.sleep(1)
+            else:
+                logger.error("❌ Не удалось получить точное время")
+                return "не могу узнать точное время, посмотри на телефоне"
+    return "не могу узнать точное время, посмотри на телефоне"
 
 # ============================================================
 # РАБОТА С ПАМЯТЬЮ (FACTS)
@@ -228,7 +232,7 @@ async def search_organization(query: str, city: str = "Белово") -> dict:
         return {"error": str(e)}
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА
+# ОСНОВНАЯ ЛОГИКА (С ПОВТОРНЫМ ЗАПРОСОМ ПРИ ОШИБКЕ JSON)
 # ============================================================
 
 async def deepseek_interview(user_id: int, text: str, step: int, history: list, emotion: str = "спокойствие") -> dict:
@@ -331,23 +335,35 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 }}
 """
     
-    try:
-        response = deepseek.chat.completions.create(
-            model="deepseek-chat",
-            messages=[{"role": "system", "content": prompt}],
-            temperature=0.9,
-            max_tokens=500,
-            timeout=30
-        )
-        result = json.loads(response.choices[0].message.content)
-        return result
-    except Exception as e:
-        logger.error(f"❌ Ошибка DeepSeek: {e}")
-        return {
-            "reply": "😅 Не понял, перефразируй.",
-            "score": 0,
-            "offer_trial": False
-        }
+    # === ПОВТОРНЫЙ ЗАПРОС ПРИ ОШИБКЕ JSON ===
+    for attempt in range(2):
+        try:
+            response = deepseek.chat.completions.create(
+                model="deepseek-chat",
+                messages=[{"role": "system", "content": prompt}],
+                temperature=0.7 if attempt == 0 else 0.3,
+                max_tokens=500,
+                timeout=30
+            )
+            result = json.loads(response.choices[0].message.content)
+            return result
+        except Exception as e:
+            if attempt == 0:
+                logger.warning(f"⚠️ Ошибка JSON, повторная попытка: {e}")
+                continue
+            else:
+                logger.error(f"❌ Ошибка DeepSeek: {e}")
+                return {
+                    "reply": "😅 Не понял, перефразируй.",
+                    "score": 0,
+                    "offer_trial": False
+                }
+    
+    return {
+        "reply": "😅 Не понял, перефразируй.",
+        "score": 0,
+        "offer_trial": False
+    }
 
 # ============================================================
 # ОТПРАВКА СООБЩЕНИЙ
@@ -385,14 +401,14 @@ async def webhook(request: Request):
         if not text:
             return JSONResponse({"ok": True})
         
-        # === КОМАНДА /start ===
         if text == "/start":
             await send_message(user_id, "Привет! Я AURA. 👋 Напиши, что нужно найти или сделать.")
             save_message(user_id, "assistant", "Привет! Я AURA. 👋")
             return JSONResponse({"ok": True})
         
         # === ТОЧНОЕ ВРЕМЯ ===
-        if "время" in text.lower() or "сколько время" in text.lower() or "который час" in text.lower():
+        time_keywords = ["время", "сколько время", "который час", "точное время", "часы"]
+        if any(word in text.lower() for word in time_keywords):
             time_str = await get_exact_time()
             await send_message(user_id, f"⏰ Сейчас {time_str} по Москве.")
             return JSONResponse({"ok": True})
