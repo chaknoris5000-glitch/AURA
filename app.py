@@ -47,6 +47,21 @@ app = FastAPI()
 user_states = {}  # {user_id: {'step': 0, 'score': 0, 'trial_offered': False, 'offer_count': 0}}
 
 # ============================================================
+# ТОЧНОЕ ВРЕМЯ (ЧЕРЕЗ API)
+# ============================================================
+
+async def get_exact_time() -> str:
+    """Возвращает текущее время по Москве."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get("https://worldtimeapi.org/api/timezone/Europe/Moscow", timeout=5)
+            data = response.json()
+            return data["datetime"][11:16]  # HH:MM
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения времени: {e}")
+        return "не могу узнать точное время"
+
+# ============================================================
 # РАБОТА С ПАМЯТЬЮ (FACTS)
 # ============================================================
 
@@ -111,10 +126,10 @@ async def detect_emotion(text: str) -> dict:
         prompt = f"""
 Проанализируй эмоцию в сообщении пользователя: "{text}"
 Верни JSON с двумя полями:
-- emotion: jedna z (radost, grust, gnev, strach, udivlenie, otvrashenie, spokoystvie)
-- confidence: chislo ot 0 do 1
+- emotion: одна из (радость, грусть, гнев, страх, удивление, отвращение, спокойствие)
+- confidence: число от 0 до 1
 
-Otvety strog JSON.
+Ответь строго JSON.
 """
         response = deepseek.chat.completions.create(
             model="deepseek-chat",
@@ -213,7 +228,7 @@ async def search_organization(query: str, city: str = "Белово") -> dict:
         return {"error": str(e)}
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА (С ПРАВКОЙ ПО ССЫЛКАМ)
+# ОСНОВНАЯ ЛОГИКА
 # ============================================================
 
 async def deepseek_interview(user_id: int, text: str, step: int, history: list, emotion: str = "спокойствие") -> dict:
@@ -370,9 +385,34 @@ async def webhook(request: Request):
         if not text:
             return JSONResponse({"ok": True})
         
+        # === КОМАНДА /start ===
         if text == "/start":
             await send_message(user_id, "Привет! Я AURA. 👋 Напиши, что нужно найти или сделать.")
             save_message(user_id, "assistant", "Привет! Я AURA. 👋")
+            return JSONResponse({"ok": True})
+        
+        # === ТОЧНОЕ ВРЕМЯ ===
+        if "время" in text.lower() or "сколько время" in text.lower() or "который час" in text.lower():
+            time_str = await get_exact_time()
+            await send_message(user_id, f"⏰ Сейчас {time_str} по Москве.")
+            return JSONResponse({"ok": True})
+        
+        # === ПОИСК ОРГАНИЗАЦИЙ (2ГИС) ===
+        org_triggers = ["клиника", "поликлиника", "больница", "врач", "стоматолог", "аптека", "магазин", "салон", "ресторан", "кафе", "отель", "гостиница", "стоматология", "медцентр"]
+        if any(word in text.lower() for word in org_triggers):
+            user_city = get_fact(user_id, "city") or "Белово"
+            result = await search_organization(text, user_city)
+            if result and "error" not in result:
+                reply = f"🏥 **{result['name']}**\n\n📍 {result['address']}\n"
+                if result['phones']:
+                    reply += f"📞 {', '.join(result['phones'][:3])}\n"
+                if result['site']:
+                    reply += f"🌐 [Сайт]({result['site']})\n"
+                if result['rating'] > 0:
+                    reply += f"⭐ {result['rating']} / 5  ({result['reviews']} отзывов)"
+                await send_message(user_id, reply)
+            else:
+                await send_message(user_id, "😊 Не нашёл организацию по этому запросу. Попробуй уточнить название или город.")
             return JSONResponse({"ok": True})
         
         # === ДЕТЕКТОР ЭМОЦИЙ ===
