@@ -191,7 +191,7 @@ async def search_organization(query: str, city: str = "Белово") -> dict:
         return {"error": str(e)}
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА (ЖИВОЙ ДИАЛОГ + РАЗНЫЕ ТЕМЫ)
+# ОСНОВНАЯ ЛОГИКА (ЖИВОЙ ДИАЛОГ)
 # ============================================================
 
 async def deepseek_interview(user_id: int, text: str, step: int, history: list) -> dict:
@@ -212,13 +212,13 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list) 
             if results:
                 memory_context = "\n".join([f"{h['role']}: {h['content']}" for h in results[-5:]])
                 return {
-                    "reply": f"📜 Вот что я нашёл:\n\n{memory_context}",
+                    "reply": f"📜 Нашёл:\n\n{memory_context}",
                     "score": 0,
                     "offer_trial": False
                 }
             else:
                 return {
-                    "reply": "📭 Не нашёл ничего по вашему запросу. Уточните, о чём именно вы говорили.",
+                    "reply": "📭 Не нашёл. Уточни, о чём речь.",
                     "score": 0,
                     "offer_trial": False
                 }
@@ -227,40 +227,35 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list) 
     user_name = get_fact(user_id, "name")
     user_city = get_fact(user_id, "city")
     
-    name_instruction = f"Имя пользователя: {user_name}. НЕ СПРАШИВАЙ ЕГО ИМЯ. Используй имя 1 раз в ответе, если это уместно." if user_name else "Пользователь ещё не назвал имя. В конце ответа мягко спроси: 'Как тебя зовут?'."
-    city_instruction = f"Город пользователя: {user_city}. Используй его для поиска по умолчанию." if user_city else "Город не указан. Если пользователь что-то ищет — спроси, в каком городе искать."
+    name_instruction = f"Зовут {user_name}. Обращайся по имени, но не в каждом предложении." if user_name else "Если не знаешь имени — спроси один раз в конце ответа."
+    city_instruction = f"Город: {user_city}. Используй для поиска." if user_city else "Город не указан. Если нужно — уточни."
     
     # === 3. СОКРАЩАЕМ ИСТОРИЮ ===
     history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history[-15:]])
     
-    prompt = f"""Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, но человечный.
+    prompt = f"""Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
 
-Твоя СКРЫТАЯ ЗАДАЧА за 10–15 сообщений понять:
-- Насколько этот человек платёжеспособен (есть ли деньги на ассистента).
-- Нужен ли ему помощник (делегирует ли задачи).
-
-НЕ СПРАШИВАЙ ПРЯМО О ДЕНЬГАХ.
-Оценивай по косвенным признакам: путешествия, рестораны, спорт, машины, досуг, работа, привычки.
+Твоя СКРЫТАЯ ЗАДАЧА за 10–15 сообщений понять, насколько человек платёжеспособен. Оценивай косвенно: по привычкам, досугу, отношению к деньгам.
 
 ПРАВИЛА ОТВЕТОВ:
-1. **СНАЧАЛА ПОЛЬЗА:** дай конкретный ответ на запрос (цены, маршруты, варианты).
-2. **ПОТОМ ВОПРОС:** задай лёгкий вопрос о жизни (еда, спорт, работа, досуг, машины).
-3. **КОРОТКО:** 3–5 предложений. Без воды.
-4. **СТРУКТУРА:** Используй маркеры • для списков, жирный шрифт для цифр.
-5. **ЗАВЕРШЁННОСТЬ:** Всегда ставь точку.
-6. **ЭМОДЗИ:** 1–2 по теме.
+1. **МАКСИМУМ 3 ПРЕДЛОЖЕНИЯ.** Без воды. Коротко и ясно.
+2. **СНАЧАЛА ПОЛЬЗА:** дай конкретный ответ (цифры, маршруты, цены).
+3. **ПОТОМ ВОПРОС:** задай 1 лёгкий вопрос по теме (еда, спорт, машины, работа, досуг).
+4. **НЕ ПОВТОРЯЙСЯ.** Если уже спрашивал про еду — спроси про спорт или машины.
+5. **СТРУКТУРА:** используй маркеры •, жирный шрифт для цифр.
+6. **НЕ БУДЬ ШАБЛОННЫМ.** Отвечай живо, с душой, без «кстати» и «кстати говоря».
 
 {name_instruction}
 {city_instruction}
 
-ПРЕДЫДУЩИЕ СООБЩЕНИЯ:
+ИСТОРИЯ:
 {history_text}
 
-ПОЛЬЗОВАТЕЛЬ НАПИСАЛ: "{text}"
+ПОЛЬЗОВАТЕЛЬ: "{text}"
 
 ОТВЕТЬ ТОЛЬКО JSON:
 {{
-    "reply": "твой ответ (польза + вопрос, 3–5 предложений)",
+    "reply": "твой ответ (максимум 3 предложения)",
     "score": число_от_0_до_100,
     "offer_trial": false
 }}
@@ -270,8 +265,8 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list) 
         response = deepseek.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "system", "content": prompt}],
-            temperature=0.85,
-            max_tokens=400,
+            temperature=0.9,
+            max_tokens=250,
             timeout=30
         )
         result = json.loads(response.choices[0].message.content)
@@ -279,7 +274,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list) 
     except Exception as e:
         logger.error(f"❌ Ошибка DeepSeek: {e}")
         return {
-            "reply": "😅 Что-то пошло не так. Попробуй ещё раз.",
+            "reply": "😅 Не понял, перефразируй.",
             "score": 0,
             "offer_trial": False
         }
@@ -290,7 +285,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list) 
 
 async def send_message(chat_id, text):
     if not text:
-        text = "😅 Что-то пошло не так."
+        text = "😅 Не понял."
     if len(text) > 4000:
         text = text[:3997] + "..."
     try:
@@ -321,7 +316,7 @@ async def webhook(request: Request):
             return JSONResponse({"ok": True})
         
         if text == "/start":
-            await send_message(user_id, "Привет! Я AURA. 👋 Напиши, что нужно найти или сделать — я помогу.")
+            await send_message(user_id, "Привет! Я AURA. 👋 Напиши, что нужно найти или сделать.")
             save_message(user_id, "assistant", "Привет! Я AURA. 👋")
             return JSONResponse({"ok": True})
         
@@ -349,11 +344,11 @@ async def webhook(request: Request):
         score = result.get("score", 0)
         state["score"] = min(100, state["score"] + score // 2)
         
-        # === ПРЕДЛОЖЕНИЕ ТРИАЛА (ПОРОГ — ПОСЛЕ 10 СООБЩЕНИЙ) ===
+        # === ПРЕДЛОЖЕНИЕ ТРИАЛА ===
         if not state["trial_offered"] and state["step"] >= 10 and state["score"] > 60:
             state["trial_offered"] = True
             save_trial_status(user_id, datetime.now(), datetime.now() + timedelta(days=3))
-            reply += "\n\n🔥 Слушай, я вижу, что ты ценишь время и знаешь, чего хочешь. Я уже показал, как быстро могу находить лучшие варианты. Давай я дам тебе 3 дня полного доступа — бесплатно. Ты просто пользуешься, смотришь, как я работаю. Если понравится — останешься. Ну что, включаем?"
+            reply += "\n\n🔥 Слушай, я вижу, что ты ценишь время. Давай я дам тебе 3 дня полного доступа — бесплатно. Посмотришь, насколько со мной лучше. Ну что, включаем?"
         
         save_message(user_id, "assistant", reply)
         await send_message(user_id, reply)
