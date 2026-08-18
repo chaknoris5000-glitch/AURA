@@ -41,13 +41,63 @@ if SUPABASE_URL and SUPABASE_KEY:
 app = FastAPI()
 
 # ============================================================
-# СОСТОЯНИЯ ПОЛЬЗОВАТЕЛЕЙ (ДЛЯ ИНТЕРВЬЮ)
+# РАБОТА С ПАМЯТЬЮ (FACTS)
 # ============================================================
 
-user_states = {}  # {user_id: {'step': 0, 'score': 0, 'history': [], 'trial_offered': False}}
+def save_fact(user_id, key, value):
+    if not supabase:
+        return
+    try:
+        existing = supabase.table("user_memory").select("value").eq("user_id", user_id).eq("key", key).execute()
+        if existing.data:
+            supabase.table("user_memory").update({"value": value}).eq("user_id", user_id).eq("key", key).execute()
+        else:
+            supabase.table("user_memory").insert({
+                "user_id": user_id,
+                "key": key,
+                "value": value,
+                "created_at": datetime.now().isoformat()
+            }).execute()
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения факта: {e}")
+
+def get_fact(user_id, key):
+    if not supabase:
+        return None
+    try:
+        res = supabase.table("user_memory").select("value").eq("user_id", user_id).eq("key", key).execute()
+        return res.data[0]["value"] if res.data else None
+    except:
+        return None
 
 # ============================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# РАБОТА СО СТАТУСОМ ТРИАЛА
+# ============================================================
+
+def get_trial_status(user_id):
+    if not supabase:
+        return None
+    try:
+        res = supabase.table("trial_status").select("*").eq("user_id", user_id).execute()
+        return res.data[0] if res.data else None
+    except:
+        return None
+
+def save_trial_status(user_id, started, ended):
+    if not supabase:
+        return
+    try:
+        supabase.table("trial_status").insert({
+            "user_id": user_id,
+            "trial_started": started.isoformat(),
+            "trial_ended": ended.isoformat(),
+            "is_active": True
+        }).execute()
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения триала: {e}")
+
+# ============================================================
+# ИСТОРИЯ СООБЩЕНИЙ
 # ============================================================
 
 def save_message(user_id, role, content):
@@ -63,7 +113,7 @@ def save_message(user_id, role, content):
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения: {e}")
 
-def get_recent_history(user_id, limit=30):
+def get_recent_history(user_id, limit=20):
     if not supabase:
         return []
     try:
@@ -79,35 +129,30 @@ def get_recent_history(user_id, limit=30):
         return []
 
 def search_history(user_id, query, days_ago=None):
-    """Ищет по всей истории пользователя по ключевым словам и дате."""
     if not supabase:
         return []
     try:
         builder = supabase.table("history")\
             .select("role, content, created_at")\
             .eq("user_id", user_id)
-        
         if days_ago:
             cutoff = datetime.now() - timedelta(days=days_ago)
             builder = builder.gte("created_at", cutoff.isoformat())
-        
         if query:
             builder = builder.ilike("content", f"%{query}%")
-        
         res = builder.order("created_at", desc=True).limit(10).execute()
         return list(reversed(res.data)) if res.data else []
     except Exception as e:
-        logger.error(f"❌ Ошибка поиска в истории: {e}")
+        logger.error(f"❌ Ошибка поиска: {e}")
         return []
 
 # ============================================================
-# 2ГИС (ДЛЯ ОРГАНИЗАЦИЙ)
+# 2ГИС
 # ============================================================
 
 async def search_organization(query: str, city: str = "Белово") -> dict:
     if not GIS_API_KEY:
         return {"error": "Нет ключа 2ГИС"}
-    
     url = "https://catalog.api.2gis.com/3.0/items"
     params = {
         "q": query,
@@ -118,7 +163,6 @@ async def search_organization(query: str, city: str = "Белово") -> dict:
         "fields": "items.name,items.address,items.phones,items.site,items.schedule,items.rating,items.reviews_count",
         "key": GIS_API_KEY
     }
-    
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(url, params=params, timeout=10)
@@ -141,20 +185,15 @@ async def search_organization(query: str, city: str = "Белово") -> dict:
         return {"error": str(e)}
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА: ДИАЛОГ С ИНТЕРВЬЮ + ПОИСК В ИСТОРИИ
+# ОСНОВНАЯ ЛОГИКА
 # ============================================================
 
 async def deepseek_interview(user_id: int, text: str, step: int, history: list) -> dict:
-    """
-    Генерирует ответ бота, проверяет запрос на «помнишь» и обновляет скор.
-    """
-    
-    # === ШАГ 1: ПРОВЕРКА НА ЗАПРОС В ИСТОРИЮ ===
+    # === 1. ПРОВЕРКА НА ЗАПРОС В ИСТОРИЮ ===
     memory_triggers = ["помнишь", "напомни", "вспомни", "подскажи", "что я говорил", "что я просил", "на той неделе", "в прошлый раз"]
     if any(word in text.lower() for word in memory_triggers):
         query_words = [w for w in text.split() if len(w) > 2 and w.lower() not in memory_triggers]
         query = " ".join(query_words) if query_words else None
-        
         days_ago = None
         if "неделе" in text.lower():
             days_ago = 7
@@ -162,61 +201,55 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list) 
             days_ago = 30
         elif "вчера" in text.lower():
             days_ago = 1
-        
         if query or days_ago:
             results = search_history(user_id, query, days_ago)
             if results:
                 memory_context = "\n".join([f"{h['role']}: {h['content']}" for h in results[-5:]])
                 return {
-                    "reply": f"📜 Вот что я нашёл в истории по вашему запросу:\n\n{memory_context}\n\nЭто всё, что я помню. Если нужно что-то ещё — уточните.",
+                    "reply": f"📜 Вот что я нашёл:\n\n{memory_context}",
                     "score": 0,
                     "offer_trial": False
                 }
             else:
                 return {
-                    "reply": "📭 Не нашёл ничего по вашему запросу в истории. Возможно, мы ещё не обсуждали это, или я что-то упустил. Уточните, о чём именно вы говорили.",
+                    "reply": "📭 Не нашёл ничего по вашему запросу. Уточните, о чём именно вы говорили.",
                     "score": 0,
                     "offer_trial": False
                 }
     
-    # === ШАГ 2: ОСНОВНОЙ ДИАЛОГ (ЕСЛИ ЭТО НЕ ЗАПРОС В ИСТОРИЮ) ===
+    # === 2. ПОЛУЧАЕМ ИМЯ И ГОРОД ===
+    user_name = get_fact(user_id, "name")
+    user_city = get_fact(user_id, "city")
+    
+    name_instruction = f"Пользователя зовут {user_name}. Используй имя 1 раз в ответе." if user_name else "Пользователь ещё не назвал имя. В конце ответа мягко спроси: 'Как тебя зовут?'."
+    city_instruction = f"Город пользователя: {user_city}. Используй его для поиска по умолчанию." if user_city else "Город не указан. Если пользователь что-то ищет — спроси, в каком городе искать."
+    
+    # === 3. СОКРАЩАЕМ ИСТОРИЮ ===
     history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history[-15:]])
     
-    prompt = f"""Ты — AURA. Ты живой собеседник, а не робот. Твой стиль — Тони Старк: уверенный, с иронией, но человечный.
+    prompt = f"""Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, но человечный.
 
-Твоя СКРЫТАЯ ЗАДАЧА за 10–15 сообщений понять, насколько этот человек платёжеспособен и готов ли платить за ассистента.
-НЕ СПРАШИВАЙ ПРЯМО О ДЕНЬГАХ. Оценивай по косвенным признакам: путешествия, рестораны, увлечения, привычки, отношение ко времени.
+ПРАВИЛА ОТВЕТОВ:
+1. **ОТВЕЧАЙ КОРОТКО:** максимум 3–5 предложений. Без воды.
+2. **СТРУКТУРА:** используй маркеры ✅ и 🌟 вместо цифр в списках.
+3. **ЗАВЕРШЁННОСТЬ:** всегда ставь точку в конце. Не обрывай мысль.
+4. **ЭМОДЗИ:** 1–2 по теме (✈️, 🍽️, 🏖️ и т.д.).
 
-ПРАВИЛА ФОРМАТИРОВАНИЯ ОТВЕТОВ:
-1. Всегда используй **структурированный текст**: разбивай на абзацы, используй списки и жирный шрифт.
-2. Цены, даты и ключевые цифры выделяй жирным (**цифра**).
-3. Если перечисляешь варианты (билеты, отели, рестораны) — используй нумерованные списки (1., 2., 3.).
-4. Разбивай ответ на смысловые блоки с помощью пустых строк.
-5. Используй эмодзи-маркеры в начале блоков: ✈️ — авиа, 🍽️ — еда, 💰 — цены, ⏰ — время, 📍 — место, 🎬 — развлечения, 🔥 — важное.
+{name_instruction}
+{city_instruction}
 
-ПРАВИЛА ДИАЛОГА:
-1. Отвечай на вопрос пользователя, но в конце каждого ответа добавляй новый вопрос, чтобы узнать его лучше.
-2. НЕ ЗАЦИКЛИВАЙСЯ на одной теме. Если он говорит про еду — спроси про путешествия, потом про работу, потом про хобби.
-3. Если пользователь отвечает односложно (да/нет/нормально) — не дави, но мягко переключай тему.
-4. НЕ ПРЕДЛАГАЙ ТРИАЛ РАНЬШЕ, ЧЕМ ПОСЛЕ 7 СООБЩЕНИЙ. Дай человеку раскрыться.
-
-ТЕКУЩИЙ СТАТУС:
-- Шаг: {step} / 15
-- Предыдущие сообщения:
+ПРЕДЫДУЩИЕ СООБЩЕНИЯ:
 {history_text}
 
-Сейчас пользователь написал: "{text}"
+ПОЛЬЗОВАТЕЛЬ НАПИСАЛ: "{text}"
 
-Твоя задача:
-1. Ответь пользователю (по существу, если он что-то спросил).
-2. Добавь вопрос, чтобы узнать его лучше.
-3. Если считаешь, что пора предложить триал (после 7 сообщений и если пользователь проявил интерес) — сделай это мягко, как предложение, а не как решение.
+Твоя задача: ответить по существу и, если нужно, задать 1 уточняющий вопрос.
 
 ОТВЕТЬ ТОЛЬКО JSON:
 {{
-    "reply": "твой ответ пользователю (с форматированием!)",
+    "reply": "твой короткий ответ (3–5 предложений)",
     "score": число_от_0_до_100,
-    "offer_trial": true_или_false
+    "offer_trial": false
 }}
 """
     
@@ -225,7 +258,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list) 
             model="deepseek-chat",
             messages=[{"role": "system", "content": prompt}],
             temperature=0.85,
-            max_tokens=600,
+            max_tokens=300,
             timeout=30
         )
         result = json.loads(response.choices[0].message.content)
@@ -244,7 +277,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list) 
 
 async def send_message(chat_id, text):
     if not text:
-        text = "😅 Что-то пошло не так. Попробуй ещё раз."
+        text = "😅 Что-то пошло не так."
     if len(text) > 4000:
         text = text[:3997] + "..."
     try:
@@ -274,76 +307,42 @@ async def webhook(request: Request):
         if not text:
             return JSONResponse({"ok": True})
         
-        # === ЕСЛИ КОМАНДА /START ===
         if text == "/start":
-            await send_message(
-                user_id,
-                "Привет! Я AURA. 👋\n\n"
-                "Я — твой будущий ассистент. Помогаю экономить время и деньги.\n"
-                "Давай познакомимся? Просто напиши, что тебя интересует — я всегда на связи."
-            )
-            save_message(user_id, "assistant", "Привет! Я AURA. 👋 ...")
+            await send_message(user_id, "Привет! Я AURA. 👋 Напиши, что нужно найти или сделать — я помогу.")
+            save_message(user_id, "assistant", "Привет! Я AURA. 👋")
             return JSONResponse({"ok": True})
         
-        # === СОХРАНЯЕМ СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ ===
         save_message(user_id, "user", text)
+        history = get_recent_history(user_id, limit=20)
         
-        # === ПОЛУЧАЕМ ИСТОРИЮ ===
-        history = get_recent_history(user_id, limit=30)
-        
-        # === ЕСЛИ ПОЛЬЗОВАТЕЛЬ УЖЕ ПРОХОДИТ ИНТЕРВЬЮ ===
-        if user_id in user_states:
-            state = user_states[user_id]
-            state["step"] += 1
-            state["history"] = history
-            
-            # Если предложение уже было сделано — просто общаемся
-            if state.get("trial_offered", False):
-                result = await deepseek_interview(user_id, text, state["step"], state["history"])
-                reply = result.get("reply", "😅 Не понял, попробуй ещё раз.")
-                save_message(user_id, "assistant", reply)
-                await send_message(user_id, reply)
-                return JSONResponse({"ok": True})
-            
-            # Если шагов < 15 и не предлагали триал
-            if state["step"] < 15:
-                result = await deepseek_interview(user_id, text, state["step"], state["history"])
-                reply = result.get("reply", "😅 Не понял, попробуй ещё раз.")
-                score = result.get("score", 0)
-                state["score"] = min(100, state["score"] + score // 2)
-                
-                # Предлагаем триал, только если:
-                # - Шаг > 7 (пользователь уже пообщался)
-                # - Скор > 60 ИЛИ пользователь сам проявил интерес (offer_trial == True)
-                # - ИЛИ пользователь активно уклоняется (короткие ответы)
-                if state["step"] > 7 and (state["score"] > 60 or result.get("offer_trial", False) or len(text.split()) < 3):
-                    state["trial_offered"] = True
-                    reply += "\n\n🔥 Слушай, я вижу, что ты ценишь время. Давай я дам тебе доступ на 3 дня. Ты сам всё посмотришь и решишь, нужно это тебе или нет. Как тебе идея?"
-                
-                save_message(user_id, "assistant", reply)
-                await send_message(user_id, reply)
-            else:
-                # После 15 шагов — если не предложили, предлагаем сейчас
-                state["trial_offered"] = True
-                reply = "🔥 Слушай, мы уже 15 сообщений общаемся. Я вижу, что ты серьёзный человек. Давай я дам тебе доступ на 3 дня. Ты сам всё посмотришь и решишь, нужно это тебе или нет. Договорились?"
-                save_message(user_id, "assistant", reply)
-                await send_message(user_id, reply)
-            
+        # === ПРОВЕРКА ТРИАЛА ===
+        trial = get_trial_status(user_id)
+        if trial:
+            # Триал уже был — просто общаемся
+            result = await deepseek_interview(user_id, text, 0, history)
+            reply = result.get("reply", "😅 Не понял.")
+            save_message(user_id, "assistant", reply)
+            await send_message(user_id, reply)
             return JSONResponse({"ok": True})
         
-        # === НОВЫЙ ПОЛЬЗОВАТЕЛЬ — СОЗДАЁМ СОСТОЯНИЕ ===
-        user_states[user_id] = {
-            "step": 1,
-            "score": 0,
-            "history": history,
-            "trial_offered": False
-        }
+        # === НОВЫЙ ПОЛЬЗОВАТЕЛЬ / ИНТЕРВЬЮ ===
+        if user_id not in user_states:
+            user_states[user_id] = {"step": 0, "score": 0, "trial_offered": False}
         
-        # === ПЕРВЫЙ ОТВЕТ НОВОМУ ПОЛЬЗОВАТЕЛЮ ===
-        result = await deepseek_interview(user_id, text, 1, history)
-        reply = result.get("reply", "😅 Не понял, попробуй ещё раз.")
+        state = user_states[user_id]
+        state["step"] += 1
+        
+        result = await deepseek_interview(user_id, text, state["step"], history)
+        reply = result.get("reply", "😅 Не понял.")
         score = result.get("score", 0)
-        user_states[user_id]["score"] = min(100, score // 2)
+        state["score"] = min(100, state["score"] + score // 2)
+        
+        # === ПРЕДЛОЖЕНИЕ ТРИАЛА ===
+        if not state["trial_offered"] and state["step"] >= 8 and state["score"] > 60:
+            state["trial_offered"] = True
+            save_trial_status(user_id, datetime.now(), datetime.now() + timedelta(days=3))
+            reply += "\n\n🔥 Давай я дам тебе доступ на 3 дня — попробуешь и решишь. Идёт?"
+        
         save_message(user_id, "assistant", reply)
         await send_message(user_id, reply)
         
