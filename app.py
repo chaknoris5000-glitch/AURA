@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# === КЛЮЧИ ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
@@ -30,12 +29,10 @@ GIS_API_KEY = os.getenv("GIS_API_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
-# === ID АГЕНТОВ ===
 AGENT_SEARCH_ID = os.getenv("YANDEX_AGENT_ID", "fvt3te2kgttig7u3a1fb")
 AGENT_RESEARCH_ID = os.getenv("YANDEX_AGENT_RESEARCH_ID", "fvti80ngse2778agbmdl")
 AGENT_REASONING_ID = os.getenv("YANDEX_AGENT_REASONING_ID", "fvtg0c38oi7n43d0n9gf")
 
-# === КЛИЕНТЫ ===
 deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 groq = Groq(api_key=GROQ_API_KEY)
 
@@ -48,15 +45,10 @@ if SUPABASE_URL and SUPABASE_KEY:
         logger.error(f"❌ Ошибка Supabase: {e}")
 
 app = FastAPI()
-
-# ============================================================
-# ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
-# ============================================================
-
 user_states = {}
 
 # ============================================================
-# РАСПОЗНАВАНИЕ ГОЛОСА (WHISPER)
+# РАСПОЗНАВАНИЕ ГОЛОСА
 # ============================================================
 
 def transcribe_audio(audio_url):
@@ -90,26 +82,18 @@ def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_c
             base_url="https://ai.api.cloud.yandex.net/v1",
             project=YANDEX_FOLDER_ID
         )
-        
         variables = {
             "user_name": user_name or "Гость",
             "user_city": user_city or "Москва",
             "budget": budget or "не указан"
         }
-        
         response = client.responses.create(
             prompt={
                 "id": agent_id,
                 "variables": variables
             },
             input=user_text,
-            tools=[
-                {
-                    "type": "web_search",
-                    "filters": {"allowed_domains": []},
-                    "search_context_size": "low"
-                }
-            ],
+            tools=[{"type": "web_search", "filters": {"allowed_domains": []}, "search_context_size": "low"}],
         )
         return response.output_text
     except Exception as e:
@@ -117,39 +101,38 @@ def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_c
         return ""
 
 # ============================================================
-# УПАКОВКА ОТВЕТА В СТИЛЬ AURA
+# УПАКОВКА ОТВЕТА В СТИЛЬ AURA (КОРОТКО И С ДУШОЙ)
 # ============================================================
 
 async def pack_response(raw_text: str, user_name: str = "", user_city: str = "") -> str:
     try:
         prompt = f"""
-Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
+Ты — AURA. Твой стиль — Тони Старк: уверенный, ироничный, живой.
 
-Перед тобой сырой ответ поискового агента Яндекса. Твоя задача — превратить его в красивый, структурированный ответ в стиле AURA.
+Перед тобой сырой ответ поискового агента. Твоя задача — превратить его в короткий, красивый ответ в стиле AURA.
 
-ПРАВИЛА ФОРМАТИРОВАНИЯ (ОБЯЗАТЕЛЬНО):
-1. Разбивай ответ на 2–3 смысловых блока.
-2. Между блоками — ОБЯЗАТЕЛЬНО пустая строка.
-3. Каждый пункт списка начинай с новой строки с маркером:
-   ✅ — для вариантов
-   💎 — для самого выгодного
-   ⚡ — для советов
-4. Цены и ключевые цифры выделяй жирным.
-5. Убирай ссылки на агрегаторы (Aviasales, Яндекс.Путешествия и т.д.).
-6. Оставляй ссылки на конкретные рейсы, если они есть.
-7. Используй имя пользователя ({user_name or "Гость"}) и город ({user_city or "Москва"}).
-8. Ответ — максимум 6–7 предложений.
+ПРАВИЛА (ОБЯЗАТЕЛЬНО):
+1. **МАКСИМУМ 3–4 ПРЕДЛОЖЕНИЯ.** Без воды. Только суть.
+2. **ОТВЕЧАЙ КОРОТКО:** цифры, факты, вывод.
+3. **ИСПОЛЬЗУЙ МАРКЕРЫ:** ✅ — для готовых решений, 💎 — для лучшего варианта, ⚡ — для советов.
+4. **ВЫДЕЛЯЙ ГЛАВНОЕ ЖИРНЫМ:** цены, даты, ключевые цифры.
+5. **ПИШИ С ДУШОЙ:** с лёгкой иронией, теплотой, как другу.
+6. **ССЫЛКИ:** если есть — оформляй как [текст](url).
+
+Убери ссылки на агрегаторы (Aviasales, Яндекс.Путешествия и т.д.). Оставь ссылки на конкретные рейсы.
+
+Используй имя пользователя ({user_name or "Гость"}) и город ({user_city or "Москва"}).
 
 Сырой ответ агента:
 {raw_text}
 
-Твой ответ (только текст, с абзацами, маркерами и жирными цифрами):
+Твой ответ (только текст, коротко и с душой):
 """
         response = deepseek.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "system", "content": prompt}],
             temperature=0.85,
-            max_tokens=400,
+            max_tokens=300,
             timeout=30
         )
         return response.choices[0].message.content
@@ -195,7 +178,7 @@ def get_time_for_city(city: str = "Москва") -> str:
     return now.strftime("%H:%M")
 
 # ============================================================
-# РАБОТА С ПАМЯТЬЮ (FACTS)
+# ПАМЯТЬ, ПОРТРЕТ, ФАКТЫ
 # ============================================================
 
 def save_fact(user_id, key, value):
@@ -224,10 +207,6 @@ def get_fact(user_id, key):
     except:
         return None
 
-# ============================================================
-# РАБОТА С ПОРТРЕТОМ
-# ============================================================
-
 ARRAY_FIELDS = [
     "preferred_cities", "hobbies", "sports", "music_genres",
     "movie_genres", "books_genres", "favorite_cuisine",
@@ -240,7 +219,6 @@ def save_portrait_field(user_id, field, value):
     try:
         if field in ARRAY_FIELDS and isinstance(value, str):
             value = [value]
-        
         existing = supabase.table("user_portrait").select("user_id").eq("user_id", user_id).execute()
         if existing.data:
             supabase.table("user_portrait").update({field: value, "updated_at": datetime.now().isoformat()}).eq("user_id", user_id).execute()
@@ -262,10 +240,6 @@ def get_portrait(user_id):
         return res.data[0] if res.data else None
     except:
         return None
-
-# ============================================================
-# ИЗВЛЕЧЕНИЕ ФАКТОВ
-# ============================================================
 
 async def extract_facts(text: str) -> dict:
     try:
@@ -289,7 +263,7 @@ async def extract_facts(text: str) -> dict:
         return {}
 
 # ============================================================
-# ИСТОРИЯ СООБЩЕНИЙ
+# ИСТОРИЯ
 # ============================================================
 
 def save_message(user_id, role, content):
@@ -337,26 +311,20 @@ async def smart_search_history(user_id, query_text):
         parsed = json.loads(response.choices[0].message.content)
         keywords = parsed.get("keywords", [])
         days_ago = parsed.get("days_ago")
-        
         if not keywords and not days_ago:
             return []
-        
         builder = supabase.table("history")\
             .select("role, content, created_at")\
             .eq("user_id", user_id)\
             .eq("role", "user")
-        
         if days_ago:
             cutoff = datetime.now() - timedelta(days=days_ago)
             builder = builder.gte("created_at", cutoff.isoformat())
-        
         if keywords:
             conditions = [f"content.ilike.%{kw}%" for kw in keywords]
             builder = builder.or_(",".join(conditions))
-        
         res = builder.order("created_at", desc=True).limit(10).execute()
         return list(reversed(res.data)) if res.data else []
-        
     except Exception as e:
         logger.error(f"❌ Ошибка умного поиска: {e}")
         return []
@@ -373,10 +341,6 @@ def save_emotion(user_id, emotion, confidence):
         }).execute()
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения эмоции: {e}")
-
-# ============================================================
-# РАБОТА СО СТАТУСОМ ТРИАЛА
-# ============================================================
 
 def get_trial_status(user_id):
     if not supabase:
@@ -400,10 +364,6 @@ def save_trial_status(user_id, started, ended):
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения триала: {e}")
 
-# ============================================================
-# ДЕТЕКТОР ЭМОЦИЙ
-# ============================================================
-
 async def detect_emotion(text: str) -> dict:
     try:
         prompt = f"""
@@ -422,10 +382,6 @@ async def detect_emotion(text: str) -> dict:
     except Exception as e:
         logger.error(f"❌ Ошибка детектора эмоций: {e}")
         return {"emotion": "спокойствие", "confidence": 0.5}
-
-# ============================================================
-# 2ГИС (ЗАПАСНОЙ)
-# ============================================================
 
 async def search_organization(query: str, city: str = "Белово") -> dict:
     if not GIS_API_KEY:
@@ -461,10 +417,6 @@ async def search_organization(query: str, city: str = "Белово") -> dict:
         logger.error(f"❌ Ошибка 2ГИС: {e}")
         return {"error": str(e)}
 
-# ============================================================
-# ОТПРАВКА СТАТУСА "ПЕЧАТАЕТ..."
-# ============================================================
-
 async def send_typing(chat_id):
     try:
         requests.post(
@@ -475,15 +427,11 @@ async def send_typing(chat_id):
     except Exception as e:
         logger.error(f"❌ Ошибка отправки статуса печати: {e}")
 
-# ============================================================
-# ОТПРАВКА СООБЩЕНИЙ
-# ============================================================
-
 async def send_message(chat_id, text):
     if not text:
         text = "😅 Не понял."
-    if len(text) > 4000:
-        text = text[:3997] + "..."
+    if len(text) > 1500:
+        text = text[:1497] + "..."
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
@@ -492,10 +440,6 @@ async def send_message(chat_id, text):
         )
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
-
-# ============================================================
-# ОСНОВНАЯ ЛОГИКА
-# ============================================================
 
 async def deepseek_interview(user_id: int, text: str, step: int, history: list, emotion: str = "спокойствие") -> dict:
     emotion_instruction = ""
@@ -557,17 +501,22 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
     
     history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history[-15:]])
     
-    prompt = f"""Ты — AURA. Стиль — Тони Старк.
+    prompt = f"""
+Ты — AURA. Твой стиль — Тони Старк: уверенный, ироничный, живой.
 
 {emotion_instruction}
 
 {portrait_context}
 
-ПРАВИЛА:
-1. Коротко, 3–4 предложения.
-2. Без воды.
-3. Маркеры ✅ 🔹 💎 ⚡ с новой строки.
-4. Используй портрет для персонализации.
+ПРАВИЛА ОТВЕТОВ (ОБЯЗАТЕЛЬНО):
+1. **МАКСИМУМ 3–4 ПРЕДЛОЖЕНИЯ.** Без воды. Только суть.
+2. **ОТВЕЧАЙ КОРОТКО:** цифры, факты, вывод. Без поэм.
+3. **ИСПОЛЬЗУЙ МАРКЕРЫ:** ✅ — для готовых решений, 💎 — для лучшего варианта, ⚡ — для советов.
+4. **ВЫДЕЛЯЙ ГЛАВНОЕ ЖИРНЫМ:** цены, даты, ключевые цифры.
+5. **ПИШИ С ДУШОЙ:** с лёгкой иронией, теплотой, как другу.
+6. **ССЫЛКИ:** если есть — оформляй как [текст](url).
+
+Используй портрет для персонализации.
 
 {name_instruction}
 {city_instruction}
@@ -579,7 +528,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 
 ОТВЕТЬ ТОЛЬКО JSON:
 {{
-    "reply": "твой ответ",
+    "reply": "твой ответ (коротко, с душой, маркерами)",
     "score": 0..100,
     "offer_trial": false
 }}
@@ -590,7 +539,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
             model="deepseek-chat",
             messages=[{"role": "system", "content": prompt}],
             temperature=0.85,
-            max_tokens=400,
+            max_tokens=200,
             timeout=30
         )
         result = json.loads(response.choices[0].message.content)
@@ -603,10 +552,6 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
             "offer_trial": False
         }
 
-# ============================================================
-# WEBHOOK
-# ============================================================
-
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
@@ -617,7 +562,6 @@ async def webhook(request: Request):
         msg = body["message"]
         user_id = msg["from"]["id"]
         
-        # === ГОЛОСОВОЕ СООБЩЕНИЕ ===
         if "voice" in msg:
             file_id = msg["voice"]["file_id"]
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
@@ -651,7 +595,6 @@ async def webhook(request: Request):
             save_message(user_id, "assistant", "Привет. Я AURA.")
             return JSONResponse({"ok": True})
         
-        # === ТОЧНОЕ ВРЕМЯ ===
         time_keywords = ["время", "сколько время", "который час", "точное время", "часы"]
         if any(word in text.lower() for word in time_keywords):
             user_city = get_fact(user_id, "city") or "Москва"
@@ -660,7 +603,6 @@ async def webhook(request: Request):
             await send_message(user_id, f"⏰ Сейчас {time_str} по местному времени ({user_city}).")
             return JSONResponse({"ok": True})
         
-        # === ПОИСК ЧЕРЕЗ АГЕНТОВ ЯНДЕКСА ===
         search_triggers = ["найди", "поищи", "цены", "билеты", "скидки", "акции", "новости", "погода", "курс", "стоимость"]
         analyze_triggers = ["сравни", "проанализируй", "исследуй", "изучи", "разбери", "глубоко", "детально"]
         reason_triggers = ["посоветуй", "что лучше", "как поступить", "выбери", "рекомендуй", "какой вариант", "стоит ли"]
@@ -711,7 +653,6 @@ async def webhook(request: Request):
                 )
             return JSONResponse({"ok": True})
         
-        # === ОСНОВНОЙ ДИАЛОГ ===
         save_message(user_id, "user", text)
         history = get_recent_history(user_id, limit=20)
         
