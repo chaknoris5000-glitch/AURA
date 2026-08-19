@@ -200,7 +200,7 @@ def get_recent_history(user_id, limit=20):
         return []
 
 async def smart_search_history(user_id, query_text):
-    """Умный поиск по всей истории через DeepSeek."""
+    """Умный поиск по всей истории пользователя."""
     try:
         # 1. Извлекаем ключевые слова и дату через DeepSeek
         prompt = f"""
@@ -212,8 +212,7 @@ async def smart_search_history(user_id, query_text):
 Ответь строго JSON:
 {{
     "keywords": ["слово1", "слово2"],
-    "days_ago": число_или_null,
-    "time_hint": "сегодня/неделя/месяц/не указано"
+    "days_ago": число_или_null
 }}
 """
         response = deepseek.chat.completions.create(
@@ -233,14 +232,15 @@ async def smart_search_history(user_id, query_text):
         # 2. Строим запрос к Supabase
         builder = supabase.table("history")\
             .select("role, content, created_at")\
-            .eq("user_id", user_id)
+            .eq("user_id", user_id)\
+            .eq("role", "user")  # Только сообщения пользователя
         
-        # Фильтр по дате (если указана)
+        # Фильтр по дате
         if days_ago:
             cutoff = datetime.now() - timedelta(days=days_ago)
             builder = builder.gte("created_at", cutoff.isoformat())
         
-        # Поиск по ключевым словам (через OR)
+        # Поиск по ключевым словам
         if keywords:
             conditions = [f"content.ilike.%{kw}%" for kw in keywords]
             builder = builder.or_(",".join(conditions))
@@ -250,25 +250,6 @@ async def smart_search_history(user_id, query_text):
         
     except Exception as e:
         logger.error(f"❌ Ошибка умного поиска: {e}")
-        return []
-
-def search_history(user_id, query, days_ago=None, limit=5):
-    """Простой поиск по ключевым словам (запасной вариант)."""
-    if not supabase:
-        return []
-    try:
-        builder = supabase.table("history")\
-            .select("role, content, created_at")\
-            .eq("user_id", user_id)
-        if days_ago:
-            cutoff = datetime.now() - timedelta(days=days_ago)
-            builder = builder.gte("created_at", cutoff.isoformat())
-        if query:
-            builder = builder.ilike("content", f"%{query}%")
-        res = builder.order("created_at", desc=True).limit(limit).execute()
-        return list(reversed(res.data)) if res.data else []
-    except Exception as e:
-        logger.error(f"❌ Ошибка поиска в истории: {e}")
         return []
 
 def save_emotion(user_id, emotion, confidence):
@@ -368,11 +349,20 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
         emotion_instruction = "Пользователь в хорошем настроении. Отвечай живо, с юмором, поддерживай лёгкость."
     
     # === УМНЫЙ ПОИСК ПО ИСТОРИИ ===
-    memory_triggers = ["помнишь", "напомни", "вспомни", "подскажи", "что я говорил", "что я просил", "на той неделе", "в прошлый раз", "часов назад", "часа назад"]
+    memory_triggers = ["помнишь", "напомни", "вспомни", "подскажи", "что я говорил", "что я просил", "на той неделе", "в прошлый раз", "часов назад", "часа назад", "вчера", "сегодня"]
     if any(word in text.lower() for word in memory_triggers):
         results = await smart_search_history(user_id, text)
         if results:
-            memory_context = "\n".join([f"{h['role']}: {h['content']}" for h in results])
+            # Собираем только уникальные сообщения (дедупликация)
+            seen = set()
+            unique_messages = []
+            for msg in results:
+                key = msg['content'][:50]
+                if key not in seen:
+                    seen.add(key)
+                    unique_messages.append(msg)
+            
+            memory_context = "\n".join([f"{h['role']}: {h['content']}" for h in unique_messages[:5]])
             return {
                 "reply": f"📜 Нашёл в истории:\n\n{memory_context}",
                 "score": 0,
