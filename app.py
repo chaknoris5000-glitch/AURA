@@ -168,7 +168,7 @@ async def detect_emotion(text: str) -> dict:
         return {"emotion": "спокойствие", "confidence": 0.5}
 
 # ============================================================
-# ИСТОРИЯ СООБЩЕНИЙ
+# ИСТОРИЯ СООБЩЕНИЙ (С УМНЫМ ПОИСКОМ)
 # ============================================================
 
 def save_message(user_id, role, content):
@@ -199,7 +199,61 @@ def get_recent_history(user_id, limit=20):
         logger.error(f"❌ Ошибка загрузки: {e}")
         return []
 
+async def smart_search_history(user_id, query_text):
+    """Умный поиск по всей истории через DeepSeek."""
+    try:
+        # 1. Извлекаем ключевые понятия и дату через DeepSeek
+        prompt = f"""
+Проанализируй запрос пользователя: "{query_text}"
+Определи:
+1. Ключевые слова для поиска (существительные, темы)
+2. Временной период (если указан)
+
+Ответь строго JSON:
+{{
+    "keywords": ["слово1", "слово2"],
+    "days_ago": число_или_null,
+    "time_hint": "сегодня/неделя/месяц/не указано"
+}}
+"""
+        response = deepseek.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "system", "content": prompt}],
+            temperature=0.3,
+            max_tokens=150,
+            timeout=10
+        )
+        parsed = json.loads(response.choices[0].message.content)
+        keywords = parsed.get("keywords", [])
+        days_ago = parsed.get("days_ago")
+        
+        if not keywords:
+            return []
+        
+        # 2. Строим запрос к Supabase
+        builder = supabase.table("history")\
+            .select("role, content, created_at")\
+            .eq("user_id", user_id)
+        
+        # Фильтр по дате
+        if days_ago:
+            cutoff = datetime.now() - timedelta(days=days_ago)
+            builder = builder.gte("created_at", cutoff.isoformat())
+        
+        # Поиск по ключевым словам (через OR)
+        if keywords:
+            conditions = [f"content.ilike.%{kw}%" for kw in keywords]
+            builder = builder.or_(",".join(conditions))
+        
+        res = builder.order("created_at", desc=True).limit(10).execute()
+        return list(reversed(res.data)) if res.data else []
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка умного поиска: {e}")
+        return []
+
 def search_history(user_id, query, days_ago=None, limit=5):
+    """Простой поиск по ключевым словам (запасной вариант)."""
     if not supabase:
         return []
     try:
@@ -301,7 +355,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА (КОРОТКО И С ХАРИЗМОЙ)
+# ОСНОВНАЯ ЛОГИКА
 # ============================================================
 
 async def deepseek_interview(user_id: int, text: str, step: int, history: list, emotion: str = "спокойствие") -> dict:
@@ -313,19 +367,10 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
     elif emotion == "радость":
         emotion_instruction = "Пользователь в хорошем настроении. Отвечай живо, с юмором, поддерживай лёгкость."
     
-    # === ПРОВЕРКА НА ЗАПРОС В ИСТОРИЮ ===
+    # === УМНЫЙ ПОИСК ПО ИСТОРИИ ===
     memory_triggers = ["помнишь", "напомни", "вспомни", "подскажи", "что я говорил", "что я просил", "на той неделе", "в прошлый раз"]
     if any(word in text.lower() for word in memory_triggers):
-        query_words = [w for w in text.split() if len(w) > 2 and w.lower() not in memory_triggers]
-        query = " ".join(query_words) if query_words else None
-        days_ago = None
-        if "неделе" in text.lower():
-            days_ago = 7
-        elif "месяц" in text.lower():
-            days_ago = 30
-        elif "вчера" in text.lower():
-            days_ago = 1
-        results = search_history(user_id, query, days_ago, limit=5)
+        results = await smart_search_history(user_id, text)
         if results:
             memory_context = "\n".join([f"{h['role']}: {h['content']}" for h in results])
             return {
@@ -335,7 +380,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
             }
         else:
             return {
-                "reply": "📭 Не нашёл. Уточни.",
+                "reply": "📭 Не нашёл. Уточни, о чём речь.",
                 "score": 0,
                 "offer_trial": False
             }
@@ -352,21 +397,12 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 
 {emotion_instruction}
 
-Твоя СКРЫТАЯ ЗАДАЧА за 10–15 сообщений:
-1. Дать максимум пользы (цены, маршруты, варианты).
-2. Узнать человека (привычки, досуг, делегирование).
-3. Косвенно оценить платёжеспособность.
-
 ПРАВИЛА ОТВЕТОВ (ОБЯЗАТЕЛЬНО):
 1. **ОТВЕЧАЙ КОРОТКО.** Максимум 3–4 предложения на смысловой блок.
 2. **БЕЗ ВОДЫ.** Только суть: цифры, ссылки, действия.
 3. **СОХРАНЯЙ ХАРАКТЕР.** Ты — Тони Старк. Сарказм, лёгкость, харизма.
 4. **ПУНКТЫ — С НОВОЙ СТРОКИ.** Используй маркеры: ✅ 🔹 💎 ⚡.
 5. **НИКОГДА** не пиши пункты через запятую в одну строку.
-
-ПРАВИЛА ДЛЯ ПЛАНА НА ДЕНЬ:
-Если пользователь просит план на день, разбивай по временным слотам: Утро, День, Вечер, Ночь.
-Каждый слот начинай с жирного времени, например **Утро (7:00–9:00)**.
 
 ПРАВИЛА ДЛЯ ССЫЛОК:
 Если пользователь просит ссылку — дай её. Если точной нет — дай ссылку на поиск или инструкцию за 30 секунд.
