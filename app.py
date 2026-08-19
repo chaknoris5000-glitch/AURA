@@ -199,6 +199,24 @@ def get_recent_history(user_id, limit=20):
         logger.error(f"❌ Ошибка загрузки: {e}")
         return []
 
+def search_history(user_id, query, days_ago=None, limit=5):
+    if not supabase:
+        return []
+    try:
+        builder = supabase.table("history")\
+            .select("role, content, created_at")\
+            .eq("user_id", user_id)
+        if days_ago:
+            cutoff = datetime.now() - timedelta(days=days_ago)
+            builder = builder.gte("created_at", cutoff.isoformat())
+        if query:
+            builder = builder.ilike("content", f"%{query}%")
+        res = builder.order("created_at", desc=True).limit(limit).execute()
+        return list(reversed(res.data)) if res.data else []
+    except Exception as e:
+        logger.error(f"❌ Ошибка поиска в истории: {e}")
+        return []
+
 def save_emotion(user_id, emotion, confidence):
     if not supabase:
         return
@@ -251,7 +269,39 @@ async def search_organization(query: str, city: str = "Белово") -> dict:
         return {"error": str(e)}
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА (С ЖЁСТКОЙ СТРУКТУРОЙ)
+# ОТПРАВКА СТАТУСА "ПЕЧАТАЕТ..."
+# ============================================================
+
+async def send_typing(chat_id):
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction",
+            json={"chat_id": chat_id, "action": "typing"},
+            timeout=5
+        )
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки статуса печати: {e}")
+
+# ============================================================
+# ОТПРАВКА СООБЩЕНИЙ
+# ============================================================
+
+async def send_message(chat_id, text):
+    if not text:
+        text = "😅 Не понял."
+    if len(text) > 4000:
+        text = text[:3997] + "..."
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+            timeout=30
+        )
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки: {e}")
+
+# ============================================================
+# ОСНОВНАЯ ЛОГИКА (КОРОТКО И С ХАРИЗМОЙ)
 # ============================================================
 
 async def deepseek_interview(user_id: int, text: str, step: int, history: list, emotion: str = "спокойствие") -> dict:
@@ -275,21 +325,20 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
             days_ago = 30
         elif "вчера" in text.lower():
             days_ago = 1
-        if query or days_ago:
-            results = search_history(user_id, query, days_ago)
-            if results:
-                memory_context = "\n".join([f"{h['role']}: {h['content']}" for h in results[-5:]])
-                return {
-                    "reply": f"📜 Нашёл:\n\n{memory_context}",
-                    "score": 0,
-                    "offer_trial": False
-                }
-            else:
-                return {
-                    "reply": "📭 Не нашёл. Уточни, о чём речь.",
-                    "score": 0,
-                    "offer_trial": False
-                }
+        results = search_history(user_id, query, days_ago, limit=5)
+        if results:
+            memory_context = "\n".join([f"{h['role']}: {h['content']}" for h in results])
+            return {
+                "reply": f"📜 Нашёл в истории:\n\n{memory_context}",
+                "score": 0,
+                "offer_trial": False
+            }
+        else:
+            return {
+                "reply": "📭 Не нашёл. Уточни.",
+                "score": 0,
+                "offer_trial": False
+            }
     
     user_name = get_fact(user_id, "name")
     user_city = get_fact(user_id, "city")
@@ -308,23 +357,12 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 2. Узнать человека (привычки, досуг, делегирование).
 3. Косвенно оценить платёжеспособность.
 
-ПРАВИЛА СТРУКТУРЫ (ОБЯЗАТЕЛЬНО):
-1. Разбивай ответ на 2–3 абзаца с пустыми строками.
-2. Каждый пункт списка начинай с НОВОЙ СТРОКИ с маркером:
-   ✅ — для готовых решений
-   🔹 — для перечисления вариантов
-   💎 — для эксклюзивных предложений
-   ⚡ — для быстрых решений
-3. НИКОГДА не пиши пункты списка через запятую в одну строку.
-4. Цены, даты и ключевые цифры выделяй жирным (**цифра**).
-
-ПРИМЕР ПРАВИЛЬНОГО ОТВЕТА:
-✅ Билеты от **6 800 ₽**
-🔹 Время в пути: **4 часа 20 минут**
-🔹 Трансфер: такси ~2 500 ₽
-
-ПРИМЕР НЕПРАВИЛЬНОГО ОТВЕТА:
-✅ Билеты от 6 800 ₽, время 4 часа, трансфер 2 500 ₽
+ПРАВИЛА ОТВЕТОВ (ОБЯЗАТЕЛЬНО):
+1. **ОТВЕЧАЙ КОРОТКО.** Максимум 3–4 предложения на смысловой блок.
+2. **БЕЗ ВОДЫ.** Только суть: цифры, ссылки, действия.
+3. **СОХРАНЯЙ ХАРАКТЕР.** Ты — Тони Старк. Сарказм, лёгкость, харизма.
+4. **ПУНКТЫ — С НОВОЙ СТРОКИ.** Используй маркеры: ✅ 🔹 💎 ⚡.
+5. **НИКОГДА** не пиши пункты через запятую в одну строку.
 
 ПРАВИЛА ДЛЯ ПЛАНА НА ДЕНЬ:
 Если пользователь просит план на день, разбивай по временным слотам: Утро, День, Вечер, Ночь.
@@ -332,12 +370,6 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 
 ПРАВИЛА ДЛЯ ССЫЛОК:
 Если пользователь просит ссылку — дай её. Если точной нет — дай ссылку на поиск или инструкцию за 30 секунд.
-
-ПРАВИЛА ОТВЕТОВ:
-1. **МАКСИМУМ 3 ПРЕДЛОЖЕНИЯ** на один смысловой блок.
-2. **СНАЧАЛА ПОЛЬЗА:** дай конкретный ответ.
-3. **НЕ СПРАШИВАЙ, А ПРЕДЛАГАЙ.**
-4. **НЕ НАВЯЗЫВАЙСЯ.**
 
 {name_instruction}
 {city_instruction}
@@ -349,7 +381,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 
 ОТВЕТЬ ТОЛЬКО JSON:
 {{
-    "reply": "твой ответ (с абзацами, маркерами на новых строках и жирными цифрами)",
+    "reply": "твой ответ (коротко, с харизмой, маркерами на новых строках)",
     "score": число_от_0_до_100,
     "offer_trial": false
 }}
@@ -359,8 +391,8 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
         response = deepseek.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "system", "content": prompt}],
-            temperature=0.9,
-            max_tokens=500,
+            temperature=0.85,
+            max_tokens=400,
             timeout=30
         )
         result = json.loads(response.choices[0].message.content)
@@ -372,24 +404,6 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
             "score": 0,
             "offer_trial": False
         }
-
-# ============================================================
-# ОТПРАВКА СООБЩЕНИЙ
-# ============================================================
-
-async def send_message(chat_id, text):
-    if not text:
-        text = "😅 Не понял."
-    if len(text) > 4000:
-        text = text[:3997] + "..."
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
-            timeout=30
-        )
-    except Exception as e:
-        logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
 # WEBHOOK
@@ -410,8 +424,12 @@ async def webhook(request: Request):
             return JSONResponse({"ok": True})
         
         if text == "/start":
-            await send_message(user_id, "Привет! Я AURA. 👋 Напиши, что нужно найти или сделать.")
-            save_message(user_id, "assistant", "Привет! Я AURA. 👋")
+            await send_typing(user_id)
+            await send_message(
+                user_id,
+                "Привет. Я AURA. Если ты здесь — значит, ты уже не просто ищешь, а хочешь, чтобы искали за тебя. Напиши, что нужно — и я покажу, на что способен."
+            )
+            save_message(user_id, "assistant", "Привет. Я AURA.")
             return JSONResponse({"ok": True})
         
         # === ТОЧНОЕ ВРЕМЯ ===
@@ -419,6 +437,7 @@ async def webhook(request: Request):
         if any(word in text.lower() for word in time_keywords):
             user_city = get_fact(user_id, "city") or "Москва"
             time_str = get_time_for_city(user_city)
+            await send_typing(user_id)
             await send_message(user_id, f"⏰ Сейчас {time_str} по местному времени ({user_city}).")
             return JSONResponse({"ok": True})
         
@@ -435,8 +454,10 @@ async def webhook(request: Request):
                     reply += f"🌐 [Сайт]({result['site']})\n"
                 if result['rating'] > 0:
                     reply += f"⭐ {result['rating']} / 5  ({result['reviews']} отзывов)"
+                await send_typing(user_id)
                 await send_message(user_id, reply)
             else:
+                await send_typing(user_id)
                 await send_message(
                     user_id,
                     f"😊 Не нашёл «{text}» в {user_city}. Проверь в 2ГИС или справочной 122."
@@ -459,6 +480,7 @@ async def webhook(request: Request):
             result = await deepseek_interview(user_id, text, 0, history, emotion)
             reply = result.get("reply", "😅 Не понял.")
             save_message(user_id, "assistant", reply)
+            await send_typing(user_id)
             await send_message(user_id, reply)
             return JSONResponse({"ok": True})
         
@@ -478,12 +500,16 @@ async def webhook(request: Request):
         if not get_fact(user_id, "name"):
             if len(text.split()) == 1 and text[0].isupper() and len(text) > 1:
                 save_fact(user_id, "name", text)
+                await send_typing(user_id)
                 await send_message(user_id, f"Приятно познакомиться, {text}! ✈️")
+                await send_typing(user_id)
                 await send_message(user_id, "А подскажи, в каком городе ты живёшь? Так я смогу давать тебе более точную информацию.")
                 return JSONResponse({"ok": True})
             else:
                 save_message(user_id, "assistant", reply)
+                await send_typing(user_id)
                 await send_message(user_id, reply)
+                await send_typing(user_id)
                 await send_message(user_id, "Кстати, меня зовут AURA. А как мне к тебе обращаться?")
                 return JSONResponse({"ok": True})
         
@@ -491,12 +517,16 @@ async def webhook(request: Request):
         if not get_fact(user_id, "city"):
             if len(text.split()) == 1 and text[0].isupper() and len(text) > 1:
                 save_fact(user_id, "city", text)
+                await send_typing(user_id)
                 await send_message(user_id, f"Отлично, {get_fact(user_id, 'name')}! Теперь я буду давать информацию по твоему городу.")
+                await send_typing(user_id)
                 await send_message(user_id, f"Кстати, в {text} сейчас есть интересные события. Могу подобрать кино, рестораны или парковки, если нужно.")
                 return JSONResponse({"ok": True})
             else:
                 save_message(user_id, "assistant", reply)
+                await send_typing(user_id)
                 await send_message(user_id, reply)
+                await send_typing(user_id)
                 await send_message(user_id, "А подскажи, в каком городе ты живёшь? Так я смогу давать тебе более точную информацию.")
                 return JSONResponse({"ok": True})
         
@@ -507,6 +537,7 @@ async def webhook(request: Request):
             reply += "\n\n🔥 Слушай, я вижу, что ты ценишь время. Давай я дам тебе 3 дня полного доступа — бесплатно. Посмотришь, насколько со мной лучше. Ну что, включаем?"
         
         save_message(user_id, "assistant", reply)
+        await send_typing(user_id)
         await send_message(user_id, reply)
         
         return JSONResponse({"ok": True})
