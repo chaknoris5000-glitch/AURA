@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# === КЛЮЧИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ===
+# === КЛЮЧИ ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
@@ -84,6 +84,40 @@ def call_yandex_agent(user_text: str, user_name: str = "", user_city: str = "") 
     except Exception as e:
         logger.error(f"❌ Ошибка агента Яндекса: {e}")
         return ""
+
+# ============================================================
+# УПАКОВКА ОТВЕТА В СТИЛЬ AURA
+# ============================================================
+
+async def pack_response(raw_text: str, user_name: str = "", user_city: str = "") -> str:
+    """Превращает сырой ответ агента в короткий структурированный ответ в стиле AURA."""
+    try:
+        prompt = f"""
+Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
+
+Перед тобой сырой ответ поискового агента Яндекса. Твоя задача:
+1. Убрать все ссылки на агрегаторы (Aviasales, Яндекс.Путешествия и т.д.).
+2. Оставить только самое важное: цены, даты, время, аэропорты, рекомендации.
+3. Оформить ответ в стиле AURA — коротко, с харизмой, с маркерами ✅ 🔹 💎 ⚡.
+4. Использовать имя пользователя ({user_name or "Гость"}) и город ({user_city or "Москва"}).
+5. Ответ — максимум 5–6 предложений.
+
+Сырой ответ агента:
+{raw_text}
+
+Твой ответ (только текст, без ссылок):
+"""
+        response = deepseek.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "system", "content": prompt}],
+            temperature=0.85,
+            max_tokens=400,
+            timeout=30
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"❌ Ошибка упаковки ответа: {e}")
+        return raw_text  # возвращаем сырой ответ, если упаковка не сработала
 
 # ============================================================
 # ТОЧНОЕ ВРЕМЯ
@@ -201,16 +235,6 @@ async def extract_facts(text: str) -> dict:
 Проанализируй сообщение пользователя: "{text}"
 Определи, есть ли в нём информация о самом пользователе (факты, предпочтения, привычки).
 Верни JSON с полем "facts" — объект, где ключи — это названия полей из таблицы user_portrait, а значения — извлечённые факты.
-Допустимые ключи:
-name, city, age, gender, job, job_title, industry, income_level, work_schedule,
-travel_frequency, travel_purpose, preferred_cities, hotel_preference, airline_preference, travel_with,
-budget_travel, budget_entertainment, budget_food,
-hobbies, sports, music_genres, movie_genres, books_genres,
-diet, favorite_cuisine, restaurant_preference,
-family_status, has_children, children_ages,
-priorities, devices, apps_favorite,
-communication_style, preferred_language, notes
-
 Если фактов нет — верни пустой объект.
 """
         response = deepseek.chat.completions.create(
@@ -262,15 +286,8 @@ async def smart_search_history(user_id, query_text):
     try:
         prompt = f"""
 Проанализируй запрос пользователя: "{query_text}"
-Определи:
-1. Ключевые слова для поиска (существительные, темы)
-2. Временной период (если указан)
-
-Ответь строго JSON:
-{{
-    "keywords": ["слово1", "слово2"],
-    "days_ago": число_или_null
-}}
+Определи ключевые слова и временной период.
+Ответь строго JSON: {{"keywords": ["слово1"], "days_ago": число}}
 """
         response = deepseek.chat.completions.create(
             model="deepseek-chat",
@@ -353,9 +370,7 @@ async def detect_emotion(text: str) -> dict:
     try:
         prompt = f"""
 Проанализируй эмоцию в сообщении пользователя: "{text}"
-Верни JSON с двумя полями:
-- emotion: одна из (радость, грусть, гнев, страх, удивление, отвращение, спокойствие)
-- confidence: число от 0 до 1
+Верни JSON: {{"emotion": "спокойствие", "confidence": 0.9}}
 """
         response = deepseek.chat.completions.create(
             model="deepseek-chat",
@@ -441,7 +456,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА (С АГЕНТОМ ЯНДЕКСА)
+# ОСНОВНАЯ ЛОГИКА
 # ============================================================
 
 async def deepseek_interview(user_id: int, text: str, step: int, history: list, emotion: str = "спокойствие") -> dict:
@@ -481,8 +496,8 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
     user_city = get_fact(user_id, "city")
     portrait = get_portrait(user_id)
     
-    name_instruction = f"Зовут {user_name}. Обращайся по имени." if user_name else ""
-    city_instruction = f"Город: {user_city}. Используй для поиска." if user_city else ""
+    name_instruction = f"Зовут {user_name}." if user_name else ""
+    city_instruction = f"Город: {user_city}." if user_city else ""
     
     portrait_context = ""
     if portrait:
@@ -593,10 +608,12 @@ async def webhook(request: Request):
             await send_typing(user_id)
             
             try:
-                yandex_result = call_yandex_agent(text, user_name, user_city)
-                if yandex_result:
-                    await send_message(user_id, yandex_result)
-                    save_message(user_id, "assistant", yandex_result)
+                raw_result = call_yandex_agent(text, user_name, user_city)
+                if raw_result:
+                    # Упаковываем ответ в стиль AURA
+                    packed = await pack_response(raw_result, user_name, user_city)
+                    await send_message(user_id, packed)
+                    save_message(user_id, "assistant", packed)
                     return JSONResponse({"ok": True})
             except Exception as e:
                 logger.error(f"❌ Ошибка агента Яндекса: {e}")
