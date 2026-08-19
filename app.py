@@ -115,6 +115,40 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
+# РАБОТА С ПОРТРЕТОМ (user_portrait)
+# ============================================================
+
+def save_portrait_field(user_id, field, value):
+    """Сохраняет одно поле в портрет пользователя."""
+    if not supabase:
+        return
+    try:
+        # Проверяем, есть ли запись для этого пользователя
+        existing = supabase.table("user_portrait").select("user_id").eq("user_id", user_id).execute()
+        if existing.data:
+            # Обновляем поле
+            supabase.table("user_portrait").update({field: value, "updated_at": datetime.now().isoformat()}).eq("user_id", user_id).execute()
+        else:
+            # Создаём запись с этим полем
+            supabase.table("user_portrait").insert({
+                "user_id": user_id,
+                field: value,
+                "updated_at": datetime.now().isoformat()
+            }).execute()
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения портрета ({field}): {e}")
+
+def get_portrait(user_id):
+    """Возвращает полный портрет пользователя."""
+    if not supabase:
+        return None
+    try:
+        res = supabase.table("user_portrait").select("*").eq("user_id", user_id).execute()
+        return res.data[0] if res.data else None
+    except:
+        return None
+
+# ============================================================
 # РАБОТА СО СТАТУСОМ ТРИАЛА
 # ============================================================
 
@@ -200,9 +234,7 @@ def get_recent_history(user_id, limit=20):
         return []
 
 async def smart_search_history(user_id, query_text):
-    """Умный поиск по всей истории пользователя."""
     try:
-        # 1. Извлекаем ключевые слова и дату через DeepSeek
         prompt = f"""
 Проанализируй запрос пользователя: "{query_text}"
 Определи:
@@ -229,18 +261,15 @@ async def smart_search_history(user_id, query_text):
         if not keywords and not days_ago:
             return []
         
-        # 2. Строим запрос к Supabase
         builder = supabase.table("history")\
             .select("role, content, created_at")\
             .eq("user_id", user_id)\
-            .eq("role", "user")  # Только сообщения пользователя
+            .eq("role", "user")
         
-        # Фильтр по дате
         if days_ago:
             cutoff = datetime.now() - timedelta(days=days_ago)
             builder = builder.gte("created_at", cutoff.isoformat())
         
-        # Поиск по ключевым словам
         if keywords:
             conditions = [f"content.ilike.%{kw}%" for kw in keywords]
             builder = builder.or_(",".join(conditions))
@@ -336,7 +365,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА
+# ОСНОВНАЯ ЛОГИКА (С ПОРТРЕТОМ)
 # ============================================================
 
 async def deepseek_interview(user_id: int, text: str, step: int, history: list, emotion: str = "спокойствие") -> dict:
@@ -353,7 +382,6 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
     if any(word in text.lower() for word in memory_triggers):
         results = await smart_search_history(user_id, text)
         if results:
-            # Собираем только уникальные сообщения (дедупликация)
             seen = set()
             unique_messages = []
             for msg in results:
@@ -377,9 +405,27 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
     
     user_name = get_fact(user_id, "name")
     user_city = get_fact(user_id, "city")
+    portrait = get_portrait(user_id)
     
     name_instruction = f"Зовут {user_name}. Обращайся по имени, но не в каждом предложении." if user_name else "Не знаешь имени — не спрашивай, это делает отдельная логика."
     city_instruction = f"Город: {user_city}. Используй для поиска локальной информации." if user_city else "Город не указан — не спрашивай, это делает отдельная логика."
+    
+    # Формируем контекст из портрета
+    portrait_context = ""
+    if portrait:
+        portrait_parts = []
+        if portrait.get('job'):
+            portrait_parts.append(f"работа: {portrait['job']}")
+        if portrait.get('hobbies'):
+            hobbies_str = ", ".join(portrait['hobbies'][:3])
+            portrait_parts.append(f"увлечения: {hobbies_str}")
+        if portrait.get('travel_frequency'):
+            portrait_parts.append(f"путешествия: {portrait['travel_frequency']}")
+        if portrait.get('preferred_cities'):
+            cities_str = ", ".join(portrait['preferred_cities'][:3])
+            portrait_parts.append(f"любимые города: {cities_str}")
+        if portrait_parts:
+            portrait_context = "ПОРТРЕТ ПОЛЬЗОВАТЕЛЯ: " + ", ".join(portrait_parts) + "."
     
     history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history[-15:]])
     
@@ -387,12 +433,15 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 
 {emotion_instruction}
 
+{portrait_context}
+
 ПРАВИЛА ОТВЕТОВ (ОБЯЗАТЕЛЬНО):
 1. **ОТВЕЧАЙ КОРОТКО.** Максимум 3–4 предложения на смысловой блок.
 2. **БЕЗ ВОДЫ.** Только суть: цифры, ссылки, действия.
 3. **СОХРАНЯЙ ХАРАКТЕР.** Ты — Тони Старк. Сарказм, лёгкость, харизма.
 4. **ПУНКТЫ — С НОВОЙ СТРОКИ.** Используй маркеры: ✅ 🔹 💎 ⚡.
 5. **НИКОГДА** не пиши пункты через запятую в одну строку.
+6. **ИСПОЛЬЗУЙ ПОРТРЕТ.** Если знаешь о пользователе что-то из портрета — используй это для персонализации.
 
 ПРАВИЛА ДЛЯ ССЫЛОК:
 Если пользователь просит ссылку — дай её. Если точной нет — дай ссылку на поиск или инструкцию за 30 секунд.
@@ -526,6 +575,7 @@ async def webhook(request: Request):
         if not get_fact(user_id, "name"):
             if len(text.split()) == 1 and text[0].isupper() and len(text) > 1:
                 save_fact(user_id, "name", text)
+                save_portrait_field(user_id, "name", text)
                 await send_typing(user_id)
                 await send_message(user_id, f"Приятно познакомиться, {text}! ✈️")
                 await send_typing(user_id)
@@ -543,6 +593,7 @@ async def webhook(request: Request):
         if not get_fact(user_id, "city"):
             if len(text.split()) == 1 and text[0].isupper() and len(text) > 1:
                 save_fact(user_id, "city", text)
+                save_portrait_field(user_id, "city", text)
                 await send_typing(user_id)
                 await send_message(user_id, f"Отлично, {get_fact(user_id, 'name')}! Теперь я буду давать информацию по твоему городу.")
                 await send_typing(user_id)
