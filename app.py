@@ -3,6 +3,7 @@ import json
 import httpx
 import asyncio
 import logging
+import tempfile
 from datetime import datetime, timedelta
 import pytz
 from fastapi import FastAPI, Request
@@ -55,11 +56,34 @@ app = FastAPI()
 user_states = {}
 
 # ============================================================
+# РАСПОЗНАВАНИЕ ГОЛОСА (WHISPER)
+# ============================================================
+
+def transcribe_audio(audio_url):
+    try:
+        resp = requests.get(audio_url, timeout=30)
+        if resp.status_code != 200:
+            return None
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp:
+            tmp.write(resp.content)
+            tmp_path = tmp.name
+        with open(tmp_path, "rb") as f:
+            result = groq.audio.transcriptions.create(
+                file=(tmp_path, f.read()),
+                model="whisper-large-v3-turbo",
+                language="ru"
+            )
+        os.unlink(tmp_path)
+        return result.text
+    except Exception as e:
+        logger.error(f"❌ Ошибка распознавания: {e}")
+        return None
+
+# ============================================================
 # ВЫЗОВ АГЕНТОВ ЯНДЕКСА
 # ============================================================
 
 def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_city: str = "", budget: str = "") -> str:
-    """Универсальный вызов любого агента в Yandex AI Studio."""
     try:
         client = OpenAI(
             api_key=YANDEX_API_KEY,
@@ -592,7 +616,28 @@ async def webhook(request: Request):
         
         msg = body["message"]
         user_id = msg["from"]["id"]
-        text = msg.get("text", "")
+        
+        # === ГОЛОСОВОЕ СООБЩЕНИЕ ===
+        if "voice" in msg:
+            file_id = msg["voice"]["file_id"]
+            file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
+            try:
+                file_resp = requests.get(file_url, timeout=30)
+                if file_resp.status_code == 200 and file_resp.json().get("ok"):
+                    audio_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_resp.json()['result']['file_path']}"
+                    text = transcribe_audio(audio_url)
+                    if not text:
+                        await send_message(user_id, "⚠️ Не удалось распознать голос. Попробуй ещё раз.")
+                        return JSONResponse({"ok": True})
+                else:
+                    await send_message(user_id, "⚠️ Ошибка загрузки голосового сообщения.")
+                    return JSONResponse({"ok": True})
+            except Exception as e:
+                logger.error(f"❌ Ошибка голоса: {e}")
+                await send_message(user_id, "⚠️ Ошибка обработки голоса. Попробуй написать!")
+                return JSONResponse({"ok": True})
+        else:
+            text = msg.get("text", "")
         
         if not text:
             return JSONResponse({"ok": True})
@@ -627,7 +672,6 @@ async def webhook(request: Request):
             
             await send_typing(user_id)
             
-            # Выбираем агента по типу запроса
             if any(word in text.lower() for word in reason_triggers):
                 agent_id = AGENT_REASONING_ID
                 logger.info(f"🧠 Использую рассуждающего агента для запроса: {text}")
@@ -648,7 +692,6 @@ async def webhook(request: Request):
             except Exception as e:
                 logger.error(f"❌ Ошибка агента Яндекса: {e}")
             
-            # Запасной вариант — 2ГИС
             user_city = get_fact(user_id, "city") or "Белово"
             result = await search_organization(text, user_city)
             if result and "error" not in result:
