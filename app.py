@@ -48,7 +48,7 @@ app = FastAPI()
 user_states = {}
 
 # ============================================================
-# ТОЧНОЕ ВРЕМЯ (ЧЕРЕЗ PYTZ)
+# ТОЧНОЕ ВРЕМЯ
 # ============================================================
 
 def get_time_for_city(city: str = "Москва") -> str:
@@ -115,31 +115,28 @@ def get_fact(user_id, key):
         return None
 
 # ============================================================
-# РАБОТА С ПОРТРЕТОМ (user_portrait)
+# РАБОТА С ПОРТРЕТОМ
 # ============================================================
 
 def save_portrait_field(user_id, field, value):
-    """Сохраняет одно поле в портрет пользователя."""
     if not supabase:
         return
     try:
-        # Проверяем, есть ли запись для этого пользователя
+        # Проверяем, есть ли запись
         existing = supabase.table("user_portrait").select("user_id").eq("user_id", user_id).execute()
         if existing.data:
-            # Обновляем поле
             supabase.table("user_portrait").update({field: value, "updated_at": datetime.now().isoformat()}).eq("user_id", user_id).execute()
         else:
-            # Создаём запись с этим полем
             supabase.table("user_portrait").insert({
                 "user_id": user_id,
                 field: value,
                 "updated_at": datetime.now().isoformat()
             }).execute()
+        logger.info(f"💾 Сохранён портрет: {field} = {value}")
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения портрета ({field}): {e}")
 
 def get_portrait(user_id):
-    """Возвращает полный портрет пользователя."""
     if not supabase:
         return None
     try:
@@ -149,60 +146,50 @@ def get_portrait(user_id):
         return None
 
 # ============================================================
-# РАБОТА СО СТАТУСОМ ТРИАЛА
+# ИЗВЛЕЧЕНИЕ ФАКТОВ ИЗ СООБЩЕНИЯ
 # ============================================================
 
-def get_trial_status(user_id):
-    if not supabase:
-        return None
-    try:
-        res = supabase.table("trial_status").select("*").eq("user_id", user_id).execute()
-        return res.data[0] if res.data else None
-    except:
-        return None
-
-def save_trial_status(user_id, started, ended):
-    if not supabase:
-        return
-    try:
-        supabase.table("trial_status").insert({
-            "user_id": user_id,
-            "trial_started": started.isoformat(),
-            "trial_ended": ended.isoformat(),
-            "is_active": True
-        }).execute()
-    except Exception as e:
-        logger.error(f"❌ Ошибка сохранения триала: {e}")
-
-# ============================================================
-# ДЕТЕКТОР ЭМОЦИЙ (ЧЕРЕЗ DEEPSEEK)
-# ============================================================
-
-async def detect_emotion(text: str) -> dict:
+async def extract_facts(text: str) -> dict:
+    """Извлекает факты о пользователе из сообщения."""
     try:
         prompt = f"""
-Проанализируй эмоцию в сообщении пользователя: "{text}"
-Верни JSON с двумя полями:
-- emotion: одна из (радость, грусть, гнев, страх, удивление, отвращение, спокойствие)
-- confidence: число от 0 до 1
+Проанализируй сообщение пользователя: "{text}"
+Определи, есть ли в нём информация о самом пользователе (факты, предпочтения, привычки).
+Верни JSON с полем "facts" — объект, где ключи — это названия полей из таблицы user_portrait, а значения — извлечённые факты.
+Допустимые ключи:
+name, city, age, gender, job, job_title, industry, income_level, work_schedule,
+travel_frequency, travel_purpose, preferred_cities, hotel_preference, airline_preference, travel_with,
+budget_travel, budget_entertainment, budget_food,
+hobbies, sports, music_genres, movie_genres, books_genres,
+diet, favorite_cuisine, restaurant_preference,
+family_status, has_children, children_ages,
+priorities, devices, apps_favorite,
+communication_style, preferred_language, notes
 
-Ответь строго JSON.
+Если фактов нет — верни пустой объект.
+Пример ответа:
+{{
+    "facts": {{
+        "favorite_cuisine": "итальянская",
+        "hobbies": ["фотография", "путешествия"]
+    }}
+}}
 """
         response = deepseek.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "system", "content": prompt}],
             temperature=0.3,
-            max_tokens=100,
+            max_tokens=300,
             timeout=10
         )
         result = json.loads(response.choices[0].message.content)
-        return result
+        return result.get("facts", {})
     except Exception as e:
-        logger.error(f"❌ Ошибка детектора эмоций: {e}")
-        return {"emotion": "спокойствие", "confidence": 0.5}
+        logger.error(f"❌ Ошибка извлечения фактов: {e}")
+        return {}
 
 # ============================================================
-# ИСТОРИЯ СООБЩЕНИЙ (С УМНЫМ ПОИСКОМ)
+# ИСТОРИЯ СООБЩЕНИЙ
 # ============================================================
 
 def save_message(user_id, role, content):
@@ -295,6 +282,59 @@ def save_emotion(user_id, emotion, confidence):
         logger.error(f"❌ Ошибка сохранения эмоции: {e}")
 
 # ============================================================
+# РАБОТА СО СТАТУСОМ ТРИАЛА
+# ============================================================
+
+def get_trial_status(user_id):
+    if not supabase:
+        return None
+    try:
+        res = supabase.table("trial_status").select("*").eq("user_id", user_id).execute()
+        return res.data[0] if res.data else None
+    except:
+        return None
+
+def save_trial_status(user_id, started, ended):
+    if not supabase:
+        return
+    try:
+        supabase.table("trial_status").insert({
+            "user_id": user_id,
+            "trial_started": started.isoformat(),
+            "trial_ended": ended.isoformat(),
+            "is_active": True
+        }).execute()
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения триала: {e}")
+
+# ============================================================
+# ДЕТЕКТОР ЭМОЦИЙ
+# ============================================================
+
+async def detect_emotion(text: str) -> dict:
+    try:
+        prompt = f"""
+Проанализируй эмоцию в сообщении пользователя: "{text}"
+Верни JSON с двумя полями:
+- emotion: одна из (радость, грусть, гнев, страх, удивление, отвращение, спокойствие)
+- confidence: число от 0 до 1
+
+Ответь строго JSON.
+"""
+        response = deepseek.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "system", "content": prompt}],
+            temperature=0.3,
+            max_tokens=100,
+            timeout=10
+        )
+        result = json.loads(response.choices[0].message.content)
+        return result
+    except Exception as e:
+        logger.error(f"❌ Ошибка детектора эмоций: {e}")
+        return {"emotion": "спокойствие", "confidence": 0.5}
+
+# ============================================================
 # 2ГИС
 # ============================================================
 
@@ -365,7 +405,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА (С ПОРТРЕТОМ)
+# ОСНОВНАЯ ЛОГИКА
 # ============================================================
 
 async def deepseek_interview(user_id: int, text: str, step: int, history: list, emotion: str = "спокойствие") -> dict:
@@ -414,6 +454,10 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
     portrait_context = ""
     if portrait:
         portrait_parts = []
+        if portrait.get('name'):
+            portrait_parts.append(f"имя: {portrait['name']}")
+        if portrait.get('city'):
+            portrait_parts.append(f"город: {portrait['city']}")
         if portrait.get('job'):
             portrait_parts.append(f"работа: {portrait['job']}")
         if portrait.get('hobbies'):
@@ -424,6 +468,8 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
         if portrait.get('preferred_cities'):
             cities_str = ", ".join(portrait['preferred_cities'][:3])
             portrait_parts.append(f"любимые города: {cities_str}")
+        if portrait.get('favorite_cuisine'):
+            portrait_parts.append(f"любимая кухня: {portrait['favorite_cuisine']}")
         if portrait_parts:
             portrait_context = "ПОРТРЕТ ПОЛЬЗОВАТЕЛЯ: " + ", ".join(portrait_parts) + "."
     
@@ -539,15 +585,27 @@ async def webhook(request: Request):
                 )
             return JSONResponse({"ok": True})
         
+        # === СОХРАНЯЕМ СООБЩЕНИЕ ===
+        save_message(user_id, "user", text)
+        history = get_recent_history(user_id, limit=20)
+        
+        # === ИЗВЛЕЧЕНИЕ ФАКТОВ ДЛЯ ПОРТРЕТА ===
+        facts = await extract_facts(text)
+        if facts:
+            for field, value in facts.items():
+                if value and value != "null" and value != "None":
+                    # Если поле — массив, сохраняем как есть
+                    if isinstance(value, list):
+                        save_portrait_field(user_id, field, value)
+                    else:
+                        save_portrait_field(user_id, field, value)
+        
         # === ДЕТЕКТОР ЭМОЦИЙ ===
         emotion_data = await detect_emotion(text)
         emotion = emotion_data.get("emotion", "спокойствие")
         confidence = emotion_data.get("confidence", 0.5)
         save_emotion(user_id, emotion, confidence)
         logger.info(f"🧠 Эмоция: {emotion} ({confidence:.2f})")
-        
-        save_message(user_id, "user", text)
-        history = get_recent_history(user_id, limit=20)
         
         # === ПРОВЕРКА ТРИАЛА ===
         trial = get_trial_status(user_id)
