@@ -32,6 +32,7 @@ YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 # === ID АГЕНТОВ ===
 AGENT_SEARCH_ID = os.getenv("YANDEX_AGENT_ID", "fvt3te2kgttig7u3a1fb")
 AGENT_RESEARCH_ID = os.getenv("YANDEX_AGENT_RESEARCH_ID", "fvti80ngse2778agbmdl")
+AGENT_REASONING_ID = os.getenv("YANDEX_AGENT_REASONING_ID", "fvtg0c38oi7n43d0n9gf")
 
 # === КЛИЕНТЫ ===
 deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
@@ -57,7 +58,7 @@ user_states = {}
 # ВЫЗОВ АГЕНТОВ ЯНДЕКСА
 # ============================================================
 
-def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_city: str = "") -> str:
+def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_city: str = "", budget: str = "") -> str:
     """Универсальный вызов любого агента в Yandex AI Studio."""
     try:
         client = OpenAI(
@@ -66,13 +67,16 @@ def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_c
             project=YANDEX_FOLDER_ID
         )
         
+        variables = {
+            "user_name": user_name or "Гость",
+            "user_city": user_city or "Москва",
+            "budget": budget or "не указан"
+        }
+        
         response = client.responses.create(
             prompt={
                 "id": agent_id,
-                "variables": {
-                    "user_name": user_name or "Гость",
-                    "user_city": user_city or "Москва"
-                }
+                "variables": variables
             },
             input=user_text,
             tools=[
@@ -97,21 +101,25 @@ async def pack_response(raw_text: str, user_name: str = "", user_city: str = "")
         prompt = f"""
 Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
 
-Перед тобой сырой ответ поискового агента Яндекса. Твоя задача:
-1. Убрать все ссылки на агрегаторы (Aviasales, Яндекс.Путешествия, Туту, Ozon Travel, Т-Банк, UniTicket).
-2. Оставить ссылки на конкретные рейсы, если они есть. Оформляй их как [Ссылка на билет](url).
-3. Структурировать ответ в виде списка:
-   ✅ — для каждого варианта (цена, авиакомпания, время)
-   💎 — для самого выгодного варианта
-   ⚡ — для советов и предупреждений
-4. Каждый вариант — с новой строки.
-5. Использовать имя пользователя ({user_name or "Гость"}) и город ({user_city or "Москва"}).
-6. Ответ — максимум 6–7 предложений.
+Перед тобой сырой ответ поискового агента Яндекса. Твоя задача — превратить его в красивый, структурированный ответ в стиле AURA.
+
+ПРАВИЛА ФОРМАТИРОВАНИЯ (ОБЯЗАТЕЛЬНО):
+1. Разбивай ответ на 2–3 смысловых блока.
+2. Между блоками — ОБЯЗАТЕЛЬНО пустая строка.
+3. Каждый пункт списка начинай с новой строки с маркером:
+   ✅ — для вариантов
+   💎 — для самого выгодного
+   ⚡ — для советов
+4. Цены и ключевые цифры выделяй жирным.
+5. Убирай ссылки на агрегаторы (Aviasales, Яндекс.Путешествия и т.д.).
+6. Оставляй ссылки на конкретные рейсы, если они есть.
+7. Используй имя пользователя ({user_name or "Гость"}) и город ({user_city or "Москва"}).
+8. Ответ — максимум 6–7 предложений.
 
 Сырой ответ агента:
 {raw_text}
 
-Твой ответ (только текст, со ссылками на рейсы, если они есть):
+Твой ответ (только текст, с абзацами, маркерами и жирными цифрами):
 """
         response = deepseek.chat.completions.create(
             model="deepseek-chat",
@@ -518,6 +526,8 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
         if portrait.get('favorite_cuisine'):
             cuisine = ", ".join(portrait['favorite_cuisine']) if isinstance(portrait['favorite_cuisine'], list) else portrait['favorite_cuisine']
             parts.append(f"любимая кухня: {cuisine}")
+        if portrait.get('budget_travel'):
+            parts.append(f"бюджет на поездку: {portrait['budget_travel']} ₽")
         if parts:
             portrait_context = "ПОРТРЕТ: " + ", ".join(parts) + "."
     
@@ -606,17 +616,22 @@ async def webhook(request: Request):
             return JSONResponse({"ok": True})
         
         # === ПОИСК ЧЕРЕЗ АГЕНТОВ ЯНДЕКСА ===
-        search_triggers = ["найди", "поищи", "сравни", "цены", "билеты", "скидки", "акции", "новости", "погода", "курс", "стоимость"]
+        search_triggers = ["найди", "поищи", "цены", "билеты", "скидки", "акции", "новости", "погода", "курс", "стоимость"]
         analyze_triggers = ["сравни", "проанализируй", "исследуй", "изучи", "разбери", "глубоко", "детально"]
+        reason_triggers = ["посоветуй", "что лучше", "как поступить", "выбери", "рекомендуй", "какой вариант", "стоит ли"]
         
-        if any(word in text.lower() for word in search_triggers):
+        if any(word in text.lower() for word in search_triggers + analyze_triggers + reason_triggers):
             user_name = get_fact(user_id, "name") or "Гость"
             user_city = get_fact(user_id, "city") or "Москва"
+            budget = get_fact(user_id, "budget_travel") or ""
             
             await send_typing(user_id)
             
-            # Выбираем агента: исследователь для сложных запросов, поисковик для простых
-            if any(word in text.lower() for word in analyze_triggers):
+            # Выбираем агента по типу запроса
+            if any(word in text.lower() for word in reason_triggers):
+                agent_id = AGENT_REASONING_ID
+                logger.info(f"🧠 Использую рассуждающего агента для запроса: {text}")
+            elif any(word in text.lower() for word in analyze_triggers):
                 agent_id = AGENT_RESEARCH_ID
                 logger.info(f"🔬 Использую агента-исследователя для запроса: {text}")
             else:
@@ -624,7 +639,7 @@ async def webhook(request: Request):
                 logger.info(f"🔍 Использую поискового агента для запроса: {text}")
             
             try:
-                raw_result = call_yandex_agent(agent_id, text, user_name, user_city)
+                raw_result = call_yandex_agent(agent_id, text, user_name, user_city, budget)
                 if raw_result:
                     packed = await pack_response(raw_result, user_name, user_city)
                     await send_message(user_id, packed)
