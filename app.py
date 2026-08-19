@@ -118,11 +118,21 @@ def get_fact(user_id, key):
 # РАБОТА С ПОРТРЕТОМ
 # ============================================================
 
+# Поля, которые в Supabase имеют тип массив (TEXT[])
+ARRAY_FIELDS = [
+    "preferred_cities", "hobbies", "sports", "music_genres",
+    "movie_genres", "books_genres", "favorite_cuisine",
+    "priorities", "devices", "apps_favorite"
+]
+
 def save_portrait_field(user_id, field, value):
     if not supabase:
         return
     try:
-        # Проверяем, есть ли запись
+        # Если поле должно быть массивом, а пришла строка — превращаем в массив
+        if field in ARRAY_FIELDS and isinstance(value, str):
+            value = [value]
+        
         existing = supabase.table("user_portrait").select("user_id").eq("user_id", user_id).execute()
         if existing.data:
             supabase.table("user_portrait").update({field: value, "updated_at": datetime.now().isoformat()}).eq("user_id", user_id).execute()
@@ -150,7 +160,6 @@ def get_portrait(user_id):
 # ============================================================
 
 async def extract_facts(text: str) -> dict:
-    """Извлекает факты о пользователе из сообщения."""
     try:
         prompt = f"""
 Проанализируй сообщение пользователя: "{text}"
@@ -461,15 +470,16 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
         if portrait.get('job'):
             portrait_parts.append(f"работа: {portrait['job']}")
         if portrait.get('hobbies'):
-            hobbies_str = ", ".join(portrait['hobbies'][:3])
+            hobbies_str = ", ".join(portrait['hobbies'][:3]) if isinstance(portrait['hobbies'], list) else portrait['hobbies']
             portrait_parts.append(f"увлечения: {hobbies_str}")
         if portrait.get('travel_frequency'):
             portrait_parts.append(f"путешествия: {portrait['travel_frequency']}")
         if portrait.get('preferred_cities'):
-            cities_str = ", ".join(portrait['preferred_cities'][:3])
+            cities_str = ", ".join(portrait['preferred_cities'][:3]) if isinstance(portrait['preferred_cities'], list) else portrait['preferred_cities']
             portrait_parts.append(f"любимые города: {cities_str}")
         if portrait.get('favorite_cuisine'):
-            portrait_parts.append(f"любимая кухня: {portrait['favorite_cuisine']}")
+            cuisine = ", ".join(portrait['favorite_cuisine']) if isinstance(portrait['favorite_cuisine'], list) else portrait['favorite_cuisine']
+            portrait_parts.append(f"любимая кухня: {cuisine}")
         if portrait_parts:
             portrait_context = "ПОРТРЕТ ПОЛЬЗОВАТЕЛЯ: " + ", ".join(portrait_parts) + "."
     
@@ -489,7 +499,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 5. **НИКОГДА** не пиши пункты через запятую в одну строку.
 6. **ИСПОЛЬЗУЙ ПОРТРЕТ.** Если знаешь о пользователе что-то из портрета — используй это для персонализации.
 
-ПРАВИЛА ДЛЯ ССЫЛОК:
+PRAVILA DLYA SSILOK:
 Если пользователь просит ссылку — дай её. Если точной нет — дай ссылку на поиск или инструкцию за 30 секунд.
 
 {name_instruction}
@@ -594,11 +604,7 @@ async def webhook(request: Request):
         if facts:
             for field, value in facts.items():
                 if value and value != "null" and value != "None":
-                    # Если поле — массив, сохраняем как есть
-                    if isinstance(value, list):
-                        save_portrait_field(user_id, field, value)
-                    else:
-                        save_portrait_field(user_id, field, value)
+                    save_portrait_field(user_id, field, value)
         
         # === ДЕТЕКТОР ЭМОЦИЙ ===
         emotion_data = await detect_emotion(text)
