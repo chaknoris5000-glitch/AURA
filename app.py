@@ -202,7 +202,7 @@ def get_recent_history(user_id, limit=20):
 async def smart_search_history(user_id, query_text):
     """Умный поиск по всей истории через DeepSeek."""
     try:
-        # 1. Извлекаем ключевые понятия и дату через DeepSeek
+        # 1. Извлекаем ключевые слова и дату через DeepSeek
         prompt = f"""
 Проанализируй запрос пользователя: "{query_text}"
 Определи:
@@ -227,7 +227,7 @@ async def smart_search_history(user_id, query_text):
         keywords = parsed.get("keywords", [])
         days_ago = parsed.get("days_ago")
         
-        if not keywords:
+        if not keywords and not days_ago:
             return []
         
         # 2. Строим запрос к Supabase
@@ -235,7 +235,7 @@ async def smart_search_history(user_id, query_text):
             .select("role, content, created_at")\
             .eq("user_id", user_id)
         
-        # Фильтр по дате
+        # Фильтр по дате (если указана)
         if days_ago:
             cutoff = datetime.now() - timedelta(days=days_ago)
             builder = builder.gte("created_at", cutoff.isoformat())
@@ -368,7 +368,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
         emotion_instruction = "Пользователь в хорошем настроении. Отвечай живо, с юмором, поддерживай лёгкость."
     
     # === УМНЫЙ ПОИСК ПО ИСТОРИИ ===
-    memory_triggers = ["помнишь", "напомни", "вспомни", "подскажи", "что я говорил", "что я просил", "на той неделе", "в прошлый раз"]
+    memory_triggers = ["помнишь", "напомни", "вспомни", "подскажи", "что я говорил", "что я просил", "на той неделе", "в прошлый раз", "часов назад", "часа назад"]
     if any(word in text.lower() for word in memory_triggers):
         results = await smart_search_history(user_id, text)
         if results:
