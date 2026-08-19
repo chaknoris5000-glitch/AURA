@@ -28,7 +28,10 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GIS_API_KEY = os.getenv("GIS_API_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
-YANDEX_AGENT_ID = os.getenv("YANDEX_AGENT_ID")
+
+# === ID АГЕНТОВ ===
+AGENT_SEARCH_ID = os.getenv("YANDEX_AGENT_ID", "fvt3te2kgttig7u3a1fb")
+AGENT_RESEARCH_ID = os.getenv("YANDEX_AGENT_RESEARCH_ID", "fvti80ngse2778agbmdl")
 
 # === КЛИЕНТЫ ===
 deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
@@ -51,10 +54,11 @@ app = FastAPI()
 user_states = {}
 
 # ============================================================
-# ВЫЗОВ АГЕНТА ЯНДЕКСА
+# ВЫЗОВ АГЕНТОВ ЯНДЕКСА
 # ============================================================
 
-def call_yandex_agent(user_text: str, user_name: str = "", user_city: str = "") -> str:
+def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_city: str = "") -> str:
+    """Универсальный вызов любого агента в Yandex AI Studio."""
     try:
         client = OpenAI(
             api_key=YANDEX_API_KEY,
@@ -64,7 +68,7 @@ def call_yandex_agent(user_text: str, user_name: str = "", user_city: str = "") 
         
         response = client.responses.create(
             prompt={
-                "id": YANDEX_AGENT_ID,
+                "id": agent_id,
                 "variables": {
                     "user_name": user_name or "Гость",
                     "user_city": user_city or "Москва"
@@ -75,18 +79,17 @@ def call_yandex_agent(user_text: str, user_name: str = "", user_city: str = "") 
                 {
                     "type": "web_search",
                     "filters": {"allowed_domains": []},
-                    "search_context_size": "low",
-                    "user_location": {"type": "approximate", "region": "159"}
+                    "search_context_size": "low"
                 }
             ],
         )
         return response.output_text
     except Exception as e:
-        logger.error(f"❌ Ошибка агента Яндекса: {e}")
+        logger.error(f"❌ Ошибка агента Яндекса ({agent_id}): {e}")
         return ""
 
 # ============================================================
-# УПАКОВКА ОТВЕТА В СТИЛЬ AURA (С ОСТАВЛЕНИЕМ ССЫЛОК НА РЕЙСЫ)
+# УПАКОВКА ОТВЕТА В СТИЛЬ AURA
 # ============================================================
 
 async def pack_response(raw_text: str, user_name: str = "", user_city: str = "") -> str:
@@ -98,8 +101,8 @@ async def pack_response(raw_text: str, user_name: str = "", user_city: str = "")
 1. Убрать все ссылки на агрегаторы (Aviasales, Яндекс.Путешествия, Туту, Ozon Travel, Т-Банк, UniTicket).
 2. Оставить ссылки на конкретные рейсы, если они есть. Оформляй их как [Ссылка на билет](url).
 3. Структурировать ответ в виде списка:
-   ✅ — для каждого варианта рейса (аэропорт вылета → аэропорт прилёта, цена, авиакомпания, время вылета)
-   💎 — для самого дешёвого варианта
+   ✅ — для каждого варианта (цена, авиакомпания, время)
+   💎 — для самого выгодного варианта
    ⚡ — для советов и предупреждений
 4. Каждый вариант — с новой строки.
 5. Использовать имя пользователя ({user_name or "Гость"}) и город ({user_city or "Москва"}).
@@ -229,7 +232,7 @@ def get_portrait(user_id):
         return None
 
 # ============================================================
-# ИЗВЛЕЧЕНИЕ ФАКТОВ ИЗ СООБЩЕНИЯ
+# ИЗВЛЕЧЕНИЕ ФАКТОВ
 # ============================================================
 
 async def extract_facts(text: str) -> dict:
@@ -459,7 +462,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА (С АГЕНТОМ ЯНДЕКСА)
+# ОСНОВНАЯ ЛОГИКА
 # ============================================================
 
 async def deepseek_interview(user_id: int, text: str, step: int, history: list, emotion: str = "спокойствие") -> dict:
@@ -602,16 +605,26 @@ async def webhook(request: Request):
             await send_message(user_id, f"⏰ Сейчас {time_str} по местному времени ({user_city}).")
             return JSONResponse({"ok": True})
         
-        # === ПОИСК ЧЕРЕЗ АГЕНТА ЯНДЕКСА ===
+        # === ПОИСК ЧЕРЕЗ АГЕНТОВ ЯНДЕКСА ===
         search_triggers = ["найди", "поищи", "сравни", "цены", "билеты", "скидки", "акции", "новости", "погода", "курс", "стоимость"]
+        analyze_triggers = ["сравни", "проанализируй", "исследуй", "изучи", "разбери", "глубоко", "детально"]
+        
         if any(word in text.lower() for word in search_triggers):
             user_name = get_fact(user_id, "name") or "Гость"
             user_city = get_fact(user_id, "city") or "Москва"
             
             await send_typing(user_id)
             
+            # Выбираем агента: исследователь для сложных запросов, поисковик для простых
+            if any(word in text.lower() for word in analyze_triggers):
+                agent_id = AGENT_RESEARCH_ID
+                logger.info(f"🔬 Использую агента-исследователя для запроса: {text}")
+            else:
+                agent_id = AGENT_SEARCH_ID
+                logger.info(f"🔍 Использую поискового агента для запроса: {text}")
+            
             try:
-                raw_result = call_yandex_agent(text, user_name, user_city)
+                raw_result = call_yandex_agent(agent_id, text, user_name, user_city)
                 if raw_result:
                     packed = await pack_response(raw_result, user_name, user_city)
                     await send_message(user_id, packed)
