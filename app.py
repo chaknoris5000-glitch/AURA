@@ -54,6 +54,11 @@ if SUPABASE_URL and SUPABASE_KEY:
 app = FastAPI()
 
 # ============================================================
+# СПИСОК ВАЛИДНЫХ КОДОВ (МЕНЯЙ ЗДЕСЬ)
+# ============================================================
+VIP_CODES = ["AURA-001", "AURA-002", "AURA-003", "ADMIN", "TEST"]
+
+# ============================================================
 # ЗАЩИТА ОТ ПОВТОРНЫХ ЗАПРОСОВ
 # ============================================================
 user_last_requests = {}
@@ -88,54 +93,7 @@ def cache_response(hash_val, response):
     agent_cache[hash_val] = {"response": response, "timestamp": datetime.now()}
 
 # ============================================================
-# INVITE-КОДЫ (VIP-ДОСТУП)
-# ============================================================
-def check_invite_code(user_id: int, code: str) -> bool:
-    """Проверяет и активирует инвайт-код"""
-    if not supabase:
-        return False
-    try:
-        # Ищем код в базе
-        res = supabase.table("invite_codes") \
-            .select("user_id") \
-            .eq("code", code) \
-            .execute()
-        
-        if not res.data:
-            return False
-        
-        # Если код уже привязан к другому user_id - блокируем
-        if res.data[0]["user_id"] and res.data[0]["user_id"] != str(user_id):
-            return False
-        
-        # Активируем код для этого пользователя
-        supabase.table("invite_codes") \
-            .update({"user_id": str(user_id), "activated_at": datetime.now().isoformat()}) \
-            .eq("code", code) \
-            .execute()
-        
-        logger.info(f"✅ Код {code} активирован для {user_id}")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Ошибка проверки кода: {e}")
-        return False
-
-def is_vip_user(user_id: int) -> bool:
-    """Проверяет, есть ли у пользователя активный код"""
-    if not supabase:
-        return False
-    try:
-        res = supabase.table("invite_codes") \
-            .select("user_id") \
-            .eq("user_id", str(user_id)) \
-            .execute()
-        return bool(res.data)
-    except Exception as e:
-        logger.error(f"❌ Ошибка проверки VIP: {e}")
-        return False
-
-# ============================================================
-# ПАМЯТЬ И ПОРТРЕТ
+# ПАМЯТЬ И ПОРТРЕТ (Supabase)
 # ============================================================
 def save_fact(user_id, key, value):
     if not supabase:
@@ -667,9 +625,22 @@ async def webhook(request: Request):
             return JSONResponse({"ok": True})
         
         # ============================================================
-        # 4. ПРОВЕРКА VIP-СТАТУСА
+        # 4. ПРОВЕРКА VIP-СТАТУСА (СРАЗУ ПОСЛЕ ВВОДА КОДА)
         # ============================================================
-        if is_vip_user(user_id):
+        # Если пользователь ввёл код из списка VIP_CODES
+        if text.upper() in [code.upper() for code in VIP_CODES]:
+            # Сохраняем в память, что этот user_id теперь VIP
+            save_fact(user_id, "vip_code", text.upper())
+            await send_message(user_id, "✅ **Код активирован!** Добро пожаловать в закрытый клуб.\n\nЯ — ваш персональный ассистент. Чем могу быть полезен?")
+            save_message(user_id, "assistant", "Код активирован, доступ получен.")
+            return JSONResponse({"ok": True})
+        
+        # ============================================================
+        # 5. ПРОВЕРКА, ЯВЛЯЕТСЯ ЛИ ПОЛЬЗОВАТЕЛЬ VIP
+        # ============================================================
+        vip_code = get_fact(user_id, "vip_code")
+        
+        if vip_code:
             # === VIP-ПОЛЬЗОВАТЕЛЬ ===
             # Сохраняем сообщение
             save_message(user_id, "user", text)
@@ -745,21 +716,11 @@ async def webhook(request: Request):
             return JSONResponse({"ok": True})
         
         # ============================================================
-        # 5. НЕ VIP — ПРОВЕРЯЕМ КОД (ПРЯМОЕ СОПОСТАВЛЕНИЕ С БАЗОЙ)
+        # 6. НЕ VIP — ПРОСИМ КОД
         # ============================================================
         else:
-            # Проверяем, есть ли введённый текст в таблице invite_codes
-            code_check = supabase.table("invite_codes").select("code").eq("code", text.upper()).execute()
-            if code_check.data:
-                if check_invite_code(user_id, text.upper()):
-                    await send_message(user_id, "✅ **Код активирован!** Добро пожаловать в закрытый клуб.\n\nЯ — ваш персональный ассистент. Чем могу быть полезен?")
-                    save_message(user_id, "assistant", "Код активирован, доступ получен.")
-                else:
-                    await send_message(user_id, "❌ **Ошибка активации.** Обратитесь к куратору.")
-                return JSONResponse({"ok": True})
-            else:
-                await send_message(user_id, "🔒 **Неверный код.** Доступ запрещён.")
-                return JSONResponse({"ok": True})
+            await send_message(user_id, "🔒 **Неверный код.** Доступ запрещён.")
+            return JSONResponse({"ok": True})
     
     except Exception as e:
         logger.error(f"❌ Ошибка webhook: {e}")
