@@ -144,29 +144,6 @@ def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_c
         return ""
 
 # ============================================================
-# УПАКОВКА ОТВЕТА В СТИЛЬ AURA (ДЛЯ ТОВАРОВ)
-# ============================================================
-async def pack_products(products, user_name):
-    if not products:
-        return "😊 Не нашёл товары. Попробуй уточнить запрос."
-    
-    reply = f"{user_name}, лови подборку белых мужских носков на Wildberries. Все в наличии, цены актуальны на сегодня.\n\n"
-    
-    for i, item in enumerate(products[:3], 1):
-        name = item.get('title', 'Без названия')
-        price = item.get('price', 0)
-        rating = item.get('rating', 0)
-        url = item.get('url', '#')
-        specs = item.get('specs', 'хлопок, эластан')
-        reply += f"✅ **{name}** — **{price} ₽**, рейтинг {rating}. {specs}. [Ссылка]({url})\n\n"
-    
-    reply += f"💎 **Самый выгодный:** {products[0].get('title', 'первый вариант')} за {products[0].get('price', 0)} ₽ — отличное качество.\n\n"
-    reply += "⚡ Если нужен конкретный бренд или размер — скажи, уточню.\n\n"
-    reply += "🔥 *И да, если найдёшь дешевле — я закажу тебе, где выгоднее. Ты знаешь.*"
-    
-    return reply
-
-# ============================================================
 # УПАКОВКА ОТВЕТА (ОБЩАЯ, ДЛЯ АГЕНТОВ)
 # ============================================================
 async def pack_response(raw_text: str, user_name: str = "", user_city: str = "") -> str:
@@ -294,26 +271,73 @@ def save_portrait_field(user_id, field, value):
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения портрета ({field}): {e}")
 
+# ============================================================
+# ИЗВЛЕЧЕНИЕ ФАКТОВ (С ЗАЩИТОЙ ОТ ОШИБОК JSON)
+# ============================================================
 async def extract_facts(text: str) -> dict:
-    try:
-        prompt = f"""
+    for attempt in range(2):
+        try:
+            prompt = f"""
 Проанализируй сообщение пользователя: "{text}"
 Определи, есть ли в нём информация о самом пользователе (факты, предпочтения, привычки).
 Верни JSON с полем "facts" — объект, где ключи — это названия полей из таблицы user_portrait, а значения — извлечённые факты.
 Если фактов нет — верни пустой объект.
+
+Пример ответа:
+{{"facts": {{"favorite_cuisine": "итальянская", "hobbies": ["фотография", "путешествия"]}}}}
 """
-        response = deepseek.chat.completions.create(
-            model="deepseek-chat",
-            messages=[{"role": "system", "content": prompt}],
-            temperature=0.3,
-            max_tokens=300,
-            timeout=10
-        )
-        result = json.loads(response.choices[0].message.content)
-        return result.get("facts", {})
-    except Exception as e:
-        logger.error(f"❌ Ошибка извлечения фактов: {e}")
-        return {}
+            response = deepseek.chat.completions.create(
+                model="deepseek-chat",
+                messages=[{"role": "system", "content": prompt}],
+                temperature=0.3,
+                max_tokens=300,
+                timeout=10
+            )
+            result = json.loads(response.choices[0].message.content)
+            return result.get("facts", {})
+        except json.JSONDecodeError as e:
+            logger.warning(f"⚠️ Ошибка JSON в extract_facts (попытка {attempt+1}): {e}")
+            if attempt == 1:
+                logger.error(f"❌ Невалидный JSON: {response.choices[0].message.content[:200]}")
+                return {}
+        except Exception as e:
+            logger.error(f"❌ Ошибка извлечения фактов: {e}")
+            return {}
+    return {}
+
+# ============================================================
+# ДЕТЕКТОР ЭМОЦИЙ (С ЗАЩИТОЙ ОТ ОШИБОК JSON)
+# ============================================================
+async def detect_emotion(text: str) -> dict:
+    for attempt in range(2):
+        try:
+            prompt = f"""
+Проанализируй эмоцию в сообщении пользователя: "{text}"
+Верни строгий JSON с двумя полями:
+- emotion: одна из (радость, грусть, гнев, страх, удивление, отвращение, спокойствие)
+- confidence: число от 0 до 1
+
+Пример ответа:
+{{"emotion": "спокойствие", "confidence": 0.9}}
+"""
+            response = deepseek.chat.completions.create(
+                model="deepseek-chat",
+                messages=[{"role": "system", "content": prompt}],
+                temperature=0.3,
+                max_tokens=100,
+                timeout=10
+            )
+            result = json.loads(response.choices[0].message.content)
+            return result
+        except json.JSONDecodeError as e:
+            logger.warning(f"⚠️ Ошибка JSON в detect_emotion (попытка {attempt+1}): {e}")
+            if attempt == 1:
+                logger.error(f"❌ Невалидный JSON: {response.choices[0].message.content[:200]}")
+                return {"emotion": "спокойствие", "confidence": 0.5}
+        except Exception as e:
+            logger.error(f"❌ Ошибка детектора эмоций: {e}")
+            return {"emotion": "спокойствие", "confidence": 0.5}
+    return {"emotion": "спокойствие", "confidence": 0.5}
 
 # ============================================================
 # ИСТОРИЯ
@@ -406,21 +430,6 @@ def save_trial_status(user_id, started, ended):
         }).execute()
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения триала: {e}")
-
-async def detect_emotion(text: str) -> dict:
-    try:
-        prompt = f"Проанализируй эмоцию в сообщении пользователя: {text}. Верни JSON: {{'emotion': 'спокойствие', 'confidence': 0.9}}"
-        response = deepseek.chat.completions.create(
-            model="deepseek-chat",
-            messages=[{"role": "system", "content": prompt}],
-            temperature=0.3,
-            max_tokens=100,
-            timeout=10
-        )
-        return json.loads(response.choices[0].message.content)
-    except Exception as e:
-        logger.error(f"❌ Ошибка детектора эмоций: {e}")
-        return {"emotion": "спокойствие", "confidence": 0.5}
 
 async def search_organization(query: str, city: str = "Белово") -> dict:
     if not GIS_API_KEY:
