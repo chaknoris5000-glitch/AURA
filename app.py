@@ -109,7 +109,7 @@ def transcribe_audio(audio_url):
         return None
 
 # ============================================================
-# РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ (ТОЛЬКО OCR)
+# РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ (OCR С ОБРАБОТКОЙ ОШИБОК)
 # ============================================================
 def recognize_image(image_url: str) -> str:
     if not YANDEX_VISION_API_KEY:
@@ -135,6 +135,9 @@ def recognize_image(image_url: str) -> str:
         
         result = requests.post(url, json=payload, headers=headers, timeout=30)
         logger.info(f"📷 OCR status: {result.status_code}")
+        
+        if result.status_code == 404:
+            return "⚠️ Сервис Vision не подключён в твоём каталоге. Проверь настройки в Яндекс.Облаке."
         
         if result.status_code != 200:
             return f"⚠️ Ошибка распознавания: {result.status_code}"
