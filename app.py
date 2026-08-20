@@ -30,6 +30,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GIS_API_KEY = os.getenv("GIS_API_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
+APIFY_TOKEN = os.getenv("APIFY_TOKEN", "apify_api_QiHz0cq2J4TVjVjUwq9zVIss4VCUvY18mFNR")
 
 AGENT_SEARCH_ID = os.getenv("YANDEX_AGENT_ID", "fvt3te2kgttig7u3a1fb")
 AGENT_RESEARCH_ID = os.getenv("YANDEX_AGENT_RESEARCH_ID", "fvti80ngse2778agbmdl")
@@ -67,7 +68,7 @@ def is_duplicate(user_id, text):
     return False
 
 # ============================================================
-# КЕШИРОВАНИЕ ОТВЕТОВ АГЕНТОВ
+# КЕШИРОВАНИЕ ОТВЕТОВ
 # ============================================================
 agent_cache = {}
 
@@ -142,6 +143,23 @@ def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_c
     except Exception as e:
         logger.error(f"❌ Ошибка агента Яндекса ({agent_id}): {e}")
         return ""
+
+# ============================================================
+# ВЫЗОВ ПАРСЕРОВ APIFY
+# ============================================================
+def call_apify_actor(actor_id: str, input_data: dict) -> dict:
+    """Универсальный вызов любого парсера на Apify."""
+    try:
+        url = f"https://api.apify.com/v2/acts/{actor_id}/run-sync-get-dataset-items?token={APIFY_TOKEN}"
+        response = requests.post(url, json=input_data, timeout=60)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            logger.error(f"❌ Ошибка Apify: {response.text}")
+            return {"error": response.text}
+    except Exception as e:
+        logger.error(f"❌ Ошибка вызова Apify: {e}")
+        return {"error": str(e)}
 
 # ============================================================
 # УПАКОВКА ОТВЕТА (ЖИВОЙ СТИЛЬ)
@@ -358,15 +376,12 @@ def get_trial_status(user_id):
         return None
 
 def get_trial_info(user_id):
-    """Возвращает статус триала и количество оставшихся дней."""
     trial = get_trial_status(user_id)
     if not trial:
         return {"status": "no_trial", "days_left": 0}
-    
     end_date = datetime.fromisoformat(trial["trial_ended"])
     now = datetime.now()
     days_left = (end_date - now).days
-    
     if days_left < 0:
         return {"status": "expired", "days_left": 0}
     elif days_left == 0:
@@ -461,7 +476,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА (С ТАРИФАМИ)
+# ОСНОВНАЯ ЛОГИКА (С ТАРИФАМИ И ПАРСЕРАМИ)
 # ============================================================
 async def deepseek_interview(user_id: int, text: str, step: int, history: list, emotion: str = "спокойствие") -> dict:
     emotion_instruction = ""
@@ -476,17 +491,16 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
     user_city = get_fact(user_id, "city")
     portrait = get_portrait(user_id)
 
-    # === ЛОГИКА ТРИАЛА И ТАРИФОВ ===
     trial_info = get_trial_info(user_id)
     trial_context = ""
     if trial_info["status"] == "active":
-        trial_context = f"У пользователя активный бесплатный триал, осталось {trial_info['days_left']} дней. Если он спросит, бесплатный ли ты — скажи: 'Да, у тебя ещё {trial_info['days_left']} дня бесплатного доступа. Потом тарифы можно посмотреть через /subscribe'."
+        trial_context = f"У пользователя активный бесплатный триал, осталось {trial_info['days_left']} дней."
     elif trial_info["status"] == "last_day":
-        trial_context = "У пользователя последний день бесплатного триала, сегодня заканчивается. Если спросит — скажи: 'Сегодня последний день твоего бесплатного доступа. Тарифы можно посмотреть через /subscribe'."
+        trial_context = "У пользователя последний день бесплатного триала."
     elif trial_info["status"] == "expired":
-        trial_context = "У пользователя нет активного триала. Если спросит про стоимость — скажи: 'Твой бесплатный период закончился. Тарифы можно посмотреть через /subscribe'."
+        trial_context = "У пользователя нет активного триала."
     else:
-        trial_context = "У пользователя нет триала. Если спросит про стоимость — скажи: 'Бот бесплатный первые 3 дня. Хочешь активировать триал?'"
+        trial_context = "У пользователя нет триала."
 
     name_instruction = f"Зовут {user_name}." if user_name else ""
     city_instruction = f"Город: {user_city}." if user_city else ""
@@ -606,7 +620,6 @@ async def webhook(request: Request):
             await send_message(user_id, "✅ История очищена. Начинаем с чистого листа.")
             return JSONResponse({"ok": True})
 
-        # === КОМАНДА /subscribe (ПОКАЗАТЬ ТАРИФЫ) ===
         if text.lower() == "/subscribe":
             trial_info = get_trial_info(user_id)
             if trial_info["status"] == "active":
@@ -645,6 +658,55 @@ _Чтобы оплатить — напиши администратору._ �
             user_city = get_fact(user_id, "city") or "Москва"
             await send_typing(user_id)
             await send_message(user_id, f"⏰ Сейчас {get_time_for_city(user_city)} по местному времени ({user_city}).")
+            return JSONResponse({"ok": True})
+
+        # === МАРШРУТИЗАЦИЯ ПАРСЕРОВ APIFY ===
+        if "wildberries" in text.lower() or "вб" in text.lower() or "вайлдберриз" in text.lower():
+            if "отзыв" in text.lower() or "детал" in text.lower() or "характеристик" in text.lower():
+                actor_id = "zen-studio/wildberries-detail-scraper"
+                input_data = {"urls": [text]}
+            else:
+                actor_id = "powerai/wildberries-products-search-scraper"
+                input_data = {"search": text}
+            result = call_apify_actor(actor_id, input_data)
+            if result and "error" not in result:
+                await send_message(user_id, f"🛍️ Нашёл на Wildberries:\n{json.dumps(result[:3], indent=2, ensure_ascii=False)}")
+            else:
+                await send_message(user_id, "😊 Не удалось найти товары на Wildberries. Попробуй уточнить запрос.")
+            return JSONResponse({"ok": True})
+
+        if "ozon" in text.lower():
+            if "отзыв" in text.lower():
+                actor_id = "zen-studio/ozon-product-reviews-scraper"
+                input_data = {"urls": [text]}
+            else:
+                actor_id = "zen-studio/ozon-scraper-pro"
+                input_data = {"search": text}
+            result = call_apify_actor(actor_id, input_data)
+            if result and "error" not in result:
+                await send_message(user_id, f"🛍️ Нашёл на Ozon:\n{json.dumps(result[:3], indent=2, ensure_ascii=False)}")
+            else:
+                await send_message(user_id, "😊 Не удалось найти товары на Ozon. Попробуй уточнить запрос.")
+            return JSONResponse({"ok": True})
+
+        if "авито" in text.lower() or "avito" in text.lower():
+            actor_id = "zen-studio/avito-listings-scraper"
+            input_data = {"search": text}
+            result = call_apify_actor(actor_id, input_data)
+            if result and "error" not in result:
+                await send_message(user_id, f"🏠 Нашёл на Авито:\n{json.dumps(result[:3], indent=2, ensure_ascii=False)}")
+            else:
+                await send_message(user_id, "😊 Не удалось найти объявления на Авито. Попробуй уточнить запрос.")
+            return JSONResponse({"ok": True})
+
+        if "2гис" in text.lower() or "2gis" in text.lower():
+            actor_id = "zen-studio/2gis-reviews-scraper"
+            input_data = {"search": text}
+            result = call_apify_actor(actor_id, input_data)
+            if result and "error" not in result:
+                await send_message(user_id, f"📍 Нашёл на 2ГИС:\n{json.dumps(result[:3], indent=2, ensure_ascii=False)}")
+            else:
+                await send_message(user_id, "😊 Не удалось найти информацию на 2ГИС. Попробуй уточнить запрос.")
             return JSONResponse({"ok": True})
 
         # === ПОИСК ЧЕРЕЗ АГЕНТОВ ЯНДЕКСА ===
