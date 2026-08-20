@@ -30,7 +30,6 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GIS_API_KEY = os.getenv("GIS_API_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
-APIFY_TOKEN = os.getenv("APIFY_TOKEN")
 
 AGENT_SEARCH_ID = os.getenv("YANDEX_AGENT_ID", "fvt3te2kgttig7u3a1fb")
 AGENT_RESEARCH_ID = os.getenv("YANDEX_AGENT_RESEARCH_ID", "fvti80ngse2778agbmdl")
@@ -143,23 +142,6 @@ def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_c
     except Exception as e:
         logger.error(f"❌ Ошибка агента Яндекса ({agent_id}): {e}")
         return ""
-
-# ============================================================
-# ВЫЗОВ ПАРСЕРОВ APIFY
-# ============================================================
-def call_apify_actor(actor_id: str, input_data: dict) -> dict:
-    """Универсальный вызов любого парсера на Apify."""
-    try:
-        url = f"https://api.apify.com/v2/acts/{actor_id}/run-sync-get-dataset-items?token={APIFY_TOKEN}"
-        response = requests.post(url, json=input_data, timeout=60)
-        if response.status_code == 200:
-            return response.json()
-        else:
-            logger.error(f"❌ Ошибка Apify: {response.text}")
-            return {"error": response.text}
-    except Exception as e:
-        logger.error(f"❌ Ошибка вызова Apify: {e}")
-        return {"error": str(e)}
 
 # ============================================================
 # УПАКОВКА ОТВЕТА (ЖИВОЙ СТИЛЬ)
@@ -476,7 +458,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА (С ТАРИФАМИ И ПАРСЕРАМИ)
+# ОСНОВНАЯ ЛОГИКА (С ТАРИФАМИ)
 # ============================================================
 async def deepseek_interview(user_id: int, text: str, step: int, history: list, emotion: str = "спокойствие") -> dict:
     emotion_instruction = ""
@@ -658,55 +640,6 @@ _Чтобы оплатить — напиши администратору._ �
             user_city = get_fact(user_id, "city") or "Москва"
             await send_typing(user_id)
             await send_message(user_id, f"⏰ Сейчас {get_time_for_city(user_city)} по местному времени ({user_city}).")
-            return JSONResponse({"ok": True})
-
-        # === МАРШРУТИЗАЦИЯ ПАРСЕРОВ APIFY ===
-        if "wildberries" in text.lower() or "вб" in text.lower() or "вайлдберриз" in text.lower():
-            if "отзыв" in text.lower() or "детал" in text.lower() or "характеристик" in text.lower():
-                actor_id = "zen-studio/wildberries-detail-scraper"
-                input_data = {"urls": [text]}
-            else:
-                actor_id = "powerai/wildberries-products-search-scraper"
-                input_data = {"search": text}
-            result = call_apify_actor(actor_id, input_data)
-            if result and "error" not in result:
-                await send_message(user_id, f"🛍️ Нашёл на Wildberries:\n{json.dumps(result[:3], indent=2, ensure_ascii=False)}")
-            else:
-                await send_message(user_id, "😊 Не удалось найти товары на Wildberries. Попробуй уточнить запрос.")
-            return JSONResponse({"ok": True})
-
-        if "ozon" in text.lower():
-            if "отзыв" in text.lower():
-                actor_id = "zen-studio/ozon-product-reviews-scraper"
-                input_data = {"urls": [text]}
-            else:
-                actor_id = "zen-studio/ozon-scraper-pro"
-                input_data = {"search": text}
-            result = call_apify_actor(actor_id, input_data)
-            if result and "error" not in result:
-                await send_message(user_id, f"🛍️ Нашёл на Ozon:\n{json.dumps(result[:3], indent=2, ensure_ascii=False)}")
-            else:
-                await send_message(user_id, "😊 Не удалось найти товары на Ozon. Попробуй уточнить запрос.")
-            return JSONResponse({"ok": True})
-
-        if "авито" in text.lower() or "avito" in text.lower():
-            actor_id = "zen-studio/avito-listings-scraper"
-            input_data = {"search": text}
-            result = call_apify_actor(actor_id, input_data)
-            if result and "error" not in result:
-                await send_message(user_id, f"🏠 Нашёл на Авито:\n{json.dumps(result[:3], indent=2, ensure_ascii=False)}")
-            else:
-                await send_message(user_id, "😊 Не удалось найти объявления на Авито. Попробуй уточнить запрос.")
-            return JSONResponse({"ok": True})
-
-        if "2гис" in text.lower() or "2gis" in text.lower():
-            actor_id = "zen-studio/2gis-reviews-scraper"
-            input_data = {"search": text}
-            result = call_apify_actor(actor_id, input_data)
-            if result and "error" not in result:
-                await send_message(user_id, f"📍 Нашёл на 2ГИС:\n{json.dumps(result[:3], indent=2, ensure_ascii=False)}")
-            else:
-                await send_message(user_id, "😊 Не удалось найти информацию на 2ГИС. Попробуй уточнить запрос.")
             return JSONResponse({"ok": True})
 
         # === ПОИСК ЧЕРЕЗ АГЕНТОВ ЯНДЕКСА ===
