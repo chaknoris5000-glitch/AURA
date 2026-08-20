@@ -745,19 +745,20 @@ async def webhook(request: Request):
             return JSONResponse({"ok": True})
         
         # ============================================================
-        # 5. НЕ VIP — ПРОВЕРЯЕМ КОД
+        # 5. НЕ VIP — ПРОВЕРЯЕМ КОД (ПРЯМОЕ СОПОСТАВЛЕНИЕ С БАЗОЙ)
         # ============================================================
         else:
-            # Если пользователь отправил код (формат AURA-XXXXX)
-            if len(text) >= 10 and "AURA" in text.upper():
+            # Проверяем, есть ли введённый текст в таблице invite_codes
+            code_check = supabase.table("invite_codes").select("code").eq("code", text.upper()).execute()
+            if code_check.data:
                 if check_invite_code(user_id, text.upper()):
                     await send_message(user_id, "✅ **Код активирован!** Добро пожаловать в закрытый клуб.\n\nЯ — ваш персональный ассистент. Чем могу быть полезен?")
                     save_message(user_id, "assistant", "Код активирован, доступ получен.")
                 else:
-                    await send_message(user_id, "❌ **Неверный код.** Доступ запрещён.")
+                    await send_message(user_id, "❌ **Ошибка активации.** Обратитесь к куратору.")
                 return JSONResponse({"ok": True})
             else:
-                await send_message(user_id, "🔒 **Доступ только для участников закрытого клуба.**\n\nВведите инвайт-код для активации.")
+                await send_message(user_id, "🔒 **Неверный код.** Доступ запрещён.")
                 return JSONResponse({"ok": True})
     
     except Exception as e:
