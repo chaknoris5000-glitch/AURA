@@ -4,6 +4,7 @@ import httpx
 import asyncio
 import logging
 import tempfile
+import hashlib
 from datetime import datetime, timedelta
 import pytz
 from fastapi import FastAPI, Request
@@ -13,6 +14,7 @@ from openai import OpenAI
 from groq import Groq
 from dotenv import load_dotenv
 import requests
+from collections import deque
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -48,9 +50,42 @@ app = FastAPI()
 user_states = {}
 
 # ============================================================
+# ЗАЩИТА ОТ ПОВТОРНЫХ ЗАПРОСОВ (De-Dup)
+# ============================================================
+user_last_requests = {}
+
+def get_request_hash(user_id, text):
+    return hashlib.md5(f"{user_id}:{text}".encode()).hexdigest()
+
+def is_duplicate(user_id, text):
+    hash_val = get_request_hash(user_id, text)
+    if user_id not in user_last_requests:
+        user_last_requests[user_id] = deque(maxlen=5)
+    if hash_val in user_last_requests[user_id]:
+        return True
+    user_last_requests[user_id].append(hash_val)
+    return False
+
+# ============================================================
+# КЕШИРОВАНИЕ ОТВЕТОВ АГЕНТОВ
+# ============================================================
+agent_cache = {}
+
+def get_cached_response(hash_val):
+    if hash_val in agent_cache:
+        entry = agent_cache[hash_val]
+        if datetime.now() - entry["timestamp"] < timedelta(minutes=5):
+            return entry["response"]
+        else:
+            del agent_cache[hash_val]
+    return None
+
+def cache_response(hash_val, response):
+    agent_cache[hash_val] = {"response": response, "timestamp": datetime.now()}
+
+# ============================================================
 # РАСПОЗНАВАНИЕ ГОЛОСА
 # ============================================================
-
 def transcribe_audio(audio_url):
     try:
         resp = requests.get(audio_url, timeout=30)
@@ -72,10 +107,16 @@ def transcribe_audio(audio_url):
         return None
 
 # ============================================================
-# ВЫЗОВ АГЕНТОВ ЯНДЕКСА
+# ВЫЗОВ АГЕНТОВ ЯНДЕКСА (С КЕШИРОВАНИЕМ)
 # ============================================================
-
 def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_city: str = "", budget: str = "") -> str:
+    hash_val = hashlib.md5(f"{agent_id}:{user_text}:{user_name}:{user_city}:{budget}".encode()).hexdigest()
+    
+    cached = get_cached_response(hash_val)
+    if cached:
+        logger.info("⚡ Ответ из кеша")
+        return cached
+    
     try:
         client = OpenAI(
             api_key=YANDEX_API_KEY,
@@ -95,44 +136,45 @@ def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_c
             input=user_text,
             tools=[{"type": "web_search", "filters": {"allowed_domains": []}, "search_context_size": "low"}],
         )
-        return response.output_text
+        result = response.output_text
+        cache_response(hash_val, result)
+        return result
     except Exception as e:
         logger.error(f"❌ Ошибка агента Яндекса ({agent_id}): {e}")
         return ""
 
 # ============================================================
-# УПАКОВКА ОТВЕТА В СТИЛЬ AURA
+# УПАКОВКА ОТВЕТА (КОРОТКО, 3-4 ПРЕДЛОЖЕНИЯ, БЕЗ ОБРЕЗКИ)
 # ============================================================
-
 async def pack_response(raw_text: str, user_name: str = "", user_city: str = "") -> str:
     try:
         prompt = f"""
 Ты — AURA. Твой стиль — Тони Старк: уверенный, ироничный, живой.
 
-Перед тобой сырой ответ поискового агента. Твоя задача — превратить его в короткий, красивый ответ в стиле AURA.
+Перед тобой сырой ответ поискового агента. Твоя задача — превратить его в КОРОТКИЙ ответ (МАКСИМУМ 3-4 ПРЕДЛОЖЕНИЯ).
 
 ПРАВИЛА:
-1. **МАКСИМУМ 3–4 ПРЕДЛОЖЕНИЯ.** Без воды.
+1. **МАКСИМУМ 3-4 ПРЕДЛОЖЕНИЯ.** Без воды.
 2. **ИСПОЛЬЗУЙ МАРКЕРЫ:** ✅ 💎 ⚡
 3. **ВЫДЕЛЯЙ ГЛАВНОЕ ЖИРНЫМ:** цены, даты.
 4. **ПИШИ С ДУШОЙ:** как другу.
 5. **ССЫЛКИ:** если есть — оформляй как [текст](url).
 
-Убери ссылки на агрегаторы (Aviasales, Яндекс.Путешествия и т.д.). Оставь ссылки на конкретные рейсы.
+Убери ссылки на агрегаторы. Оставь только ссылки на конкретные рейсы.
 
 Используй имя пользователя ({user_name or "Гость"}) и город ({user_city or "Москва"}).
 
 Сырой ответ:
 {raw_text}
 
-Твой ответ (только текст, коротко и с душой):
+Твой ответ (только текст, КОРОТКО 3-4 ПРЕДЛОЖЕНИЯ, мысль всегда завершена):
 """
         response = deepseek.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "system", "content": prompt}],
-            temperature=0.85,
-            max_tokens=300,
-            timeout=30
+            temperature=0.7,
+            max_tokens=180,
+            timeout=20
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -142,7 +184,6 @@ async def pack_response(raw_text: str, user_name: str = "", user_city: str = "")
 # ============================================================
 # ТОЧНОЕ ВРЕМЯ
 # ============================================================
-
 def get_time_for_city(city: str = "Москва") -> str:
     timezone_map = {
         "москва": "Europe/Moscow",
@@ -179,7 +220,6 @@ def get_time_for_city(city: str = "Москва") -> str:
 # ============================================================
 # ПАМЯТЬ, ПОРТРЕТ, ФАКТЫ
 # ============================================================
-
 def save_fact(user_id, key, value):
     if not supabase:
         return
@@ -258,7 +298,6 @@ async def extract_facts(text: str) -> dict:
 # ============================================================
 # ИСТОРИЯ
 # ============================================================
-
 def save_message(user_id, role, content):
     if not supabase:
         return
@@ -299,7 +338,6 @@ def clear_user_history(user_id):
 # ============================================================
 # ЭМОЦИИ, ТРИАЛ, 2ГИС
 # ============================================================
-
 def save_emotion(user_id, emotion, confidence):
     if not supabase:
         return
@@ -408,6 +446,9 @@ async def send_message(chat_id, text):
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
 
+# ============================================================
+# ОСНОВНАЯ ЛОГИКА (С ЗАПРЕТОМ НА ЛЕВЫЙ ТРИАЛ)
+# ============================================================
 async def deepseek_interview(user_id: int, text: str, step: int, history: list, emotion: str = "спокойствие") -> dict:
     emotion_instruction = ""
     if emotion in ["грусть", "страх"]:
@@ -449,7 +490,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 {portrait_context}
 
 ПРАВИЛА ОТВЕТОВ (ОБЯЗАТЕЛЬНО):
-1. **МАКСИМУМ 3–4 ПРЕДЛОЖЕНИЯ.** Без воды.
+1. **МАКСИМУМ 3-4 ПРЕДЛОЖЕНИЯ.** Без воды.
 2. **ИСПОЛЬЗУЙ МАРКЕРЫ:** ✅ 💎 ⚡
 3. **ВЫДЕЛЯЙ ГЛАВНОЕ ЖИРНЫМ:** цены, даты.
 4. **ПИШИ С ДУШОЙ:** как другу.
@@ -465,6 +506,8 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 
 ПОЛЬЗОВАТЕЛЬ: "{text}"
 
+⚡ **ТРИАЛ (ДОСТУП НА 3 ДНЯ) ПРЕДЛАГАЕТСЯ ТОЛЬКО ПОСЛЕ ТОГО, КАК СОБРАНА ВСЯ ИНФОРМАЦИЯ О КЛИЕНТЕ И ВЫПОЛНЕНЫ УСЛОВИЯ: step >= 10 И score > 60. НЕ ПРЕДЛАГАЙ ТРИАЛ В РАЗГОВОРЕ, ЕСЛИ ЭТИ УСЛОВИЯ НЕ ВЫПОЛНЕНЫ. БЕЗ ИСКЛЮЧЕНИЙ.**
+
 ОТВЕТЬ ТОЛЬКО JSON:
 {{
     "reply": "твой ответ (коротко, с душой, маркерами)",
@@ -477,14 +520,17 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
             model="deepseek-chat",
             messages=[{"role": "system", "content": prompt}],
             temperature=0.85,
-            max_tokens=200,
-            timeout=30
+            max_tokens=180,
+            timeout=20
         )
         return json.loads(response.choices[0].message.content)
     except Exception as e:
         logger.error(f"❌ Ошибка DeepSeek: {e}")
         return {"reply": "😅 Не понял, перефразируй.", "score": 0, "offer_trial": False}
 
+# ============================================================
+# WEBHOOK
+# ============================================================
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
@@ -519,19 +565,21 @@ async def webhook(request: Request):
         if not text:
             return JSONResponse({"ok": True})
 
+        if is_duplicate(user_id, text):
+            logger.warning(f"⚠️ Повторный запрос от {user_id}: {text}")
+            return JSONResponse({"ok": True})
+
         if text == "/start":
             await send_typing(user_id)
             await send_message(user_id, "Привет. Я AURA. Если ты здесь — значит, ты уже не просто ищешь, а хочешь, чтобы искали за тебя. Напиши, что нужно — и я покажу, на что способен.")
             save_message(user_id, "assistant", "Привет. Я AURA.")
             return JSONResponse({"ok": True})
 
-        # === КОМАНДА /clear (СБРОС КОНТЕКСТА) ===
         if text.lower() in ["/clear", "/reset", "сброс", "забудь", "хватит"]:
             clear_user_history(user_id)
             await send_message(user_id, "✅ История очищена. Начинаем с чистого листа.")
             return JSONResponse({"ok": True})
 
-        # === ТОЧНОЕ ВРЕМЯ ===
         if any(word in text.lower() for word in ["время", "сколько время", "который час", "точное время", "часы"]):
             user_city = get_fact(user_id, "city") or "Москва"
             await send_typing(user_id)
