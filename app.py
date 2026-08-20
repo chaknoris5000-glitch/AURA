@@ -409,7 +409,7 @@ def get_trial_info(user_id):
     if not trial:
         return {"status": "no_trial", "days_left": 0}
     end_date = datetime.fromisoformat(trial["trial_ended"])
-    now = datetime.now()
+    now = datetime.now(pytz.UTC)
     days_left = (end_date - now).days
     if days_left < 0:
         return {"status": "expired", "days_left": 0}
@@ -672,29 +672,6 @@ _Чтобы оплатить — напиши администратору._ �
             user_city = get_fact(user_id, "city") or "Москва"
             await send_typing(user_id)
             await send_message(user_id, f"⏰ Сейчас {get_time_for_city(user_city)} по местному времени ({user_city}).")
-            return JSONResponse({"ok": True})
-
-        # === ПОИСК НА WILDBERRIES (ЧЕРЕЗ APIFY) ===
-        if "wildberries" in text.lower() or "вб" in text.lower() or "вайлдберриз" in text.lower():
-            await send_typing(user_id)
-            try:
-                from apify_client import ApifyClient
-                client = ApifyClient(os.getenv("APIFY_TOKEN"))
-                run_input = {
-                    "search": text,
-                    "maxResults": 5
-                }
-                run = client.actor("powerai/wildberries-products-search-scraper").call(run_input=run_input)
-                items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
-                if items:
-                    packed = await pack_products(items, get_fact(user_id, "name") or "Гость")
-                    await send_message(user_id, packed)
-                    save_message(user_id, "assistant", packed)
-                else:
-                    await send_message(user_id, "😊 Не нашёл товары на Wildberries. Попробуй уточнить запрос.")
-            except Exception as e:
-                logger.error(f"❌ Ошибка парсинга WB: {e}")
-                await send_message(user_id, "😊 Не удалось найти товары на Wildberries. Попробуй позже.")
             return JSONResponse({"ok": True})
 
         # === ПОИСК ЧЕРЕЗ АГЕНТОВ ЯНДЕКСА ===
