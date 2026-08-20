@@ -703,10 +703,9 @@ async def webhook(request: Request):
         if "text" in msg:
             save_message(user_id, "user", msg["text"])
         elif "voice" in msg:
-            # Голос сохраним позже
             pass
 
-        # === РАСПОЗНАВАНИЕ МЕДИА (ФОТО, ДОКУМЕНТЫ) — ПРИОРИТЕТ ===
+        # === РАСПОЗНАВАНИЕ МЕДИА (ФОТО, ДОКУМЕНТЫ) ===
         if "photo" in msg or "document" in msg:
             if "photo" in msg:
                 file_id = msg["photo"][-1]["file_id"]
