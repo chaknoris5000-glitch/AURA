@@ -112,6 +112,7 @@ def transcribe_audio(audio_url):
 # РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ (OCR + КЛАССИФИКАЦИЯ)
 # ============================================================
 def analyze_image(image_url: str) -> dict:
+    """Анализирует изображение через Yandex Vision OCR + классификацию."""
     if not YANDEX_VISION_API_KEY:
         return {"error": "⚠️ Ключ Vision OCR не настроен."}
     
@@ -135,6 +136,7 @@ def analyze_image(image_url: str) -> dict:
         }
         
         ocr_result = requests.post(ocr_url, json=ocr_payload, headers=headers, timeout=30)
+        logger.info(f"📷 OCR status: {ocr_result.status_code}")
         if ocr_result.status_code != 200:
             return {"error": f"⚠️ Ошибка OCR: {ocr_result.status_code}"}
         
@@ -157,6 +159,7 @@ def analyze_image(image_url: str) -> dict:
         }
         
         vision_result = requests.post(vision_url, json=vision_payload, headers=headers, timeout=30)
+        logger.info(f"🖼️ Vision status: {vision_result.status_code}")
         classification = None
         if vision_result.status_code == 200:
             vision_data = vision_result.json()
@@ -212,36 +215,34 @@ def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_c
         return ""
 
 # ============================================================
-# УПАКОВКА ОТВЕТА (ЖИВОЙ, ДУШЕВНЫЙ, С МАРКЕРАМИ)
+# УПАКОВКА ОТВЕТА (КОРОТКО, С ДУШОЙ, БЕЗ ВОДЫ)
 # ============================================================
 async def pack_response(raw_text: str, user_name: str = "", user_city: str = "") -> str:
     try:
         prompt = f"""
 Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
 
-Перед тобой сырой ответ поискового агента. Твоя задача — превратить его в красивый, живой ответ в стиле AURA.
+Перед тобой сырой ответ поискового агента. Твоя задача — превратить его в короткий, чёткий ответ.
 
 ПРАВИЛА:
-1. **ОТВЕЧАЙ КОРОТКО:** максимум 3–4 предложения.
-2. **СТРУКТУРА:** разбивай ответ на 2–3 абзаца с пустыми строками.
-3. **МАРКЕРЫ:** ✅ — для готовых решений, 💎 — для лучшего варианта, ⚡ — для советов.
-4. **ЖИРНЫЙ ШРИФТ:** выделяй цены, даты, ключевые цифры.
-5. **ДУША:** используй лёгкую иронию, сарказм, эмпатию. Отвечай как человек, а не робот.
-6. **ЭМОДЗИ:** добавляй 1–2 по теме (✈️, 🍽️, 🎬, 🚀, 🏖️).
+1. **МАКСИМУМ 2–3 ПРЕДЛОЖЕНИЯ.** Без воды.
+2. **ЕСЛИ ПРОСЯТ ССЫЛКУ — ДАЙ ЕЁ СРАЗУ.** Проверь, что ссылка ведёт на конкретный ресурс, а не на поиск.
+3. **НЕ ОБЪЯСНЯЙ, НЕ СОВЕТУЙ, НЕ ПОВТОРЯЙСЯ.**
+4. **НЕ УПОМИНАЙ ТОНИ СТАРКА, КУЛИНАРИЮ И ПРИМЕРЫ.**
 
-Используй имя пользователя ({user_name or "Гость"}) и город ({user_city or "Москва"}).
+Используй имя пользователя: {user_name or "Гость"}.
 
 Сырой ответ:
 {raw_text}
 
-Твой ответ (живой, структурированный, с душой):
+Твой ответ (только ссылка или короткая выжимка, 2–3 предложения):
 """
         response = deepseek.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "system", "content": prompt}],
-            temperature=0.85,
-            max_tokens=300,
-            timeout=20
+            temperature=0.7,
+            max_tokens=200,
+            timeout=15
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -592,7 +593,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА (ЖИВОЙ ПРОМПТ)
+# ОСНОВНАЯ ЛОГИКА (ЖИВОЙ ПРОМПТ, КОРОТКИЕ ОТВЕТЫ)
 # ============================================================
 async def deepseek_interview(user_id: int, text: str, step: int, history: list, emotion: str = "спокойствие") -> dict:
     emotion_instruction = ""
@@ -648,7 +649,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 {trial_context}
 
 ПРАВИЛА ОТВЕТОВ (ОБЯЗАТЕЛЬНО):
-1. **ОТВЕЧАЙ КОРОТКО:** максимум 3–4 предложения.
+1. **МАКСИМУМ 2–3 ПРЕДЛОЖЕНИЯ.** Без воды.
 2. **СТРУКТУРА:** разбивай ответ на 2–3 абзаца с пустыми строками.
 3. **МАРКЕРЫ:** ✅ — для готовых решений, 💎 — для лучшего варианта, ⚡ — для советов.
 4. **ЖИРНЫЙ ШРИФТ:** выделяй цены, даты, ключевые цифры.
@@ -668,7 +669,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 
 ОТВЕТЬ ТОЛЬКО JSON:
 {{
-    "reply": "твой ответ (живой, с душой, маркерами, 3–4 предложения)",
+    "reply": "твой ответ (2–3 предложения, живой, с душой, маркерами)",
     "score": 0..100,
     "offer_trial": false
 }}
@@ -678,7 +679,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
             model="deepseek-chat",
             messages=[{"role": "system", "content": prompt}],
             temperature=0.85,
-            max_tokens=300,
+            max_tokens=250,
             timeout=20
         )
         return json.loads(response.choices[0].message.content)
@@ -772,6 +773,30 @@ async def webhook(request: Request):
             logger.warning(f"⚠️ Повторный запрос от {user_id}: {text}")
             return JSONResponse({"ok": True})
 
+        # === ТОЧНОЕ ВРЕМЯ (ТОЛЬКО ПО ЯВНЫМ ФРАЗАМ) ===
+        time_phrases = [
+            "сколько время",
+            "который час",
+            "точное время",
+            "часы покажи",
+            "время сейчас",
+            "какое время",
+            "сколько сейчас время",
+            "который сейчас час",
+            "время в белово",
+            "время в москве",
+            "время по москве",
+            "время по белово",
+            "скажи сколько время",
+            "подскажи сколько время",
+            "напомни сколько время"
+        ]
+        if any(phrase in text.lower() for phrase in time_phrases):
+            user_city = get_fact(user_id, "city") or "Москва"
+            await send_typing(user_id)
+            await send_message(user_id, f"⏰ Сейчас {get_time_for_city(user_city)} по местному времени ({user_city}).")
+            return JSONResponse({"ok": True})
+
         if text == "/start":
             await send_typing(user_id)
             await send_message(user_id, "Привет. Я AURA. Если ты здесь — значит, ты уже не просто ищешь, а хочешь, чтобы искали за тебя. Напиши, что нужно — и я покажу, на что способен.")
@@ -815,12 +840,6 @@ async def webhook(request: Request):
 
 _Чтобы оплатить — напиши администратору._ 🚀
 """)
-            return JSONResponse({"ok": True})
-
-        if any(word in text.lower() for word in ["время", "сколько время", "который час", "точное время", "часы"]):
-            user_city = get_fact(user_id, "city") or "Москва"
-            await send_typing(user_id)
-            await send_message(user_id, f"⏰ Сейчас {get_time_for_city(user_city)} по местному времени ({user_city}).")
             return JSONResponse({"ok": True})
 
         # === УНИВЕРСАЛЬНЫЙ ПОИСК КОНТЕНТА ===
