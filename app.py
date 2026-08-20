@@ -144,36 +144,33 @@ def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_c
         return ""
 
 # ============================================================
-# УПАКОВКА ОТВЕТА (КОРОТКО, 3-4 ПРЕДЛОЖЕНИЯ, БЕЗ ОБРЕЗКИ)
+# УПАКОВКА ОТВЕТА (ЖИВОЙ СТИЛЬ)
 # ============================================================
 async def pack_response(raw_text: str, user_name: str = "", user_city: str = "") -> str:
     try:
         prompt = f"""
 Ты — AURA. Твой стиль — Тони Старк: уверенный, ироничный, живой.
 
-Перед тобой сырой ответ поискового агента. Твоя задача — превратить его в КОРОТКИЙ ответ (МАКСИМУМ 3-4 ПРЕДЛОЖЕНИЯ).
+Перед тобой сырой ответ поискового агента. Твоя задача — превратить его в красивый, живой ответ в стиле AURA.
 
 ПРАВИЛА:
-1. **МАКСИМУМ 3-4 ПРЕДЛОЖЕНИЯ.** Без воды.
-2. **ИСПОЛЬЗУЙ МАРКЕРЫ:** ✅ 💎 ⚡
-3. **ВЫДЕЛЯЙ ГЛАВНОЕ ЖИРНЫМ:** цены, даты.
-4. **ПИШИ С ДУШОЙ:** как другу.
-5. **ССЫЛКИ:** если есть — оформляй как [текст](url).
-
-Убери ссылки на агрегаторы. Оставь только ссылки на конкретные рейсы.
-
-Используй имя пользователя ({user_name or "Гость"}) и город ({user_city or "Москва"}).
+1. **ОТВЕЧАЙ ЖИВО И С ДУШОЙ.** Используй абзацы, маркеры (✅ 💎 ⚡), эмодзи и лёгкую иронию.
+2. **СТРУКТУРА:** Разбивай ответ на 2–3 абзаца с пустыми строками.
+3. **КОРОТКО:** Максимум 4–5 предложений на весь ответ.
+4. **ССЫЛКИ:** если есть — оформляй как [текст](url).
+5. **Убери ссылки на агрегаторы.** Оставь только ссылки на конкретные рейсы.
+6. **Используй имя пользователя ({user_name or "Гость"}) и город ({user_city or "Москва"}).**
 
 Сырой ответ:
 {raw_text}
 
-Твой ответ (только текст, КОРОТКО 3-4 ПРЕДЛОЖЕНИЯ, мысль всегда завершена):
+Твой ответ (живой, структурированный, с душой):
 """
         response = deepseek.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "system", "content": prompt}],
-            temperature=0.7,
-            max_tokens=180,
+            temperature=0.85,
+            max_tokens=300,
             timeout=20
         )
         return response.choices[0].message.content
@@ -360,6 +357,23 @@ def get_trial_status(user_id):
     except:
         return None
 
+def get_trial_info(user_id):
+    """Возвращает статус триала и количество оставшихся дней."""
+    trial = get_trial_status(user_id)
+    if not trial:
+        return {"status": "no_trial", "days_left": 0}
+    
+    end_date = datetime.fromisoformat(trial["trial_ended"])
+    now = datetime.now()
+    days_left = (end_date - now).days
+    
+    if days_left < 0:
+        return {"status": "expired", "days_left": 0}
+    elif days_left == 0:
+        return {"status": "last_day", "days_left": 0}
+    else:
+        return {"status": "active", "days_left": days_left}
+
 def save_trial_status(user_id, started, ended):
     if not supabase:
         return
@@ -435,8 +449,8 @@ async def send_typing(chat_id):
 async def send_message(chat_id, text):
     if not text:
         text = "😅 Не понял."
-    if len(text) > 1500:
-        text = text[:1497] + "..."
+    if len(text) > 4096:
+        text = text[:4093] + "..."
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
@@ -447,7 +461,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА (С ЗАПРЕТОМ НА ЛЕВЫЙ ТРИАЛ)
+# ОСНОВНАЯ ЛОГИКА (С ТАРИФАМИ)
 # ============================================================
 async def deepseek_interview(user_id: int, text: str, step: int, history: list, emotion: str = "спокойствие") -> dict:
     emotion_instruction = ""
@@ -461,6 +475,18 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
     user_name = get_fact(user_id, "name")
     user_city = get_fact(user_id, "city")
     portrait = get_portrait(user_id)
+
+    # === ЛОГИКА ТРИАЛА И ТАРИФОВ ===
+    trial_info = get_trial_info(user_id)
+    trial_context = ""
+    if trial_info["status"] == "active":
+        trial_context = f"У пользователя активный бесплатный триал, осталось {trial_info['days_left']} дней. Если он спросит, бесплатный ли ты — скажи: 'Да, у тебя ещё {trial_info['days_left']} дня бесплатного доступа. Потом тарифы можно посмотреть через /subscribe'."
+    elif trial_info["status"] == "last_day":
+        trial_context = "У пользователя последний день бесплатного триала, сегодня заканчивается. Если спросит — скажи: 'Сегодня последний день твоего бесплатного доступа. Тарифы можно посмотреть через /subscribe'."
+    elif trial_info["status"] == "expired":
+        trial_context = "У пользователя нет активного триала. Если спросит про стоимость — скажи: 'Твой бесплатный период закончился. Тарифы можно посмотреть через /subscribe'."
+    else:
+        trial_context = "У пользователя нет триала. Если спросит про стоимость — скажи: 'Бот бесплатный первые 3 дня. Хочешь активировать триал?'"
 
     name_instruction = f"Зовут {user_name}." if user_name else ""
     city_instruction = f"Город: {user_city}." if user_city else ""
@@ -489,12 +515,14 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 
 {portrait_context}
 
+{trial_context}
+
 ПРАВИЛА ОТВЕТОВ (ОБЯЗАТЕЛЬНО):
-1. **МАКСИМУМ 3-4 ПРЕДЛОЖЕНИЯ.** Без воды.
-2. **ИСПОЛЬЗУЙ МАРКЕРЫ:** ✅ 💎 ⚡
-3. **ВЫДЕЛЯЙ ГЛАВНОЕ ЖИРНЫМ:** цены, даты.
-4. **ПИШИ С ДУШОЙ:** как другу.
-5. **ССЫЛКИ:** если есть — оформляй как [текст](url).
+1. **ОТВЕЧАЙ ЖИВО И С ДУШОЙ.** Используй абзацы, маркеры (✅ 💎 ⚡), эмодзи и лёгкую иронию.
+2. **СТРУКТУРА:** Разбивай ответ на 2–3 абзаца с пустыми строками.
+3. **КОРОТКО:** Максимум 4–5 предложений на весь ответ.
+4. **ССЫЛКИ:** если есть — оформляй как [текст](url).
+5. **ИСПОЛЬЗУЙ ПОРТРЕТ** для персонализации.
 
 Используй портрет для персонализации.
 
@@ -506,11 +534,9 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 
 ПОЛЬЗОВАТЕЛЬ: "{text}"
 
-⚡ **ТРИАЛ (ДОСТУП НА 3 ДНЯ) ПРЕДЛАГАЕТСЯ ТОЛЬКО ПОСЛЕ ТОГО, КАК СОБРАНА ВСЯ ИНФОРМАЦИЯ О КЛИЕНТЕ И ВЫПОЛНЕНЫ УСЛОВИЯ: step >= 10 И score > 60. НЕ ПРЕДЛАГАЙ ТРИАЛ В РАЗГОВОРЕ, ЕСЛИ ЭТИ УСЛОВИЯ НЕ ВЫПОЛНЕНЫ. БЕЗ ИСКЛЮЧЕНИЙ.**
-
 ОТВЕТЬ ТОЛЬКО JSON:
 {{
-    "reply": "твой ответ (коротко, с душой, маркерами)",
+    "reply": "твой ответ (живой, с душой, маркерами, абзацами)",
     "score": 0..100,
     "offer_trial": false
 }}
@@ -520,7 +546,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
             model="deepseek-chat",
             messages=[{"role": "system", "content": prompt}],
             temperature=0.85,
-            max_tokens=180,
+            max_tokens=400,
             timeout=20
         )
         return json.loads(response.choices[0].message.content)
@@ -578,6 +604,41 @@ async def webhook(request: Request):
         if text.lower() in ["/clear", "/reset", "сброс", "забудь", "хватит"]:
             clear_user_history(user_id)
             await send_message(user_id, "✅ История очищена. Начинаем с чистого листа.")
+            return JSONResponse({"ok": True})
+
+        # === КОМАНДА /subscribe (ПОКАЗАТЬ ТАРИФЫ) ===
+        if text.lower() == "/subscribe":
+            trial_info = get_trial_info(user_id)
+            if trial_info["status"] == "active":
+                status_text = f"У тебя ещё {trial_info['days_left']} дня бесплатного доступа."
+            elif trial_info["status"] == "last_day":
+                status_text = "Сегодня последний день твоего бесплатного доступа."
+            else:
+                status_text = "Бесплатный период закончился."
+
+            await send_message(user_id, f"""
+💎 **Тарифы AURA VIP**
+
+{status_text}
+
+✅ **Одна функция** — 10 000 ₽/мес  
+(аналитика, путешествия или бизнес-поиск)
+
+🔹 **Две функции** — 18 000 ₽/мес  
+(любые две из трёх)
+
+💎 **Три+ функции** — 24 000 ₽/мес  
+(все функции сразу)
+
+⚡ **VIP Full** — 24 000 ₽/мес  
+(всё, что в «Три+», + приоритет, безлимит и персональный подход)
+
+💎 **Скидки:**  
+- 6 месяцев — 10%  
+- 1 год — 20%
+
+_Чтобы оплатить — напиши администратору._ 🚀
+""")
             return JSONResponse({"ok": True})
 
         if any(word in text.lower() for word in ["время", "сколько время", "который час", "точное время", "часы"]):
