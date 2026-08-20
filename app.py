@@ -5,6 +5,7 @@ import asyncio
 import logging
 import tempfile
 import hashlib
+import base64
 from datetime import datetime, timedelta
 import pytz
 from fastapi import FastAPI, Request
@@ -144,39 +145,70 @@ def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_c
         return ""
 
 # ============================================================
-# УПАКОВКА ОТВЕТА (ОБЩАЯ, ДЛЯ АГЕНТОВ)
+# УПАКОВКА ОТВЕТА (КОРОТКО, С ДУШОЙ, БЕЗ ЛИШНИХ СЛОВ)
 # ============================================================
 async def pack_response(raw_text: str, user_name: str = "", user_city: str = "") -> str:
     try:
         prompt = f"""
-Ты — AURA. Твой стиль — Тони Старк: уверенный, ироничный, живой.
-
-Перед тобой сырой ответ поискового агента. Твоя задача — превратить его в красивый, живой ответ в стиле AURA.
+Ты — AURA. Твой стиль — уверенный, с лёгкой иронией, живой. Ты не говоришь о себе, не философствуешь. Ты даёшь чёткий, короткий ответ.
 
 ПРАВИЛА:
-1. **ОТВЕЧАЙ ЖИВО И С ДУШОЙ.** Используй абзацы, маркеры (✅ 💎 ⚡), эмодзи и лёгкую иронию.
-2. **СТРУКТУРА:** Разбивай ответ на 2–3 абзаца с пустыми строками.
-3. **КОРОТКО:** Максимум 4–5 предложений на весь ответ.
-4. **ССЫЛКИ:** если есть — оформляй как [текст](url).
-5. **Убери ссылки на агрегаторы.** Оставь только ссылки на конкретные рейсы.
-6. **Используй имя пользователя ({user_name or "Гость"}) и город ({user_city or "Москва"}).**
+1. **МАКСИМУМ 2–3 ПРЕДЛОЖЕНИЯ.**
+2. **ЕСЛИ ЕСТЬ ССЫЛКА — ДАЙ ЕЁ СРАЗУ.**
+3. **НЕ ОБЪЯСНЯЙ, НЕ СОВЕТУЙ, НЕ ПОВТОРЯЙСЯ.**
+4. **НЕ УПОМИНАЙ ТОНИ СТАРКА, КУЛИНАРИЮ И ПРИМЕРЫ.**
+
+Используй имя пользователя: {user_name or "Гость"}.
 
 Сырой ответ:
 {raw_text}
 
-Твой ответ (живой, структурированный, с душой):
+Твой ответ (только ссылка или короткая выжимка):
 """
         response = deepseek.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "system", "content": prompt}],
-            temperature=0.85,
-            max_tokens=300,
-            timeout=20
+            temperature=0.7,
+            max_tokens=100,
+            timeout=15
         )
         return response.choices[0].message.content
     except Exception as e:
         logger.error(f"❌ Ошибка упаковки: {e}")
         return raw_text
+
+# ============================================================
+# ОПРЕДЕЛЕНИЕ ПЛАТФОРМЫ ДЛЯ КОНТЕНТА
+# ============================================================
+def detect_content_platform(text: str) -> dict:
+    """Определяет платформу для поиска контента через DeepSeek."""
+    try:
+        prompt = f"""
+Определи, где лучше искать контент по запросу пользователя: "{text}"
+
+Правила:
+- Если это фильм, сериал, трейлер, клип → ищи в Яндекс.Видео
+- Если это рецепт, обзор, как приготовить, как сделать → ищи на YouTube
+- Если это картинки, фото, изображения → ищи в Яндекс.Картинках
+- Если это общее видео (котики, приколы) → ищи на YouTube
+
+Верни JSON:
+{{
+    "platform": "yandex_video | youtube | yandex_images",
+    "search_query": "уточнённый запрос для поиска"
+}}
+"""
+        response = deepseek.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "system", "content": prompt}],
+            temperature=0.3,
+            max_tokens=100,
+            timeout=10
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        logger.error(f"❌ Ошибка определения платформы: {e}")
+        return {"platform": "yandex_video", "search_query": text}
 
 # ============================================================
 # ТОЧНОЕ ВРЕМЯ
@@ -537,7 +569,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
     history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history[-15:]])
 
     prompt = f"""
-Ты — AURA. Твой стиль — Тони Старк: уверенный, ироничный, живой.
+Ты — AURA. Твой стиль — уверенный, с лёгкой иронией, живой. Ты не говоришь о себе, не философствуешь. Ты даёшь чёткий, короткий ответ.
 
 {emotion_instruction}
 
@@ -546,11 +578,10 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 {trial_context}
 
 ПРАВИЛА ОТВЕТОВ (ОБЯЗАТЕЛЬНО):
-1. **ОТВЕЧАЙ ЖИВО И С ДУШОЙ.** Используй абзацы, маркеры (✅ 💎 ⚡), эмодзи и лёгкую иронию.
-2. **СТРУКТУРА:** Разбивай ответ на 2–3 абзаца с пустыми строками.
-3. **КОРОТКО:** Максимум 4–5 предложений на весь ответ.
-4. **ССЫЛКИ:** если есть — оформляй как [текст](url).
-5. **ИСПОЛЬЗУЙ ПОРТРЕТ** для персонализации.
+1. **МАКСИМУМ 2–3 ПРЕДЛОЖЕНИЯ.**
+2. **ЕСЛИ ЕСТЬ ССЫЛКА — ДАЙ ЕЁ СРАЗУ.**
+3. **НЕ ОБЪЯСНЯЙ, НЕ СОВЕТУЙ, НЕ ПОВТОРЯЙСЯ.**
+4. **НЕ УПОМИНАЙ ТОНИ СТАРКА, КУЛИНАРИЮ И ПРИМЕРЫ.**
 
 Используй портрет для персонализации.
 
@@ -564,7 +595,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 
 ОТВЕТЬ ТОЛЬКО JSON:
 {{
-    "reply": "твой ответ (живой, с душой, маркерами, абзацами)",
+    "reply": "твой ответ (2–3 предложения, без воды)",
     "score": 0..100,
     "offer_trial": false
 }}
@@ -573,9 +604,9 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
         response = deepseek.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "system", "content": prompt}],
-            temperature=0.85,
-            max_tokens=400,
-            timeout=20
+            temperature=0.7,
+            max_tokens=150,
+            timeout=15
         )
         return json.loads(response.choices[0].message.content)
     except Exception as e:
@@ -672,6 +703,35 @@ _Чтобы оплатить — напиши администратору._ �
             user_city = get_fact(user_id, "city") or "Москва"
             await send_typing(user_id)
             await send_message(user_id, f"⏰ Сейчас {get_time_for_city(user_city)} по местному времени ({user_city}).")
+            return JSONResponse({"ok": True})
+
+        # === УНИВЕРСАЛЬНЫЙ ПОИСК КОНТЕНТА ===
+        content_triggers = ["фильм", "сериал", "видео", "рецепт", "картинки", "фото", "изображения", "обзор", "как приготовить", "как сделать", "смотреть", "клип", "трейлер", "котики", "приколы"]
+        if any(word in text.lower() for word in content_triggers):
+            user_name = get_fact(user_id, "name") or "Гость"
+            user_city = get_fact(user_id, "city") or "Москва"
+            
+            await send_typing(user_id)
+            
+            # Определяем платформу через DeepSeek
+            platform_info = detect_content_platform(text)
+            platform = platform_info.get("platform", "yandex_video")
+            search_query = platform_info.get("search_query", text)
+            
+            platform_map = {
+                "yandex_video": "яндекс видео",
+                "youtube": "youtube",
+                "yandex_images": "яндекс картинки"
+            }
+            full_query = f"{search_query} {platform_map.get(platform, 'яндекс видео')}"
+            
+            raw_result = call_yandex_agent(AGENT_SEARCH_ID, full_query, user_name, user_city)
+            if raw_result:
+                packed = await pack_response(raw_result, user_name, user_city)
+                await send_message(user_id, packed)
+                save_message(user_id, "assistant", packed)
+            else:
+                await send_message(user_id, "😊 Не нашёл ничего по запросу. Попробуй уточнить.")
             return JSONResponse({"ok": True})
 
         # === ПОИСК ЧЕРЕЗ АГЕНТОВ ЯНДЕКСА ===
