@@ -144,7 +144,30 @@ def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_c
         return ""
 
 # ============================================================
-# УПАКОВКА ОТВЕТА (ЖИВОЙ СТИЛЬ)
+# УПАКОВКА ОТВЕТА В СТИЛЬ AURA (ДЛЯ ТОВАРОВ)
+# ============================================================
+async def pack_products(products, user_name):
+    if not products:
+        return "😊 Не нашёл товары. Попробуй уточнить запрос."
+    
+    reply = f"{user_name}, лови подборку белых мужских носков на Wildberries. Все в наличии, цены актуальны на сегодня.\n\n"
+    
+    for i, item in enumerate(products[:3], 1):
+        name = item.get('title', 'Без названия')
+        price = item.get('price', 0)
+        rating = item.get('rating', 0)
+        url = item.get('url', '#')
+        specs = item.get('specs', 'хлопок, эластан')
+        reply += f"✅ **{name}** — **{price} ₽**, рейтинг {rating}. {specs}. [Ссылка]({url})\n\n"
+    
+    reply += f"💎 **Самый выгодный:** {products[0].get('title', 'первый вариант')} за {products[0].get('price', 0)} ₽ — отличное качество.\n\n"
+    reply += "⚡ Если нужен конкретный бренд или размер — скажи, уточню.\n\n"
+    reply += "🔥 *И да, если найдёшь дешевле — я закажу тебе, где выгоднее. Ты знаешь.*"
+    
+    return reply
+
+# ============================================================
+# УПАКОВКА ОТВЕТА (ОБЩАЯ, ДЛЯ АГЕНТОВ)
 # ============================================================
 async def pack_response(raw_text: str, user_name: str = "", user_city: str = "") -> str:
     try:
@@ -458,7 +481,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА (С ТАРИФАМИ)
+# ОСНОВНАЯ ЛОГИКА (С ТАРИФАМИ И ПОРТРЕТОМ)
 # ============================================================
 async def deepseek_interview(user_id: int, text: str, step: int, history: list, emotion: str = "спокойствие") -> dict:
     emotion_instruction = ""
@@ -640,6 +663,29 @@ _Чтобы оплатить — напиши администратору._ �
             user_city = get_fact(user_id, "city") or "Москва"
             await send_typing(user_id)
             await send_message(user_id, f"⏰ Сейчас {get_time_for_city(user_city)} по местному времени ({user_city}).")
+            return JSONResponse({"ok": True})
+
+        # === ПОИСК НА WILDBERRIES (ЧЕРЕЗ APIFY) ===
+        if "wildberries" in text.lower() or "вб" in text.lower() or "вайлдберриз" in text.lower():
+            await send_typing(user_id)
+            try:
+                from apify_client import ApifyClient
+                client = ApifyClient(os.getenv("APIFY_TOKEN"))
+                run_input = {
+                    "search": text,
+                    "maxResults": 5
+                }
+                run = client.actor("powerai/wildberries-products-search-scraper").call(run_input=run_input)
+                items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
+                if items:
+                    packed = await pack_products(items, get_fact(user_id, "name") or "Гость")
+                    await send_message(user_id, packed)
+                    save_message(user_id, "assistant", packed)
+                else:
+                    await send_message(user_id, "😊 Не нашёл товары на Wildberries. Попробуй уточнить запрос.")
+            except Exception as e:
+                logger.error(f"❌ Ошибка парсинга WB: {e}")
+                await send_message(user_id, "😊 Не удалось найти товары на Wildberries. Попробуй позже.")
             return JSONResponse({"ok": True})
 
         # === ПОИСК ЧЕРЕЗ АГЕНТОВ ЯНДЕКСА ===
