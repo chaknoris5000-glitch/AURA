@@ -117,15 +117,12 @@ def recognize_image(image_url: str) -> str:
         return "⚠️ Ключ Vision OCR не настроен."
     
     try:
-        # Скачиваем изображение
         response = requests.get(image_url, timeout=30)
         if response.status_code != 200:
             return "⚠️ Не удалось загрузить изображение."
         
-        # Кодируем в base64
         image_base64 = base64.b64encode(response.content).decode('utf-8')
         
-        # Формируем запрос к Yandex Vision
         url = "https://vision.api.cloud.yandex.net/v1/ocr"
         headers = {
             "Authorization": f"Api-Key {YANDEX_VISION_API_KEY}",
@@ -142,7 +139,6 @@ def recognize_image(image_url: str) -> str:
             return f"⚠️ Ошибка распознавания: {result.text}"
         
         data = result.json()
-        # Извлекаем текст из ответа
         text_blocks = []
         for page in data.get("pages", []):
             for block in page.get("blocks", []):
@@ -705,10 +701,13 @@ async def webhook(request: Request):
             logger.warning(f"⚠️ Повторный запрос от {user_id}: {text}")
             return JSONResponse({"ok": True})
 
-        # === РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ ===
-        if "photo" in msg:
-            photo = msg["photo"][-1]
-            file_id = photo["file_id"]
+        # === РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ (ФОТО И ДОКУМЕНТЫ) ===
+        if "photo" in msg or ("document" in msg and msg["document"].get("mime_type", "").startswith("image")):
+            if "photo" in msg:
+                file_id = msg["photo"][-1]["file_id"]
+            else:
+                file_id = msg["document"]["file_id"]
+            
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
             
             await send_typing(user_id)
@@ -719,7 +718,6 @@ async def webhook(request: Request):
                     image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_resp.json()['result']['file_path']}"
                     recognized_text = recognize_image(image_url)
                     
-                    # Сохраняем в портрет, если это документ
                     if "паспорт" in recognized_text.lower() or "серия" in recognized_text.lower():
                         save_portrait_field(user_id, "passport_data", recognized_text)
                     
