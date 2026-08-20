@@ -30,7 +30,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GIS_API_KEY = os.getenv("GIS_API_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
-APIFY_TOKEN = os.getenv("APIFY_TOKEN", "apify_api_QiHz0cq2J4TVjVjUwq9zVIss4VCUvY18mFNR")
+APIFY_TOKEN = os.getenv("APIFY_TOKEN")
 
 AGENT_SEARCH_ID = os.getenv("YANDEX_AGENT_ID", "fvt3te2kgttig7u3a1fb")
 AGENT_RESEARCH_ID = os.getenv("YANDEX_AGENT_RESEARCH_ID", "fvti80ngse2778agbmdl")
