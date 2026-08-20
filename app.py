@@ -54,12 +54,12 @@ if SUPABASE_URL and SUPABASE_KEY:
 app = FastAPI()
 
 # ============================================================
-# СПИСОК ВАЛИДНЫХ КОДОВ (МЕНЯЙ ЗДЕСЬ)
+# СПИСОК ВАЛИДНЫХ КОДОВ
 # ============================================================
 VIP_CODES = ["AURA-001", "AURA-002", "AURA-003", "ADMIN", "TEST"]
 
 # ============================================================
-# ЗАЩИТА ОТ ПОВТОРНЫХ ЗАПРОСОВ
+# ЗАЩИТА ОТ ПОВТОРОВ
 # ============================================================
 user_last_requests = {}
 
@@ -93,7 +93,7 @@ def cache_response(hash_val, response):
     agent_cache[hash_val] = {"response": response, "timestamp": datetime.now()}
 
 # ============================================================
-# ПАМЯТЬ И ПОРТРЕТ (Supabase)
+# ПАМЯТЬ И ПОРТРЕТ
 # ============================================================
 def save_fact(user_id, key, value):
     if not supabase:
@@ -147,6 +147,28 @@ def save_portrait_field(user_id, field, value):
             }).execute()
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения портрета: {e}")
+
+# ============================================================
+# АДМИНКА (ОБНОВЛЕНИЕ СТАТУСА КЛИЕНТА)
+# ============================================================
+def update_client_status(user_id, action):
+    if not supabase:
+        return
+    try:
+        existing = supabase.table("client_status").select("user_id").eq("user_id", str(user_id)).execute()
+        if existing.data:
+            supabase.table("client_status").update({
+                "last_active": datetime.now().isoformat(),
+                "action": action
+            }).eq("user_id", str(user_id)).execute()
+        else:
+            supabase.table("client_status").insert({
+                "user_id": str(user_id),
+                "last_active": datetime.now().isoformat(),
+                "action": action
+            }).execute()
+    except Exception as e:
+        logger.error(f"❌ Ошибка обновления статуса: {e}")
 
 # ============================================================
 # РАСПОЗНАВАНИЕ ГОЛОСА
@@ -210,7 +232,7 @@ def recognize_image(image_url: str) -> str:
         return "⚠️ Ошибка при распознавании изображения."
 
 # ============================================================
-# ВЫЗОВ АГЕНТОВ ЯНДЕКСА
+# ВЫЗОВ АГЕНТОВ ЯНДЕКСА (С ТАЙМАУТОМ 5 СЕК)
 # ============================================================
 def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_city: str = "", budget: str = "") -> str:
     hash_val = hashlib.md5(f"{agent_id}:{user_text}:{user_name}:{user_city}:{budget}".encode()).hexdigest()
@@ -229,16 +251,18 @@ def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_c
             "user_city": user_city or "Москва",
             "budget": budget or "не указан"
         }
+        # Таймаут 5 секунд
         response = client.responses.create(
             prompt={"id": agent_id, "variables": variables},
             input=user_text,
             tools=[{"type": "web_search", "filters": {"allowed_domains": []}, "search_context_size": "low"}],
+            timeout=5.0
         )
         result = response.output_text
         cache_response(hash_val, result)
         return result
     except Exception as e:
-        logger.error(f"❌ Ошибка агента Яндекса ({agent_id}): {e}")
+        logger.error(f"❌ Таймаут/ошибка агента Яндекса ({agent_id}): {e}")
         return ""
 
 # ============================================================
@@ -252,16 +276,8 @@ async def pack_response(raw_text: str, user_name: str = "", user_city: str = "")
 ПРАВИЛА:
 1. **Максимум 3-4 предложения.**
 2. Только суть: цифры, даты, цены, адреса.
-3. Используй эмодзи, чтобы передать настроение:
-   - ✈️ — про путешествия
-   - 🚂 — про поезда
-   - 🏨 — про отели
-   - 🍽️ — про еду
-   - 🎯 — про выбор
-   - 😊 — когда тепло и дружелюбно
-   - 🔥 — когда что-то выгодное или крутое
-   - 💎 — когда лучший вариант
-4. Без воды, без «я рекомендую», без канцелярита.
+3. Используй эмодзи по смыслу (✈️ 🚂 🏨 🍽️ 🎯 😊 🔥 💎).
+4. Без воды, без «я рекомендую».
 5. В конце — короткий живой вопрос с эмодзи.
 
 Сырой ответ: {raw_text}
@@ -271,7 +287,7 @@ async def pack_response(raw_text: str, user_name: str = "", user_city: str = "")
             messages=[{"role": "system", "content": prompt}],
             temperature=0.7,
             max_tokens=150,
-            timeout=15
+            timeout=10
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -279,7 +295,134 @@ async def pack_response(raw_text: str, user_name: str = "", user_city: str = "")
         return raw_text[:200]
 
 # ============================================================
-# ОПРЕДЕЛЕНИЕ ПЛАТФОРМЫ ДЛЯ КОНТЕНТА
+# КНОПКИ (ИНЛАЙН-КЛАВИАТУРА)
+# ============================================================
+def get_main_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "📅 Билеты", "callback_data": "tickets"},
+                {"text": "🍽️ Рестораны", "callback_data": "restaurants"}
+            ],
+            [
+                {"text": "🏨 Отели", "callback_data": "hotels"},
+                {"text": "📊 Аналитика", "callback_data": "analytics"}
+            ],
+            [
+                {"text": "💳 Оплатить", "callback_data": "pay"},
+                {"text": "❓ Помощь", "callback_data": "help"}
+            ]
+        ]
+    }
+
+def get_help_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✈️ Билеты", "callback_data": "tickets"},
+                {"text": "🍽️ Рестораны", "callback_data": "restaurants"}
+            ],
+            [
+                {"text": "🏨 Отели", "callback_data": "hotels"},
+                {"text": "📊 Аналитика", "callback_data": "analytics"}
+            ],
+            [
+                {"text": "💳 Оплатить", "callback_data": "pay"},
+                {"text": "🔙 Назад", "callback_data": "back"}
+            ]
+        ]
+    }
+
+# ============================================================
+# ОТПРАВКА СООБЩЕНИЙ С КНОПКАМИ
+# ============================================================
+async def send_message_with_buttons(chat_id, text, keyboard=None):
+    if not text:
+        text = "Извините, я не смог обработать ваш запрос."
+    if len(text) > 4096:
+        text = text[:4093] + "..."
+    if keyboard is None:
+        keyboard = get_main_keyboard()
+    try:
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown",
+            "reply_markup": keyboard
+        }
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json=payload,
+            timeout=30
+        )
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки с кнопками: {e}")
+
+async def send_message(chat_id, text):
+    if not text:
+        text = "Извините, я не смог обработать ваш запрос."
+    if len(text) > 4096:
+        text = text[:4093] + "..."
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+            timeout=30
+        )
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки: {e}")
+
+# ============================================================
+# ОБРАБОТЧИК КНОПОК (CALLBACK)
+# ============================================================
+async def handle_callback(callback_data, user_id, message_id):
+    try:
+        if callback_data == "tickets":
+            await send_message(user_id, "✈️ Напишите город отправления, город прибытия и дату.")
+        elif callback_data == "restaurants":
+            await send_message(user_id, "🍽️ Напишите город и тип кухни, которую предпочитаете.")
+        elif callback_data == "hotels":
+            await send_message(user_id, "🏨 Напишите город, даты заезда и выезда.")
+        elif callback_data == "analytics":
+            await send_message(user_id, "📊 Напишите, что именно проанализировать (рынок, цены, конкурентов).")
+        elif callback_data == "pay":
+            await send_message(user_id, """
+💳 **Оплата подписки AURA**
+
+Стоимость: **150 000 ₽ / месяц**
+
+Ссылка для оплаты через Telegram Stars:
+[Оплатить](https://t.me/AuraMegaBot?start=pay)
+
+После оплаты ваш код будет активирован автоматически.
+""")
+        elif callback_data == "help":
+            await send_message_with_buttons(user_id, """
+❓ **Помощь**
+
+Я умею:
+▸ Искать билеты, рестораны, отели
+▸ Анализировать рынок и цены
+▸ Давать короткие ответы с душой
+
+Просто напишите, что нужно — и я помогу.
+
+Для оплаты нажмите кнопку ниже.
+""", get_help_keyboard())
+        elif callback_data == "back":
+            await send_message_with_buttons(user_id, "✦ Чем могу помочь?", get_main_keyboard())
+        
+        # Закрываем клавиатуру после нажатия
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageReplyMarkup",
+            json={"chat_id": user_id, "message_id": message_id, "reply_markup": {"inline_keyboard": []}},
+            timeout=10
+        )
+    except Exception as e:
+        logger.error(f"❌ Ошибка обработки callback: {e}")
+
+# ============================================================
+# ОПРЕДЕЛЕНИЕ ПЛАТФОРМЫ
 # ============================================================
 def detect_content_platform(text: str) -> dict:
     try:
@@ -376,27 +519,7 @@ def clear_user_history(user_id):
         logger.error(f"❌ Ошибка очистки истории: {e}")
 
 # ============================================================
-# ЭМОЦИИ
-# ============================================================
-async def detect_emotion(text: str) -> dict:
-    try:
-        prompt = f"""
-Проанализируй эмоцию в сообщении: "{text}"
-Верни JSON: {{"emotion": "спокойствие|радость|грусть", "confidence": 0.0-1.0}}
-"""
-        response = deepseek.chat.completions.create(
-            model="deepseek-chat",
-            messages=[{"role": "system", "content": prompt}],
-            temperature=0.3,
-            max_tokens=100,
-            timeout=10
-        )
-        return json.loads(response.choices[0].message.content)
-    except:
-        return {"emotion": "спокойствие", "confidence": 0.5}
-
-# ============================================================
-# 2ГИС
+# 2ГИС (FALLBACK)
 # ============================================================
 async def search_organization(query: str, city: str = "Москва") -> dict:
     if not GIS_API_KEY:
@@ -413,7 +536,7 @@ async def search_organization(query: str, city: str = "Москва") -> dict:
     }
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, params=params, timeout=10)
+            response = await client.get(url, params=params, timeout=5)
             if response.status_code == 200:
                 data = response.json()
                 items = data.get("result", {}).get("items", [])
@@ -433,43 +556,46 @@ async def search_organization(query: str, city: str = "Москва") -> dict:
         return {"error": str(e)}
 
 # ============================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ TELEGRAM
+# АВТО-ПРИВЕТСТВИЕ (ПРОВЕРКА НА ТИШИНУ)
 # ============================================================
-async def send_typing(chat_id):
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction",
-            json={"chat_id": chat_id, "action": "typing"},
-            timeout=5
-        )
-    except Exception as e:
-        logger.error(f"❌ Ошибка отправки статуса: {e}")
+async def check_inactive_users():
+    """Фоновая задача: раз в 6 часов проверяет, кто молчит 2 дня"""
+    while True:
+        await asyncio.sleep(21600)  # 6 часов
+        try:
+            if not supabase:
+                continue
+            # Находим клиентов, которые не писали 2 дня
+            two_days_ago = (datetime.now() - timedelta(days=2)).isoformat()
+            res = supabase.table("client_status") \
+                .select("user_id") \
+                .lt("last_active", two_days_ago) \
+                .execute()
+            
+            for client in res.data:
+                user_id = int(client["user_id"])
+                await send_message(user_id, """
+✦ Доброе утро! ☀️
 
-async def send_message(chat_id, text):
-    if not text:
-        text = "Извините, я не смог обработать ваш запрос."
-    if len(text) > 4096:
-        text = text[:4093] + "..."
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
-            timeout=30
-        )
-    except Exception as e:
-        logger.error(f"❌ Ошибка отправки: {e}")
+Я подобрал для вас несколько интересных новостей и предложений по вашим темам.
+
+Хотите посмотреть? Просто напишите, что вас интересует — билеты, рестораны или аналитика.
+
+Всегда на связи, AURA.
+""")
+                logger.info(f"📨 Авто-приветствие отправлено {user_id}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки неактивных: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА ОБРАБОТКИ (VIP-ВЕРСИЯ)
+# ОСНОВНАЯ ЛОГИКА ОБРАБОТКИ
 # ============================================================
 async def process_vip_request(user_id: int, text: str) -> str:
-    """Обработка запроса VIP-пользователя"""
     history = get_recent_history(user_id, limit=20)
     user_name = get_fact(user_id, "name") or "Гость"
     user_city = get_fact(user_id, "city") or "Москва"
     portrait = get_portrait(user_id)
     
-    # Собираем контекст
     portrait_context = ""
     if portrait:
         parts = []
@@ -493,8 +619,8 @@ async def process_vip_request(user_id: int, text: str) -> str:
 - 3-4 предложения максимум.
 - Цифры, даты, цены — по факту.
 - Добавь эмодзи по смыслу (✈️ 🚂 🏨 🍽️ 🎯 😊 🔥 💎).
-- Добавь лёгкую эмоцию — иногда улыбнись, иногда удивись.
-- Без воды. Только суть.
+- Добавь лёгкую эмоцию.
+- Без воды.
 - В конце — короткий тёплый вопрос с эмодзи.
 
 Имя пользователя: {user_name}
@@ -515,7 +641,7 @@ async def process_vip_request(user_id: int, text: str) -> str:
             messages=[{"role": "system", "content": prompt}],
             temperature=0.7,
             max_tokens=150,
-            timeout=20
+            timeout=15
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -523,12 +649,22 @@ async def process_vip_request(user_id: int, text: str) -> str:
         return "Извините, произошла ошибка. Попробуйте перефразировать запрос."
 
 # ============================================================
-# WEBHOOK (ОСНОВНАЯ ТОЧКА ВХОДА)
+# WEBHOOK
 # ============================================================
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
         body = await request.json()
+        
+        # Обработка callback (кнопки)
+        if "callback_query" in body:
+            callback = body["callback_query"]
+            user_id = callback["from"]["id"]
+            callback_data = callback["data"]
+            message_id = callback["message"]["message_id"]
+            await handle_callback(callback_data, user_id, message_id)
+            return JSONResponse({"ok": True})
+        
         if "message" not in body:
             return JSONResponse({"ok": True})
         
@@ -537,7 +673,7 @@ async def webhook(request: Request):
         text = msg.get("text", "")
         
         # ============================================================
-        # 1. ОБРАБОТКА МЕДИА (ФОТО/ГОЛОС)
+        # ОБРАБОТКА МЕДИА
         # ============================================================
         if "photo" in msg or "document" in msg:
             if "photo" in msg:
@@ -546,14 +682,13 @@ async def webhook(request: Request):
                 file_id = msg["document"]["file_id"]
             
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
-            await send_typing(user_id)
             
             try:
                 file_resp = requests.get(file_url, timeout=30)
                 if file_resp.status_code == 200 and file_resp.json().get("ok"):
                     image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_resp.json()['result']['file_path']}"
                     recognized_text = recognize_image(image_url)
-                    await send_message(user_id, f"📷 **Распознанный текст:**\n\n{recognized_text}")
+                    await send_message_with_buttons(user_id, f"📷 **Распознанный текст:**\n\n{recognized_text}")
                     save_message(user_id, "assistant", f"Распознан текст: {recognized_text[:200]}...")
                 else:
                     await send_message(user_id, "⚠️ Не удалось загрузить изображение.")
@@ -588,17 +723,23 @@ async def webhook(request: Request):
             return JSONResponse({"ok": True})
         
         # ============================================================
-        # 2. ЗАЩИТА ОТ ПОВТОРОВ
+        # ЗАЩИТА ОТ ПОВТОРОВ
         # ============================================================
         if is_duplicate(user_id, text):
             logger.warning(f"⚠️ Повторный запрос от {user_id}")
             return JSONResponse({"ok": True})
         
         # ============================================================
-        # 3. КОМАНДЫ
+        # КОМАНДЫ
         # ============================================================
         if text == "/start":
-            await send_message(user_id, "✦ **Добро пожаловать в закрытый клуб AURA.**\n\nДля доступа введите ваш персональный инвайт-код.\n\n_Если у вас нет кода — свяжитесь с вашим персональным куратором._")
+            await send_message_with_buttons(user_id, """
+✦ **Добро пожаловать в закрытый клуб AURA.**
+
+Для доступа введите ваш персональный инвайт-код.
+
+_Если у вас нет кода — свяжитесь с вашим персональным куратором._
+""")
             return JSONResponse({"ok": True})
         
         if text.lower() in ["/clear", "/reset", "сброс"]:
@@ -606,7 +747,7 @@ async def webhook(request: Request):
             await send_message(user_id, "✅ История очищена.")
             return JSONResponse({"ok": True})
         
-        if text.lower() == "/subscribe":
+        if text.lower() == "/subscribe" or text.lower() == "оплатить":
             await send_message(user_id, """
 ✦ **Закрытый клуб AURA**
 
@@ -618,104 +759,84 @@ async def webhook(request: Request):
 ▸ Приоритетная обработка запросов
 ▸ Персональный куратор
 
-◈ Оплата производится по счёту.
-Для оформления — напишите администратору.
+◈ Оплата производится по счёту или через Telegram Stars.
 """)
             return JSONResponse({"ok": True})
         
         # ============================================================
-        # 4. ПРОВЕРКА VIP-СТАТУСА (СРАЗУ ПОСЛЕ ВВОДА КОДА)
+        # ПРОВЕРКА КОДА
         # ============================================================
-        # Если пользователь ввёл код из списка VIP_CODES
         if text.upper() in [code.upper() for code in VIP_CODES]:
-            # Сохраняем в память, что этот user_id теперь VIP
             save_fact(user_id, "vip_code", text.upper())
-            await send_message(user_id, "✅ **Код активирован!** Добро пожаловать в закрытый клуб.\n\nЯ — ваш персональный ассистент. Чем могу быть полезен?")
+            update_client_status(user_id, "activation")
+            await send_message_with_buttons(user_id, """
+✅ **Код активирован!** Добро пожаловать в закрытый клуб.
+
+Я — ваш персональный ассистент. Чем могу помочь?
+
+Нажмите на кнопку ниже или просто напишите запрос.
+""")
             save_message(user_id, "assistant", "Код активирован, доступ получен.")
             return JSONResponse({"ok": True})
         
         # ============================================================
-        # 5. ПРОВЕРКА, ЯВЛЯЕТСЯ ЛИ ПОЛЬЗОВАТЕЛЬ VIP
+        # ПРОВЕРКА VIP-СТАТУСА
         # ============================================================
         vip_code = get_fact(user_id, "vip_code")
         
         if vip_code:
-            # === VIP-ПОЛЬЗОВАТЕЛЬ ===
-            # Сохраняем сообщение
+            update_client_status(user_id, "active")
             save_message(user_id, "user", text)
             
             # Время
             if any(phrase in text.lower() for phrase in ["сколько время", "который час", "время сейчас"]):
                 user_city = get_fact(user_id, "city") or "Москва"
-                await send_typing(user_id)
-                await send_message(user_id, f"✦ Сейчас **{get_time_for_city(user_city)}** по местному времени ({user_city}).")
+                await send_message_with_buttons(user_id, f"✦ Сейчас **{get_time_for_city(user_city)}** по местному времени ({user_city}).")
                 return JSONResponse({"ok": True})
-            
-            # Поиск контента
-            content_triggers = ["фильм", "сериал", "видео", "рецепт", "картинки", "фото", "обзор", "смотреть", "клип", "трейлер"]
-            search_triggers = ["найди", "поищи", "цены", "билеты", "скидки", "новости", "погода", "курс", "стоимость"]
-            analyze_triggers = ["сравни", "проанализируй", "исследуй", "изучи", "разбери"]
-            reason_triggers = ["посоветуй", "что лучше", "как поступить", "выбери", "рекомендуй", "стоит ли"]
             
             user_name = get_fact(user_id, "name") or "Гость"
             user_city = get_fact(user_id, "city") or "Москва"
             
-            await send_typing(user_id)
+            # ============================================================
+            # ПОИСК (С FALLBACK)
+            # ============================================================
+            search_triggers = ["найди", "поищи", "цены", "билеты", "скидки", "новости", "погода", "курс", "стоимость", "ресторан", "отель"]
             
-            # Контент
-            if any(word in text.lower() for word in content_triggers):
-                platform_info = detect_content_platform(text)
-                platform = platform_info.get("platform", "yandex_video")
-                search_query = platform_info.get("search_query", text)
-                platform_map = {"yandex_video": "яндекс видео", "youtube": "youtube", "yandex_images": "яндекс картинки"}
-                full_query = f"{search_query} {platform_map.get(platform, 'яндекс видео')}"
-                raw_result = call_yandex_agent(AGENT_SEARCH_ID, full_query, user_name, user_city)
-                if raw_result:
-                    packed = await pack_response(raw_result, user_name, user_city)
-                    await send_message(user_id, packed)
-                    save_message(user_id, "assistant", packed)
-                else:
-                    await send_message(user_id, "✦ К сожалению, ничего не найдено. Попробуйте уточнить запрос.")
-                return JSONResponse({"ok": True})
-            
-            # Поиск/Анализ/Рассуждение
-            if any(word in text.lower() for word in search_triggers + analyze_triggers + reason_triggers):
-                if any(word in text.lower() for word in reason_triggers):
-                    agent_id = AGENT_REASONING_ID
-                elif any(word in text.lower() for word in analyze_triggers):
-                    agent_id = AGENT_RESEARCH_ID
-                else:
-                    agent_id = AGENT_SEARCH_ID
-                
+            if any(word in text.lower() for word in search_triggers):
+                # Сначала пробуем Яндекс-агента (5 секунд)
                 try:
-                    raw_result = call_yandex_agent(agent_id, text, user_name, user_city)
+                    raw_result = call_yandex_agent(AGENT_SEARCH_ID, text, user_name, user_city)
                     if raw_result:
                         packed = await pack_response(raw_result, user_name, user_city)
-                        await send_message(user_id, packed)
+                        await send_message_with_buttons(user_id, packed)
                         save_message(user_id, "assistant", packed)
                         return JSONResponse({"ok": True})
                 except Exception as e:
                     logger.error(f"❌ Ошибка агента Яндекса: {e}")
                 
-                # Fallback на 2ГИС
+                # Если Яндекс не ответил — fallback на 2ГИС
                 result = await search_organization(text, get_fact(user_id, "city") or "Москва")
                 if result and "error" not in result:
                     reply = f"✦ **{result['name']}**\n\n▸ Адрес: {result['address']}\n▸ Телефон: {', '.join(result['phones'][:3])}\n▸ Сайт: {result['site']}"
-                    await send_message(user_id, reply)
+                    await send_message_with_buttons(user_id, reply)
                     save_message(user_id, "assistant", reply)
                 else:
-                    await send_message(user_id, f"✦ По запросу «{text}» ничего не найдено. Попробуйте уточнить.")
+                    # Если и 2ГИС не помог — отвечаем DeepSeek
+                    reply = await process_vip_request(user_id, text)
+                    await send_message_with_buttons(user_id, reply)
+                    save_message(user_id, "assistant", reply)
                 return JSONResponse({"ok": True})
             
-            # Обычный диалог
+            # ============================================================
+            # ОБЫЧНЫЙ ДИАЛОГ
+            # ============================================================
             reply = await process_vip_request(user_id, text)
             save_message(user_id, "assistant", reply)
-            await send_typing(user_id)
-            await send_message(user_id, reply)
+            await send_message_with_buttons(user_id, reply)
             return JSONResponse({"ok": True})
         
         # ============================================================
-        # 6. НЕ VIP — ПРОСИМ КОД
+        # НЕ VIP
         # ============================================================
         else:
             await send_message(user_id, "🔒 **Неверный код.** Доступ запрещён.")
@@ -728,6 +849,10 @@ async def webhook(request: Request):
 # ============================================================
 # ЗАПУСК
 # ============================================================
+@app.on_event("startup")
+async def startup():
+    asyncio.create_task(check_inactive_users())
+
 @app.get("/")
 async def root():
     return {"status": "AURA VIP работает"}
