@@ -109,73 +109,56 @@ def transcribe_audio(audio_url):
         return None
 
 # ============================================================
-# РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ (OCR + КЛАССИФИКАЦИЯ)
+# РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ (ТОЛЬКО OCR)
 # ============================================================
-def analyze_image(image_url: str) -> dict:
-    """Анализирует изображение через Yandex Vision OCR + классификацию."""
+def recognize_image(image_url: str) -> str:
+    """Распознаёт текст на изображении через Yandex Vision OCR."""
     if not YANDEX_VISION_API_KEY:
-        return {"error": "⚠️ Ключ Vision OCR не настроен."}
+        return "⚠️ Ключ Vision OCR не настроен."
     
     try:
+        # Скачиваем изображение
         response = requests.get(image_url, timeout=30)
         if response.status_code != 200:
-            return {"error": "⚠️ Не удалось загрузить изображение."}
+            return "⚠️ Не удалось загрузить изображение."
         
         image_base64 = base64.b64encode(response.content).decode('utf-8')
         
-        # === 1. РАСПОЗНАВАНИЕ ТЕКСТА (OCR) ===
-        ocr_url = "https://vision.api.cloud.yandex.net/v1/ocr"
+        # Отправляем в Yandex Vision OCR
+        url = "https://vision.api.cloud.yandex.net/v1/ocr"
         headers = {
             "Authorization": f"Api-Key {YANDEX_VISION_API_KEY}",
             "Content-Type": "application/json"
         }
-        ocr_payload = {
+        payload = {
             "folderId": YANDEX_FOLDER_ID,
             "image": {"content": image_base64},
             "language": "ru"
         }
         
-        ocr_result = requests.post(ocr_url, json=ocr_payload, headers=headers, timeout=30)
-        logger.info(f"📷 OCR status: {ocr_result.status_code}")
-        if ocr_result.status_code != 200:
-            return {"error": f"⚠️ Ошибка OCR: {ocr_result.status_code}"}
+        result = requests.post(url, json=payload, headers=headers, timeout=30)
+        logger.info(f"📷 OCR status: {result.status_code}")
         
-        ocr_data = ocr_result.json()
+        if result.status_code != 200:
+            return f"⚠️ Ошибка распознавания: {result.status_code}"
+        
+        data = result.json()
+        
+        # Извлекаем текст из ответа
         text_blocks = []
-        for page in ocr_data.get("pages", []):
+        for page in data.get("pages", []):
             for block in page.get("blocks", []):
                 for word in block.get("words", []):
                     text_blocks.append(word.get("text", ""))
-        recognized_text = " ".join(text_blocks) if text_blocks else None
         
-        # === 2. КЛАССИФИКАЦИЯ ИЗОБРАЖЕНИЯ ===
-        vision_url = "https://vision.api.cloud.yandex.net/v1/vision"
-        vision_payload = {
-            "folderId": YANDEX_FOLDER_ID,
-            "analyze_specs": [{
-                "content": image_base64,
-                "features": [{"type": "CLASSIFICATION"}]
-            }]
-        }
-        
-        vision_result = requests.post(vision_url, json=vision_payload, headers=headers, timeout=30)
-        logger.info(f"🖼️ Vision status: {vision_result.status_code}")
-        classification = None
-        if vision_result.status_code == 200:
-            vision_data = vision_result.json()
-            if vision_data.get("results"):
-                for result_item in vision_data["results"]:
-                    for feature in result_item.get("featureResults", []):
-                        if feature.get("type") == "CLASSIFICATION":
-                            for classification_item in feature.get("classification", {}).get("items", []):
-                                classification = classification_item.get("description")
-                                break
-        
-        return {"text": recognized_text, "classification": classification}
+        if text_blocks:
+            return " ".join(text_blocks)
+        else:
+            return "😊 Текст на изображении не найден."
             
     except Exception as e:
-        logger.error(f"❌ Ошибка анализа изображения: {e}")
-        return {"error": "⚠️ Ошибка при распознавании изображения."}
+        logger.error(f"❌ Ошибка распознавания: {e}")
+        return "⚠️ Ошибка при распознавании изображения."
 
 # ============================================================
 # ВЫЗОВ АГЕНТОВ ЯНДЕКСА (С КЕШИРОВАНИЕМ)
@@ -226,7 +209,7 @@ async def pack_response(raw_text: str, user_name: str = "", user_city: str = "")
 
 ПРАВИЛА:
 1. **МАКСИМУМ 2–3 ПРЕДЛОЖЕНИЯ.** Без воды.
-2. **ЕСЛИ ПРОСЯТ ССЫЛКУ — ДАЙ ЕЁ СРАЗУ.** Проверь, что ссылка ведёт на конкретный ресурс, а не на поиск.
+2. **ЕСЛИ ПРОСЯТ ССЫЛКУ — ДАЙ ЕЁ СРАЗУ.** Проверь, что ссылка ведёт на конкретный ресурс.
 3. **НЕ ОБЪЯСНЯЙ, НЕ СОВЕТУЙ, НЕ ПОВТОРЯЙСЯ.**
 4. **НЕ УПОМИНАЙ ТОНИ СТАРКА, КУЛИНАРИЮ И ПРИМЕРЫ.**
 
@@ -721,21 +704,10 @@ async def webhook(request: Request):
                 file_resp = requests.get(file_url, timeout=30)
                 if file_resp.status_code == 200 and file_resp.json().get("ok"):
                     image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_resp.json()['result']['file_path']}"
-                    result = analyze_image(image_url)
+                    recognized_text = recognize_image(image_url)
                     
-                    if "error" in result:
-                        await send_message(user_id, result["error"])
-                    else:
-                        response_text = "📷 "
-                        if result.get("classification"):
-                            response_text += f"На фото **{result['classification']}**.\n"
-                        if result.get("text"):
-                            response_text += f"\n📄 **Распознанный текст:**\n{result['text']}"
-                        else:
-                            response_text += "Текст на изображении не найден."
-                        
-                        await send_message(user_id, response_text)
-                        save_message(user_id, "assistant", response_text[:200])
+                    await send_message(user_id, f"📷 **Распознанный текст:**\n\n{recognized_text}")
+                    save_message(user_id, "assistant", f"Распознан текст: {recognized_text[:200]}...")
                 else:
                     await send_message(user_id, "⚠️ Не удалось загрузить изображение.")
             except Exception as e:
