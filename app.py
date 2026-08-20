@@ -31,6 +31,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GIS_API_KEY = os.getenv("GIS_API_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
+YANDEX_VISION_API_KEY = os.getenv("YANDEX_VISION_API_KEY")
 
 AGENT_SEARCH_ID = os.getenv("YANDEX_AGENT_ID", "fvt3te2kgttig7u3a1fb")
 AGENT_RESEARCH_ID = os.getenv("YANDEX_AGENT_RESEARCH_ID", "fvti80ngse2778agbmdl")
@@ -106,6 +107,56 @@ def transcribe_audio(audio_url):
     except Exception as e:
         logger.error(f"❌ Ошибка распознавания: {e}")
         return None
+
+# ============================================================
+# РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ (YANDEX VISION OCR)
+# ============================================================
+def recognize_image(image_url: str) -> str:
+    """Распознаёт текст на изображении через Yandex Vision OCR."""
+    if not YANDEX_VISION_API_KEY:
+        return "⚠️ Ключ Vision OCR не настроен."
+    
+    try:
+        # Скачиваем изображение
+        response = requests.get(image_url, timeout=30)
+        if response.status_code != 200:
+            return "⚠️ Не удалось загрузить изображение."
+        
+        # Кодируем в base64
+        image_base64 = base64.b64encode(response.content).decode('utf-8')
+        
+        # Формируем запрос к Yandex Vision
+        url = "https://vision.api.cloud.yandex.net/v1/ocr"
+        headers = {
+            "Authorization": f"Api-Key {YANDEX_VISION_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "folderId": YANDEX_FOLDER_ID,
+            "image": {"content": image_base64},
+            "language": "ru"
+        }
+        
+        result = requests.post(url, json=payload, headers=headers, timeout=30)
+        if result.status_code != 200:
+            return f"⚠️ Ошибка распознавания: {result.text}"
+        
+        data = result.json()
+        # Извлекаем текст из ответа
+        text_blocks = []
+        for page in data.get("pages", []):
+            for block in page.get("blocks", []):
+                for word in block.get("words", []):
+                    text_blocks.append(word.get("text", ""))
+        
+        if text_blocks:
+            return " ".join(text_blocks)
+        else:
+            return "😊 Текст на изображении не найден."
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка распознавания: {e}")
+        return "⚠️ Ошибка при распознавании изображения."
 
 # ============================================================
 # ВЫЗОВ АГЕНТОВ ЯНДЕКСА (С КЕШИРОВАНИЕМ)
@@ -654,6 +705,33 @@ async def webhook(request: Request):
             logger.warning(f"⚠️ Повторный запрос от {user_id}: {text}")
             return JSONResponse({"ok": True})
 
+        # === РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ ===
+        if "photo" in msg:
+            photo = msg["photo"][-1]
+            file_id = photo["file_id"]
+            file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
+            
+            await send_typing(user_id)
+            
+            try:
+                file_resp = requests.get(file_url, timeout=30)
+                if file_resp.status_code == 200 and file_resp.json().get("ok"):
+                    image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_resp.json()['result']['file_path']}"
+                    recognized_text = recognize_image(image_url)
+                    
+                    # Сохраняем в портрет, если это документ
+                    if "паспорт" in recognized_text.lower() or "серия" in recognized_text.lower():
+                        save_portrait_field(user_id, "passport_data", recognized_text)
+                    
+                    await send_message(user_id, f"📷 **Распознанный текст:**\n\n{recognized_text}")
+                    save_message(user_id, "assistant", f"Распознан текст: {recognized_text[:200]}...")
+                else:
+                    await send_message(user_id, "⚠️ Не удалось загрузить изображение.")
+            except Exception as e:
+                logger.error(f"❌ Ошибка обработки фото: {e}")
+                await send_message(user_id, "⚠️ Не удалось распознать изображение.")
+            return JSONResponse({"ok": True})
+
         if text == "/start":
             await send_typing(user_id)
             await send_message(user_id, "Привет. Я AURA. Если ты здесь — значит, ты уже не просто ищешь, а хочешь, чтобы искали за тебя. Напиши, что нужно — и я покажу, на что способен.")
@@ -713,7 +791,6 @@ _Чтобы оплатить — напиши администратору._ �
             
             await send_typing(user_id)
             
-            # Определяем платформу через DeepSeek
             platform_info = detect_content_platform(text)
             platform = platform_info.get("platform", "yandex_video")
             search_query = platform_info.get("search_query", text)
