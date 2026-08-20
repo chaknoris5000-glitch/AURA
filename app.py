@@ -112,7 +112,6 @@ def transcribe_audio(audio_url):
 # РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ (YANDEX VISION OCR)
 # ============================================================
 def recognize_image(image_url: str) -> str:
-    """Распознаёт текст на изображении через Yandex Vision OCR."""
     if not YANDEX_VISION_API_KEY:
         return "⚠️ Ключ Vision OCR не настроен."
     
@@ -228,7 +227,6 @@ async def pack_response(raw_text: str, user_name: str = "", user_city: str = "")
 # ОПРЕДЕЛЕНИЕ ПЛАТФОРМЫ ДЛЯ КОНТЕНТА
 # ============================================================
 def detect_content_platform(text: str) -> dict:
-    """Определяет платформу для поиска контента через DeepSeek."""
     try:
         prompt = f"""
 Определи, где лучше искать контент по запросу пользователя: "{text}"
@@ -673,6 +671,37 @@ async def webhook(request: Request):
         msg = body["message"]
         user_id = msg["from"]["id"]
 
+        # ============================================================
+        # РАСПОЗНАВАНИЕ МЕДИА (ФОТО, ДОКУМЕНТЫ) — ПРИОРИТЕТ
+        # ============================================================
+        if "photo" in msg or "document" in msg:
+            if "photo" in msg:
+                file_id = msg["photo"][-1]["file_id"]
+            else:
+                file_id = msg["document"]["file_id"]
+            
+            file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
+            
+            await send_typing(user_id)
+            
+            try:
+                file_resp = requests.get(file_url, timeout=30)
+                if file_resp.status_code == 200 and file_resp.json().get("ok"):
+                    image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_resp.json()['result']['file_path']}"
+                    recognized_text = recognize_image(image_url)
+                    
+                    if "паспорт" in recognized_text.lower() or "серия" in recognized_text.lower():
+                        save_portrait_field(user_id, "passport_data", recognized_text)
+                    
+                    await send_message(user_id, f"📷 **Распознанный текст:**\n\n{recognized_text}")
+                    save_message(user_id, "assistant", f"Распознан текст: {recognized_text[:200]}...")
+                else:
+                    await send_message(user_id, "⚠️ Не удалось загрузить изображение.")
+            except Exception as e:
+                logger.error(f"❌ Ошибка обработки медиа: {e}")
+                await send_message(user_id, "⚠️ Не удалось распознать изображение.")
+            return JSONResponse({"ok": True})
+
         if "voice" in msg:
             file_id = msg["voice"]["file_id"]
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
@@ -699,35 +728,6 @@ async def webhook(request: Request):
 
         if is_duplicate(user_id, text):
             logger.warning(f"⚠️ Повторный запрос от {user_id}: {text}")
-            return JSONResponse({"ok": True})
-
-        # === РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ (ФОТО И ДОКУМЕНТЫ) ===
-        if "photo" in msg or ("document" in msg and msg["document"].get("mime_type", "").startswith("image")):
-            if "photo" in msg:
-                file_id = msg["photo"][-1]["file_id"]
-            else:
-                file_id = msg["document"]["file_id"]
-            
-            file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
-            
-            await send_typing(user_id)
-            
-            try:
-                file_resp = requests.get(file_url, timeout=30)
-                if file_resp.status_code == 200 and file_resp.json().get("ok"):
-                    image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_resp.json()['result']['file_path']}"
-                    recognized_text = recognize_image(image_url)
-                    
-                    if "паспорт" in recognized_text.lower() or "серия" in recognized_text.lower():
-                        save_portrait_field(user_id, "passport_data", recognized_text)
-                    
-                    await send_message(user_id, f"📷 **Распознанный текст:**\n\n{recognized_text}")
-                    save_message(user_id, "assistant", f"Распознан текст: {recognized_text[:200]}...")
-                else:
-                    await send_message(user_id, "⚠️ Не удалось загрузить изображение.")
-            except Exception as e:
-                logger.error(f"❌ Ошибка обработки фото: {e}")
-                await send_message(user_id, "⚠️ Не удалось распознать изображение.")
             return JSONResponse({"ok": True})
 
         if text == "/start":
