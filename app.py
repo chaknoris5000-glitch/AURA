@@ -109,16 +109,17 @@ def transcribe_audio(audio_url):
         return None
 
 # ============================================================
-# РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ (YANDEX VISION OCR)
+# РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ (OCR + КЛАССИФИКАЦИЯ)
 # ============================================================
-def recognize_image(image_url: str) -> str:
+def analyze_image(image_url: str) -> dict:
+    """Анализирует изображение: распознаёт текст и определяет содержимое."""
     if not YANDEX_VISION_API_KEY:
-        return "⚠️ Ключ Vision OCR не настроен."
+        return {"error": "⚠️ Ключ Vision OCR не настроен."}
     
     try:
         response = requests.get(image_url, timeout=30)
         if response.status_code != 200:
-            return "⚠️ Не удалось загрузить изображение."
+            return {"error": "⚠️ Не удалось загрузить изображение."}
         
         image_base64 = base64.b64encode(response.content).decode('utf-8')
         
@@ -135,23 +136,56 @@ def recognize_image(image_url: str) -> str:
         
         result = requests.post(url, json=payload, headers=headers, timeout=30)
         if result.status_code != 200:
-            return f"⚠️ Ошибка распознавания: {result.text}"
+            return {"error": f"⚠️ Ошибка распознавания: {result.status_code}"}
         
         data = result.json()
+        
+        # Извлекаем текст
         text_blocks = []
         for page in data.get("pages", []):
             for block in page.get("blocks", []):
                 for word in block.get("words", []):
                     text_blocks.append(word.get("text", ""))
         
-        if text_blocks:
-            return " ".join(text_blocks)
-        else:
-            return "😊 Текст на изображении не найден."
+        recognized_text = " ".join(text_blocks) if text_blocks else None
+        
+        # Классификация изображения (определяем, что на фото)
+        classification_payload = {
+            "folderId": YANDEX_FOLDER_ID,
+            "analyze_specs": [{
+                "content": image_base64,
+                "features": [{
+                    "type": "CLASSIFICATION"
+                }]
+            }]
+        }
+        
+        class_response = requests.post(
+            "https://vision.api.cloud.yandex.net/v1/vision",
+            json=classification_payload,
+            headers=headers,
+            timeout=30
+        )
+        
+        classification = None
+        if class_response.status_code == 200:
+            class_data = class_response.json()
+            if class_data.get("results"):
+                for result_item in class_data["results"]:
+                    for feature in result_item.get("featureResults", []):
+                        if feature.get("type") == "CLASSIFICATION":
+                            for classification_item in feature.get("classification", {}).get("items", []):
+                                classification = classification_item.get("description")
+                                break
+        
+        return {
+            "text": recognized_text,
+            "classification": classification
+        }
             
     except Exception as e:
-        logger.error(f"❌ Ошибка распознавания: {e}")
-        return "⚠️ Ошибка при распознавании изображения."
+        logger.error(f"❌ Ошибка анализа изображения: {e}")
+        return {"error": "⚠️ Ошибка при распознавании изображения."}
 
 # ============================================================
 # ВЫЗОВ АГЕНТОВ ЯНДЕКСА (С КЕШИРОВАНИЕМ)
@@ -688,13 +722,21 @@ async def webhook(request: Request):
                 file_resp = requests.get(file_url, timeout=30)
                 if file_resp.status_code == 200 and file_resp.json().get("ok"):
                     image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_resp.json()['result']['file_path']}"
-                    recognized_text = recognize_image(image_url)
+                    result = analyze_image(image_url)
                     
-                    if "паспорт" in recognized_text.lower() or "серия" in recognized_text.lower():
-                        save_portrait_field(user_id, "passport_data", recognized_text)
-                    
-                    await send_message(user_id, f"📷 **Распознанный текст:**\n\n{recognized_text}")
-                    save_message(user_id, "assistant", f"Распознан текст: {recognized_text[:200]}...")
+                    if "error" in result:
+                        await send_message(user_id, result["error"])
+                    else:
+                        response_text = "📷 "
+                        if result.get("classification"):
+                            response_text += f"На фото **{result['classification']}**.\n"
+                        if result.get("text"):
+                            response_text += f"\n📄 **Распознанный текст:**\n{result['text']}"
+                        else:
+                            response_text += "Текст на изображении не найден."
+                        
+                        await send_message(user_id, response_text)
+                        save_message(user_id, "assistant", response_text[:200])
                 else:
                     await send_message(user_id, "⚠️ Не удалось загрузить изображение.")
             except Exception as e:
