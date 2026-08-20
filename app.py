@@ -112,7 +112,6 @@ def transcribe_audio(audio_url):
 # РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ (OCR + КЛАССИФИКАЦИЯ)
 # ============================================================
 def analyze_image(image_url: str) -> dict:
-    """Анализирует изображение: распознаёт текст и определяет содержимое."""
     if not YANDEX_VISION_API_KEY:
         return {"error": "⚠️ Ключ Vision OCR не настроен."}
     
@@ -123,65 +122,53 @@ def analyze_image(image_url: str) -> dict:
         
         image_base64 = base64.b64encode(response.content).decode('utf-8')
         
-        url = "https://vision.api.cloud.yandex.net/v1/ocr"
+        # === 1. РАСПОЗНАВАНИЕ ТЕКСТА (OCR) ===
+        ocr_url = "https://vision.api.cloud.yandex.net/v1/ocr"
         headers = {
             "Authorization": f"Api-Key {YANDEX_VISION_API_KEY}",
             "Content-Type": "application/json"
         }
-        payload = {
+        ocr_payload = {
             "folderId": YANDEX_FOLDER_ID,
             "image": {"content": image_base64},
             "language": "ru"
         }
         
-        result = requests.post(url, json=payload, headers=headers, timeout=30)
-        if result.status_code != 200:
-            return {"error": f"⚠️ Ошибка распознавания: {result.status_code}"}
+        ocr_result = requests.post(ocr_url, json=ocr_payload, headers=headers, timeout=30)
+        if ocr_result.status_code != 200:
+            return {"error": f"⚠️ Ошибка OCR: {ocr_result.status_code}"}
         
-        data = result.json()
-        
-        # Извлекаем текст
+        ocr_data = ocr_result.json()
         text_blocks = []
-        for page in data.get("pages", []):
+        for page in ocr_data.get("pages", []):
             for block in page.get("blocks", []):
                 for word in block.get("words", []):
                     text_blocks.append(word.get("text", ""))
-        
         recognized_text = " ".join(text_blocks) if text_blocks else None
         
-        # Классификация изображения (определяем, что на фото)
-        classification_payload = {
+        # === 2. КЛАССИФИКАЦИЯ ИЗОБРАЖЕНИЯ ===
+        vision_url = "https://vision.api.cloud.yandex.net/v1/vision"
+        vision_payload = {
             "folderId": YANDEX_FOLDER_ID,
             "analyze_specs": [{
                 "content": image_base64,
-                "features": [{
-                    "type": "CLASSIFICATION"
-                }]
+                "features": [{"type": "CLASSIFICATION"}]
             }]
         }
         
-        class_response = requests.post(
-            "https://vision.api.cloud.yandex.net/v1/vision",
-            json=classification_payload,
-            headers=headers,
-            timeout=30
-        )
-        
+        vision_result = requests.post(vision_url, json=vision_payload, headers=headers, timeout=30)
         classification = None
-        if class_response.status_code == 200:
-            class_data = class_response.json()
-            if class_data.get("results"):
-                for result_item in class_data["results"]:
+        if vision_result.status_code == 200:
+            vision_data = vision_result.json()
+            if vision_data.get("results"):
+                for result_item in vision_data["results"]:
                     for feature in result_item.get("featureResults", []):
                         if feature.get("type") == "CLASSIFICATION":
                             for classification_item in feature.get("classification", {}).get("items", []):
                                 classification = classification_item.get("description")
                                 break
         
-        return {
-            "text": recognized_text,
-            "classification": classification
-        }
+        return {"text": recognized_text, "classification": classification}
             
     except Exception as e:
         logger.error(f"❌ Ошибка анализа изображения: {e}")
@@ -225,32 +212,36 @@ def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_c
         return ""
 
 # ============================================================
-# УПАКОВКА ОТВЕТА (КОРОТКО, С ДУШОЙ, БЕЗ ЛИШНИХ СЛОВ)
+# УПАКОВКА ОТВЕТА (ЖИВОЙ, ДУШЕВНЫЙ, С МАРКЕРАМИ)
 # ============================================================
 async def pack_response(raw_text: str, user_name: str = "", user_city: str = "") -> str:
     try:
         prompt = f"""
-Ты — AURA. Твой стиль — уверенный, с лёгкой иронией, живой. Ты не говоришь о себе, не философствуешь. Ты даёшь чёткий, короткий ответ.
+Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
+
+Перед тобой сырой ответ поискового агента. Твоя задача — превратить его в красивый, живой ответ в стиле AURA.
 
 ПРАВИЛА:
-1. **МАКСИМУМ 2–3 ПРЕДЛОЖЕНИЯ.**
-2. **ЕСЛИ ЕСТЬ ССЫЛКА — ДАЙ ЕЁ СРАЗУ.**
-3. **НЕ ОБЪЯСНЯЙ, НЕ СОВЕТУЙ, НЕ ПОВТОРЯЙСЯ.**
-4. **НЕ УПОМИНАЙ ТОНИ СТАРКА, КУЛИНАРИЮ И ПРИМЕРЫ.**
+1. **ОТВЕЧАЙ КОРОТКО:** максимум 3–4 предложения.
+2. **СТРУКТУРА:** разбивай ответ на 2–3 абзаца с пустыми строками.
+3. **МАРКЕРЫ:** ✅ — для готовых решений, 💎 — для лучшего варианта, ⚡ — для советов.
+4. **ЖИРНЫЙ ШРИФТ:** выделяй цены, даты, ключевые цифры.
+5. **ДУША:** используй лёгкую иронию, сарказм, эмпатию. Отвечай как человек, а не робот.
+6. **ЭМОДЗИ:** добавляй 1–2 по теме (✈️, 🍽️, 🎬, 🚀, 🏖️).
 
-Используй имя пользователя: {user_name or "Гость"}.
+Используй имя пользователя ({user_name or "Гость"}) и город ({user_city or "Москва"}).
 
 Сырой ответ:
 {raw_text}
 
-Твой ответ (только ссылка или короткая выжимка):
+Твой ответ (живой, структурированный, с душой):
 """
         response = deepseek.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "system", "content": prompt}],
-            temperature=0.7,
-            max_tokens=100,
-            timeout=15
+            temperature=0.85,
+            max_tokens=300,
+            timeout=20
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -601,7 +592,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА (С ТАРИФАМИ И ПОРТРЕТОМ)
+# ОСНОВНАЯ ЛОГИКА (ЖИВОЙ ПРОМПТ)
 # ============================================================
 async def deepseek_interview(user_id: int, text: str, step: int, history: list, emotion: str = "спокойствие") -> dict:
     emotion_instruction = ""
@@ -648,7 +639,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
     history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history[-15:]])
 
     prompt = f"""
-Ты — AURA. Твой стиль — уверенный, с лёгкой иронией, живой. Ты не говоришь о себе, не философствуешь. Ты даёшь чёткий, короткий ответ.
+Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
 
 {emotion_instruction}
 
@@ -657,10 +648,13 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 {trial_context}
 
 ПРАВИЛА ОТВЕТОВ (ОБЯЗАТЕЛЬНО):
-1. **МАКСИМУМ 2–3 ПРЕДЛОЖЕНИЯ.**
-2. **ЕСЛИ ЕСТЬ ССЫЛКА — ДАЙ ЕЁ СРАЗУ.**
-3. **НЕ ОБЪЯСНЯЙ, НЕ СОВЕТУЙ, НЕ ПОВТОРЯЙСЯ.**
-4. **НЕ УПОМИНАЙ ТОНИ СТАРКА, КУЛИНАРИЮ И ПРИМЕРЫ.**
+1. **ОТВЕЧАЙ КОРОТКО:** максимум 3–4 предложения.
+2. **СТРУКТУРА:** разбивай ответ на 2–3 абзаца с пустыми строками.
+3. **МАРКЕРЫ:** ✅ — для готовых решений, 💎 — для лучшего варианта, ⚡ — для советов.
+4. **ЖИРНЫЙ ШРИФТ:** выделяй цены, даты, ключевые цифры.
+5. **ДУША:** используй лёгкую иронию, сарказм, эмпатию. Отвечай как человек, а не робот.
+6. **ЭМОДЗИ:** добавляй 1–2 по теме (✈️, 🍽️, 🎬, 🚀, 🏖️).
+7. **ТРИАЛ:** предлагай только после step >= 10 и score > 60. Не раздавай налево.
 
 Используй портрет для персонализации.
 
@@ -674,7 +668,7 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
 
 ОТВЕТЬ ТОЛЬКО JSON:
 {{
-    "reply": "твой ответ (2–3 предложения, без воды)",
+    "reply": "твой ответ (живой, с душой, маркерами, 3–4 предложения)",
     "score": 0..100,
     "offer_trial": false
 }}
@@ -683,9 +677,9 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list, 
         response = deepseek.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "system", "content": prompt}],
-            temperature=0.7,
-            max_tokens=150,
-            timeout=15
+            temperature=0.85,
+            max_tokens=300,
+            timeout=20
         )
         return json.loads(response.choices[0].message.content)
     except Exception as e:
@@ -705,9 +699,14 @@ async def webhook(request: Request):
         msg = body["message"]
         user_id = msg["from"]["id"]
 
-        # ============================================================
-        # РАСПОЗНАВАНИЕ МЕДИА (ФОТО, ДОКУМЕНТЫ) — ПРИОРИТЕТ
-        # ============================================================
+        # === СОХРАНЯЕМ ИСТОРИЮ ===
+        if "text" in msg:
+            save_message(user_id, "user", msg["text"])
+        elif "voice" in msg:
+            # Голос сохраним позже
+            pass
+
+        # === РАСПОЗНАВАНИЕ МЕДИА (ФОТО, ДОКУМЕНТЫ) — ПРИОРИТЕТ ===
         if "photo" in msg or "document" in msg:
             if "photo" in msg:
                 file_id = msg["photo"][-1]["file_id"]
@@ -752,7 +751,9 @@ async def webhook(request: Request):
                 if file_resp.status_code == 200 and file_resp.json().get("ok"):
                     audio_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_resp.json()['result']['file_path']}"
                     text = transcribe_audio(audio_url)
-                    if not text:
+                    if text:
+                        save_message(user_id, "user", text)
+                    else:
                         await send_message(user_id, "⚠️ Не удалось распознать голос. Попробуй ещё раз.")
                         return JSONResponse({"ok": True})
                 else:
@@ -890,7 +891,6 @@ _Чтобы оплатить — напиши администратору._ �
             return JSONResponse({"ok": True})
 
         # === ОСНОВНОЙ ДИАЛОГ ===
-        save_message(user_id, "user", text)
         history = get_recent_history(user_id, limit=20)
 
         facts = await extract_facts(text)
