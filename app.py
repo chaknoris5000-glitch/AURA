@@ -43,6 +43,9 @@ AGENT_REASONING_ID = os.getenv("YANDEX_AGENT_REASONING_ID", "fvtg0c38oi7n43d0n9g
 deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 groq = Groq(api_key=GROQ_API_KEY)
 
+# ============================================================
+# SUPABASE (ПАМЯТЬ)
+# ============================================================
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
@@ -89,10 +92,11 @@ def cache_response(hash_val, response):
     agent_cache[hash_val] = {"response": response, "timestamp": datetime.now()}
 
 # ============================================================
-# ПАМЯТЬ (ТОЛЬКО user_memory и user_portrait)
+# ПАМЯТЬ (ТОЛЬКО SUPABASE)
 # ============================================================
 def save_fact(user_id, key, value):
     if not supabase:
+        logger.error("❌ Supabase не подключён, факт не сохранён")
         return
     try:
         existing = supabase.table("user_memory").select("value").eq("user_id", user_id).eq("key", key).execute()
@@ -105,16 +109,21 @@ def save_fact(user_id, key, value):
                 "value": value,
                 "created_at": datetime.now().isoformat()
             }).execute()
+        logger.info(f"💾 Факт сохранён: {key} = {value}")
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения факта: {e}")
 
 def get_fact(user_id, key):
     if not supabase:
+        logger.error("❌ Supabase не подключён, факт не получен")
         return None
     try:
         res = supabase.table("user_memory").select("value").eq("user_id", user_id).eq("key", key).execute()
-        return res.data[0]["value"] if res.data else None
-    except:
+        if res.data:
+            return res.data[0]["value"]
+        return None
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения факта: {e}")
         return None
 
 def get_portrait(user_id):
@@ -123,7 +132,8 @@ def get_portrait(user_id):
     try:
         res = supabase.table("user_portrait").select("*").eq("user_id", user_id).execute()
         return res.data[0] if res.data else None
-    except:
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения портрета: {e}")
         return None
 
 def save_portrait_field(user_id, field, value):
@@ -141,14 +151,16 @@ def save_portrait_field(user_id, field, value):
                 field: value,
                 "updated_at": datetime.now().isoformat()
             }).execute()
+        logger.info(f"💾 Портрет сохранён: {field} = {value}")
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения портрета: {e}")
 
 # ============================================================
-# ИСТОРИЯ
+# ИСТОРИЯ (ТОЛЬКО SUPABASE)
 # ============================================================
 def save_message(user_id, role, content):
     if not supabase:
+        logger.error("❌ Supabase не подключён, история не сохранена")
         return
     try:
         supabase.table("history").insert({
@@ -157,11 +169,13 @@ def save_message(user_id, role, content):
             "content": content,
             "created_at": datetime.now().isoformat()
         }).execute()
+        logger.info(f"📝 Сообщение сохранено в историю: {role}")
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения истории: {e}")
 
 def get_recent_history(user_id, limit=20):
     if not supabase:
+        logger.error("❌ Supabase не подключён, история не получена")
         return []
     try:
         res = supabase.table("history")\
@@ -170,7 +184,11 @@ def get_recent_history(user_id, limit=20):
             .order("created_at", desc=True)\
             .limit(limit)\
             .execute()
-        return list(reversed(res.data)) if res.data else []
+        if res.data:
+            history = list(reversed(res.data))
+            logger.info(f"📚 Загружено {len(history)} сообщений из истории")
+            return history
+        return []
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки истории: {e}")
         return []
@@ -316,39 +334,6 @@ async def pack_response(raw_text: str, user_name: str = "", user_city: str = "")
     except Exception as e:
         logger.error(f"❌ Ошибка упаковки: {e}")
         return raw_text
-
-# ============================================================
-# ОПРЕДЕЛЕНИЕ ПЛАТФОРМЫ
-# ============================================================
-def detect_content_platform(text: str) -> dict:
-    try:
-        prompt = f"""
-Определи, где лучше искать контент по запросу: "{text}"
-
-Правила:
-- Фильм, сериал, клип → Яндекс.Видео
-- Рецепт, обзор → YouTube
-- Картинки, фото → Яндекс.Картинки
-- Товар → Wildberries или Ozon
-- Билеты, отели → Aviasales
-
-Верни JSON:
-{{
-    "platform": "yandex_video | youtube | yandex_images | wildberries | ozon | aviasales | none",
-    "search_query": "уточнённый запрос"
-}}
-"""
-        response = deepseek.chat.completions.create(
-            model="deepseek-chat",
-            messages=[{"role": "system", "content": prompt}],
-            temperature=0.3,
-            max_tokens=120,
-            timeout=10
-        )
-        return json.loads(response.choices[0].message.content)
-    except Exception as e:
-        logger.error(f"❌ Ошибка определения платформы: {e}")
-        return {"platform": "none", "search_query": text}
 
 # ============================================================
 # ТОЧНОЕ ВРЕМЯ
@@ -623,6 +608,7 @@ async def webhook(request: Request):
 
         # Загружаем историю (для контекста)
         history = get_recent_history(user_id, limit=20)
+        logger.info(f"📚 Загружено {len(history)} сообщений для user_id {user_id}")
 
         # Знакомство — имя
         if not get_fact(user_id, "name"):
