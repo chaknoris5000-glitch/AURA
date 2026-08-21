@@ -438,7 +438,7 @@ async def send_message(chat_id, text):
 # ============================================================
 # ОСНОВНАЯ ЛОГИКА
 # ============================================================
-async def deepseek_interview(user_id: int, text: str, step: int, history: list) -> dict:
+async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
     user_name = get_fact(user_id, "name")
     user_city = get_fact(user_id, "city")
     portrait = get_portrait(user_id)
@@ -460,7 +460,18 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list) 
         if parts:
             portrait_context = "ПОРТРЕТ: " + ", ".join(parts) + "."
 
-    history_text = "\n".join([f"{h['role']}: {h['content']}" for h in history[-15:]])
+    # Формируем историю в виде текста
+    history_text = ""
+    if history:
+        history_lines = []
+        for h in history[-15:]:
+            role = "Пользователь" if h['role'] == 'user' else "AURA"
+            content = h['content'][:500]  # Обрезаем длинные сообщения
+            history_lines.append(f"{role}: {content}")
+        history_text = "\n".join(history_lines)
+        logger.info(f"📝 Передаю историю в DeepSeek: {len(history_lines)} сообщений")
+    else:
+        logger.warning("⚠️ История пуста, передаю без контекста")
 
     prompt = f"""
 Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
@@ -478,10 +489,10 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list) 
 {name_instruction}
 {city_instruction}
 
-ИСТОРИЯ (последние сообщения):
+ИСТОРИЯ ДИАЛОГА (последние сообщения):
 {history_text}
 
-ПОЛЬЗОВАТЕЛЬ: "{text}"
+СЕЙЧАС ПОЛЬЗОВАТЕЛЬ СПРОСИЛ: "{text}"
 
 ОТВЕТЬ ТОЛЬКО JSON:
 {{
@@ -497,7 +508,9 @@ async def deepseek_interview(user_id: int, text: str, step: int, history: list) 
             max_tokens=250,
             timeout=20
         )
-        return json.loads(response.choices[0].message.content)
+        result = json.loads(response.choices[0].message.content)
+        logger.info(f"✅ DeepSeek ответил с учётом истории")
+        return result
     except Exception as e:
         logger.error(f"❌ Ошибка DeepSeek: {e}")
         return {"reply": "😅 Не понял, перефразируй.", "score": 0}
@@ -621,7 +634,7 @@ async def webhook(request: Request):
                 await send_message(user_id, "А подскажи, в каком городе ты живёшь?")
                 return JSONResponse({"ok": True})
             else:
-                result = await deepseek_interview(user_id, text, 0, history)
+                result = await deepseek_interview(user_id, text, history)
                 reply = result.get("reply", "😅 Не понял.")
                 save_message(user_id, "assistant", reply)
                 await send_typing(user_id)
@@ -642,7 +655,7 @@ async def webhook(request: Request):
                 await send_message(user_id, f"Кстати, в {text} сейчас есть интересные события. Могу подобрать кино, рестораны или парковки, если нужно.")
                 return JSONResponse({"ok": True})
             else:
-                result = await deepseek_interview(user_id, text, 0, history)
+                result = await deepseek_interview(user_id, text, history)
                 reply = result.get("reply", "😅 Не понял.")
                 save_message(user_id, "assistant", reply)
                 await send_typing(user_id)
@@ -709,7 +722,7 @@ async def webhook(request: Request):
 
         # Обычный диалог
         history = get_recent_history(user_id, limit=20)
-        result = await deepseek_interview(user_id, text, 0, history)
+        result = await deepseek_interview(user_id, text, history)
         reply = result.get("reply", "😅 Не понял.")
         save_message(user_id, "assistant", reply)
         await send_typing(user_id)
