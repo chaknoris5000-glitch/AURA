@@ -195,63 +195,51 @@ def clear_user_history(user_id):
         logger.error(f"❌ Ошибка очистки истории: {e}")
 
 # ============================================================
-# НОВАЯ ФУНКЦИЯ: ЯВНЫЙ ПОИСК В ИСТОРИИ
+# НОВАЯ ЛОГИКА ПОИСКА В ИСТОРИИ
 # ============================================================
-def find_relevant_history(history, text):
+def find_context_in_history(history, text):
     """
-    Ищет в истории сообщения, релевантные запросу пользователя.
-    Возвращает список найденных сообщений с контекстом.
+    Ищет в истории диалог, связанный с запросом пользователя.
+    Возвращает структурированный ответ с контекстом.
     """
     if not history:
-        return []
+        return None
     
-    # Разбиваем запрос на ключевые слова
+    # Извлекаем ключевые слова из запроса (убираем стоп-слова)
+    stop_words = ["напомни", "скажи", "что", "я", "говорил", "про", "о", "в", "и", "с", "на", "за", "по", "из", "от", "для"]
     keywords = []
     for word in text.lower().split():
-        if len(word) > 3:
+        if len(word) > 2 and word not in stop_words:
             keywords.append(word)
+    
+    if not keywords:
+        return None
     
     logger.info(f"🔍 Ищем в истории по ключевым словам: {keywords}")
     
-    found = []
+    # Ищем сообщения, содержащие ключевые слова
+    found_messages = []
     for msg in history:
         content_lower = msg['content'].lower()
-        # Проверяем, содержит ли сообщение хотя бы одно ключевое слово
         for keyword in keywords:
             if keyword in content_lower:
-                found.append(msg)
+                found_messages.append(msg)
                 break
     
-    # Если ничего не найдено, пробуем искать по частям запроса
-    if not found:
-        # Пробуем искать по первому слову запроса (если оно длинное)
-        first_word = text.lower().split()[0] if text.lower().split() else ""
-        if len(first_word) > 3:
-            for msg in history:
-                if first_word in msg['content'].lower():
-                    found.append(msg)
-    
-    logger.info(f"📌 Найдено {len(found)} релевантных сообщений в истории")
-    return found
-
-def extract_answers_from_history(history, text):
-    """
-    Извлекает из истории ответы на конкретные вопросы.
-    Возвращает структурированный контекст для DeepSeek.
-    """
-    relevant = find_relevant_history(history, text)
-    
-    if not relevant:
+    if not found_messages:
+        logger.info("📌 Релевантных сообщений не найдено")
         return None
     
-    # Собираем сообщения с их ролями
-    context_parts = []
-    for msg in relevant[-5:]:  # Берём последние 5 найденных
+    # Собираем ответы на запрос
+    answer_parts = []
+    for msg in found_messages[-5:]:  # Берём последние 5 найденных
         role = "Пользователь" if msg['role'] == 'user' else "AURA"
-        content = msg['content'][:1000]  # Обрезаем длинные сообщения
-        context_parts.append(f"{role}: {content}")
+        content = msg['content'][:500]
+        answer_parts.append(f"{role}: {content}")
     
-    return "\n\n".join(context_parts)
+    result = "\n\n".join(answer_parts)
+    logger.info(f"📌 Найдено {len(found_messages)} релевантных сообщений")
+    return result
 
 # ============================================================
 # РАСПОЗНАВАНИЕ ГОЛОСА
@@ -545,23 +533,16 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
             portrait_context = "ПОРТРЕТ: " + ", ".join(parts) + "."
 
     # ============================================================
-    # НОВОЕ: ЯВНЫЙ ПОИСК В ИСТОРИИ
+    # НОВАЯ ЛОГИКА ПОИСКА В ИСТОРИИ
     # ============================================================
-    history_context = ""
-    found = find_relevant_history(history, text)
+    context = find_context_in_history(history, text)
     
-    if found:
-        context_parts = []
-        for msg in found[-5:]:  # Берём последние 5 найденных
-            role = "Пользователь" if msg['role'] == 'user' else "AURA"
-            content = msg['content'][:500]  # Обрезаем
-            context_parts.append(f"{role}: {content}")
-        history_context = "\n\n".join(context_parts)
-        logger.info(f"📌 Найдены релевантные сообщения в истории: {len(found)} шт.")
+    if context:
+        logger.info(f"📌 Найден контекст в истории: {context[:200]}...")
     else:
-        logger.info("📌 Релевантных сообщений в истории не найдено")
+        logger.info("📌 Контекст в истории не найден")
 
-    # Основная история (последние 10 сообщений)
+    # Основная история
     history_text = ""
     if history:
         history_lines = []
@@ -588,9 +569,9 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
 {city_instruction}
 
 """ + (f"""
-РЕЛЕВАНТНЫЕ СООБЩЕНИЯ ИЗ ИСТОРИИ (найдены по ключевым словам):
-{history_context}
-""" if history_context else "")
+КОНТЕКСТ ИЗ ИСТОРИИ (найден по запросу):
+{context}
+""" if context else "")
 
     prompt += f"""
 ИСТОРИЯ ДИАЛОГА (последние 10 сообщений):
