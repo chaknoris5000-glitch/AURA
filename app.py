@@ -6,6 +6,7 @@ import logging
 import tempfile
 import hashlib
 import base64
+import re
 from datetime import datetime, timedelta
 import pytz
 from fastapi import FastAPI, Request
@@ -173,7 +174,7 @@ def save_message(user_id, role, content):
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения истории: {e}")
 
-def get_recent_history(user_id, limit=20):
+def get_recent_history(user_id, limit=50):
     if not supabase:
         logger.error("❌ Supabase не подключён, история не получена")
         return []
@@ -203,26 +204,64 @@ def clear_user_history(user_id):
         logger.error(f"❌ Ошибка очистки истории: {e}")
 
 # ============================================================
-# НОВАЯ ФУНКЦИЯ: ПОИСК В ИСТОРИИ
+# НОВАЯ ФУНКЦИЯ: ПАРСИНГ ИСТОРИИ (извлекает конкретные факты)
 # ============================================================
-def find_in_history(history, keywords):
+def extract_facts_from_history(history, keywords):
     """
-    Ищет в истории сообщения, содержащие ключевые слова.
-    Возвращает список найденных сообщений.
+    Ищет в истории конкретные факты (адрес, название, цену)
+    и возвращает их как структурированный текст.
     """
     if not history:
-        return []
+        return None
     
-    found = []
+    # Собираем все сообщения, содержащие ключевые слова
+    relevant_messages = []
     for msg in history:
         content_lower = msg['content'].lower()
         for keyword in keywords:
             if keyword in content_lower:
-                found.append(msg)
+                relevant_messages.append(msg['content'])
                 break
     
-    logger.info(f"🔍 Найдено {len(found)} сообщений в истории по ключевым словам: {keywords}")
-    return found
+    if not relevant_messages:
+        return None
+    
+    # Пытаемся извлечь адрес (улица, дом)
+    address_pattern = r'(ул\.?\s*[А-Яа-яёЁ\s\-\.]+,\s*\d+[А-Яа-яёЁ]?)|([А-Яа-яёЁ][а-яёЁ]+\s+ул\.?\s*[А-Яа-яёЁ\s\-\.]+,\s*\d+[А-Яа-яёЁ]?)'
+    
+    addresses = []
+    for msg in relevant_messages:
+        matches = re.findall(address_pattern, msg)
+        if matches:
+            for match in matches:
+                if match[0]:
+                    addresses.append(match[0].strip())
+                elif match[1]:
+                    addresses.append(match[1].strip())
+    
+    # Ищем названия клиник/организаций
+    names = []
+    name_pattern = r'(Клиника\s+[А-Яа-яёЁ]+)|([А-Яа-яёЁ]+\s+Клиника)|([А-Яа-яёЁ]+\s+Мед[иц]?[её]?[нц]?[ы]?[й]?[ъ]?)'
+    for msg in relevant_messages:
+        matches = re.findall(name_pattern, msg)
+        if matches:
+            for match in matches:
+                name = match[0] or match[1] or match[2]
+                if name:
+                    names.append(name.strip())
+    
+    # Собираем результат
+    result_parts = []
+    if names:
+        result_parts.append(f"Название: {', '.join(set(names))}")
+    if addresses:
+        result_parts.append(f"Адрес: {', '.join(set(addresses))}")
+    
+    if not result_parts:
+        return None
+    
+    logger.info(f"📌 Извлечены факты из истории: {result_parts}")
+    return "\n".join(result_parts)
 
 # ============================================================
 # РАСПОЗНАВАНИЕ ГОЛОСА
@@ -516,26 +555,19 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
             portrait_context = "ПОРТРЕТ: " + ", ".join(parts) + "."
 
     # ============================================================
-    # НОВОЕ: ПОИСК В ИСТОРИИ
+    # НОВОЕ: ИЗВЛЕКАЕМ КОНКРЕТНЫЕ ФАКТЫ ИЗ ИСТОРИИ
     # ============================================================
-    # Извлекаем ключевые слова из вопроса
     keywords = []
     for word in text.lower().split():
-        if len(word) > 3:  # игнорируем короткие слова
+        if len(word) > 3:
             keywords.append(word)
     
-    # Ищем в истории
-    found_messages = find_in_history(history, keywords)
+    facts = extract_facts_from_history(history, keywords)
     
-    history_context = ""
-    if found_messages:
-        # Формируем контекст из найденных сообщений
-        context_lines = []
-        for msg in found_messages:
-            role = "Пользователь" if msg['role'] == 'user' else "AURA"
-            context_lines.append(f"{role}: {msg['content']}")
-        history_context = "\n".join(context_lines[:5])  # берём только 5 последних найденных
-        logger.info(f"📌 Найдены сообщения в истории: {len(found_messages)} шт.")
+    if facts:
+        logger.info(f"📌 Найдены факты в истории: {facts}")
+    else:
+        logger.info("📌 Фактов в истории не найдено")
 
     # Основная история (последние 10 сообщений)
     history_text = ""
@@ -563,15 +595,15 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
 {name_instruction}
 {city_instruction}
 
+""" + (f"""
+КОНКРЕТНЫЕ ФАКТЫ, НАЙДЕННЫЕ В ИСТОРИИ:
+{facts}
+""" if facts else "")
+
+    prompt += f"""
 ИСТОРИЯ ДИАЛОГА (последние 10 сообщений):
 {history_text}
 
-""" + (f"""
-КОНКРЕТНЫЕ СООБЩЕНИЯ ИЗ ИСТОРИИ, СВЯЗАННЫЕ С ТВОИМ ВОПРОСОМ:
-{history_context}
-""" if history_context else "")
-
-    prompt += f"""
 СЕЙЧАС ПОЛЬЗОВАТЕЛЬ СПРОСИЛ: "{text}"
 
 ОТВЕТЬ ТОЛЬКО JSON:
@@ -700,7 +732,7 @@ async def webhook(request: Request):
         save_message(user_id, "user", text)
 
         # Загружаем историю (для контекста)
-        history = get_recent_history(user_id, limit=50)  # увеличил лимит до 50
+        history = get_recent_history(user_id, limit=50)
         logger.info(f"📚 Загружено {len(history)} сообщений для user_id {user_id}")
 
         # Знакомство — имя
