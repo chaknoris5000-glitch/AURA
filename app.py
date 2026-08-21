@@ -203,6 +203,28 @@ def clear_user_history(user_id):
         logger.error(f"❌ Ошибка очистки истории: {e}")
 
 # ============================================================
+# НОВАЯ ФУНКЦИЯ: ПОИСК В ИСТОРИИ
+# ============================================================
+def find_in_history(history, keywords):
+    """
+    Ищет в истории сообщения, содержащие ключевые слова.
+    Возвращает список найденных сообщений.
+    """
+    if not history:
+        return []
+    
+    found = []
+    for msg in history:
+        content_lower = msg['content'].lower()
+        for keyword in keywords:
+            if keyword in content_lower:
+                found.append(msg)
+                break
+    
+    logger.info(f"🔍 Найдено {len(found)} сообщений в истории по ключевым словам: {keywords}")
+    return found
+
+# ============================================================
 # РАСПОЗНАВАНИЕ ГОЛОСА
 # ============================================================
 def transcribe_audio(audio_url):
@@ -336,6 +358,39 @@ async def pack_response(raw_text: str, user_name: str = "", user_city: str = "")
         return raw_text
 
 # ============================================================
+# ОПРЕДЕЛЕНИЕ ПЛАТФОРМЫ
+# ============================================================
+def detect_content_platform(text: str) -> dict:
+    try:
+        prompt = f"""
+Определи, где лучше искать контент по запросу: "{text}"
+
+Правила:
+- Фильм, сериал, клип → Яндекс.Видео
+- Рецепт, обзор → YouTube
+- Картинки, фото → Яндекс.Картинки
+- Товар → Wildberries или Ozon
+- Билеты, отели → Aviasales
+
+Верни JSON:
+{{
+    "platform": "yandex_video | youtube | yandex_images | wildberries | ozon | aviasales | none",
+    "search_query": "уточнённый запрос"
+}}
+"""
+        response = deepseek.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "system", "content": prompt}],
+            temperature=0.3,
+            max_tokens=120,
+            timeout=10
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        logger.error(f"❌ Ошибка определения платформы: {e}")
+        return {"platform": "none", "search_query": text}
+
+# ============================================================
 # ТОЧНОЕ ВРЕМЯ
 # ============================================================
 def get_time_for_city(city: str = "Москва") -> str:
@@ -460,18 +515,37 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
         if parts:
             portrait_context = "ПОРТРЕТ: " + ", ".join(parts) + "."
 
-    # Формируем историю в виде текста
+    # ============================================================
+    # НОВОЕ: ПОИСК В ИСТОРИИ
+    # ============================================================
+    # Извлекаем ключевые слова из вопроса
+    keywords = []
+    for word in text.lower().split():
+        if len(word) > 3:  # игнорируем короткие слова
+            keywords.append(word)
+    
+    # Ищем в истории
+    found_messages = find_in_history(history, keywords)
+    
+    history_context = ""
+    if found_messages:
+        # Формируем контекст из найденных сообщений
+        context_lines = []
+        for msg in found_messages:
+            role = "Пользователь" if msg['role'] == 'user' else "AURA"
+            context_lines.append(f"{role}: {msg['content']}")
+        history_context = "\n".join(context_lines[:5])  # берём только 5 последних найденных
+        logger.info(f"📌 Найдены сообщения в истории: {len(found_messages)} шт.")
+
+    # Основная история (последние 10 сообщений)
     history_text = ""
     if history:
         history_lines = []
-        for h in history[-15:]:
+        for h in history[-10:]:
             role = "Пользователь" if h['role'] == 'user' else "AURA"
-            content = h['content'][:500]  # Обрезаем длинные сообщения
+            content = h['content'][:500]
             history_lines.append(f"{role}: {content}")
         history_text = "\n".join(history_lines)
-        logger.info(f"📝 Передаю историю в DeepSeek: {len(history_lines)} сообщений")
-    else:
-        logger.warning("⚠️ История пуста, передаю без контекста")
 
     prompt = f"""
 Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
@@ -489,9 +563,15 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
 {name_instruction}
 {city_instruction}
 
-ИСТОРИЯ ДИАЛОГА (последние сообщения):
+ИСТОРИЯ ДИАЛОГА (последние 10 сообщений):
 {history_text}
 
+""" + (f"""
+КОНКРЕТНЫЕ СООБЩЕНИЯ ИЗ ИСТОРИИ, СВЯЗАННЫЕ С ТВОИМ ВОПРОСОМ:
+{history_context}
+""" if history_context else "")
+
+    prompt += f"""
 СЕЙЧАС ПОЛЬЗОВАТЕЛЬ СПРОСИЛ: "{text}"
 
 ОТВЕТЬ ТОЛЬКО JSON:
@@ -620,7 +700,7 @@ async def webhook(request: Request):
         save_message(user_id, "user", text)
 
         # Загружаем историю (для контекста)
-        history = get_recent_history(user_id, limit=20)
+        history = get_recent_history(user_id, limit=50)  # увеличил лимит до 50
         logger.info(f"📚 Загружено {len(history)} сообщений для user_id {user_id}")
 
         # Знакомство — имя
@@ -721,7 +801,7 @@ async def webhook(request: Request):
             return JSONResponse({"ok": True})
 
         # Обычный диалог
-        history = get_recent_history(user_id, limit=20)
+        history = get_recent_history(user_id, limit=50)
         result = await deepseek_interview(user_id, text, history)
         reply = result.get("reply", "😅 Не понял.")
         save_message(user_id, "assistant", reply)
