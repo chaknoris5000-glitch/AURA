@@ -571,6 +571,14 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
         return {"reply": "😅 Не понял, перефразируй.", "score": 0}
 
 # ============================================================
+# ФОРМИРОВАНИЕ ССЫЛКИ ДЛЯ ФИЛЬМОВ
+# ============================================================
+def get_film_link(query: str) -> str:
+    """Формирует ссылку на Яндекс.Видео для поиска фильма"""
+    query_encoded = query.replace(' ', '+')
+    return f"https://yandex.ru/video/search?text={query_encoded}"
+
+# ============================================================
 # WEBHOOK
 # ============================================================
 @app.post("/webhook")
@@ -585,7 +593,7 @@ async def webhook(request: Request):
         text = msg.get("text", "")
 
         # ============================================================
-        # ОБРАБОТКА КАРТИНОК (ИСПРАВЛЕННАЯ)
+        # ОБРАБОТКА КАРТИНОК
         # ============================================================
         if "photo" in msg or "document" in msg:
             if "photo" in msg:
@@ -744,6 +752,13 @@ async def webhook(request: Request):
             platform_map = {"yandex_video": "яндекс видео", "youtube": "youtube", "yandex_images": "яндекс картинки"}
             full_query = f"{search_query} {platform_map.get(platform, 'яндекс видео')}"
             raw_result = call_yandex_agent(AGENT_SEARCH_ID, full_query, user_name, user_city)
+            
+            # Формируем ссылку
+            if "фильм" in text.lower() or "сериал" in text.lower() or "кино" in text.lower():
+                film_link = get_film_link(search_query)
+            else:
+                film_link = None
+            
             if raw_result:
                 packed_prompt = f"""
 Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
@@ -757,7 +772,7 @@ async def webhook(request: Request):
 4. **ЖИРНЫЙ ШРИФТ:** выделяй цены, даты.
 5. **ДУША:** лёгкая ирония, эмпатия.
 6. **ЭМОДЗИ:** 1–2 по теме.
-7. **ССЫЛКА:** если есть ссылка — добавь.
+{f"7. **ССЫЛКА:** {film_link}" if film_link else ""}
 
 Имя пользователя: {user_name}
 
@@ -774,6 +789,11 @@ async def webhook(request: Request):
                     timeout=20
                 )
                 packed = packed_response.choices[0].message.content
+                
+                # Если есть ссылка, добавляем её в конец
+                if film_link and "http" not in packed:
+                    packed += f"\n\n🔗 [Искать на Яндекс.Видео]({film_link})"
+                
                 await send_message(user_id, packed)
                 save_message(user_id, "assistant", packed)
             else:
