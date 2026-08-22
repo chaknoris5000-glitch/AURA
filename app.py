@@ -90,7 +90,7 @@ def cache_response(hash_val, response):
     agent_cache[hash_val] = {"response": response, "timestamp": datetime.now()}
 
 # ============================================================
-# ПАМЯТЬ (user_memory, user_portrait)
+# ПАМЯТЬ
 # ============================================================
 def save_fact(user_id, key, value):
     if not supabase:
@@ -195,40 +195,59 @@ def clear_user_history(user_id):
         logger.error(f"❌ Ошибка очистки истории: {e}")
 
 # ============================================================
-# ПОИСК В ИСТОРИИ ПО КЛЮЧЕВЫМ СЛОВАМ (ДОБАВЛЕНО)
+# ИЗВЛЕЧЕНИЕ ФАКТОВ ИЗ ИСТОРИИ (НОВАЯ ЛОГИКА)
 # ============================================================
-def find_in_history(history, text):
+def extract_fact_from_history(history, text):
     """
-    Ищет в истории сообщения по ключевым словам из запроса.
-    Возвращает найденные сообщения.
+    Ищет в истории и извлекает конкретный факт (адрес, название, цену).
+    Возвращает готовый структурированный ответ.
     """
     if not history:
-        return []
+        return None
     
-    # Извлекаем ключевые слова (убираем стоп-слова)
-    stop_words = ["напомни", "скажи", "что", "я", "говорил", "про", "о", "в", "и", "с", "на", "за", "по", "из", "от", "для", "мне", "ты", "мы", "они", "он", "она", "оно", "вот", "этот", "эта", "это", "эти", "который", "которая", "которые", "которое"]
-    keywords = []
-    for word in text.lower().split():
-        if len(word) > 2 and word not in stop_words:
-            keywords.append(word)
+    # Определяем, что ищем
+    text_lower = text.lower()
     
-    if not keywords:
-        logger.info("📌 Нет ключевых слов для поиска")
-        return []
+    # Ищем адрес
+    if any(word in text_lower for word in ["адрес", "улиц", "находит", "расположен", "находится"]):
+        address_pattern = r'(ул\.?\s*[А-Яа-яёЁ\s\-\.]+,\s*\d+[А-Яа-яёЁ]?)|([А-Яа-яёЁ][а-яёЁ]+\s+ул\.?\s*[А-Яа-яёЁ\s\-\.]+,\s*\d+[А-Яа-яёЁ]?)'
+        
+        for msg in history:
+            matches = re.findall(address_pattern, msg['content'])
+            if matches:
+                for match in matches:
+                    address = match[0] or match[1]
+                    if address:
+                        logger.info(f"📍 Найден адрес: {address}")
+                        return f"Адрес: {address}"
     
-    logger.info(f"🔍 Ищем в истории по ключевым словам: {keywords}")
+    # Ищем название клиники/организации
+    if any(word in text_lower for word in ["клиник", "больниц", "медцентр", "название"]):
+        name_pattern = r'(Клиника\s+[А-Яа-яёЁ]+)|([А-Яа-яёЁ]+\s+Клиника)|([А-Яа-яёЁ]+\s+Мед[иц]?[её]?[нц]?[ы]?[й]?[ъ]?)'
+        
+        for msg in history:
+            matches = re.findall(name_pattern, msg['content'])
+            if matches:
+                for match in matches:
+                    name = match[0] or match[1] or match[2]
+                    if name:
+                        logger.info(f"🏥 Найдено название: {name}")
+                        return f"Название: {name}"
     
-    # Ищем сообщения, содержащие ключевые слова
-    found = []
-    for msg in history:
-        content_lower = msg['content'].lower()
-        for keyword in keywords:
-            if keyword in content_lower:
-                found.append(msg)
-                break
+    # Ищем цену
+    if any(word in text_lower for word in ["цена", "стоимость", "руб", "₽"]):
+        price_pattern = r'(\d+[\s]?[\d]*[\s]?[\d]*\s*₽)|(\d+[\s]?[\d]*[\s]?[\d]*\s*руб)'
+        
+        for msg in history:
+            matches = re.findall(price_pattern, msg['content'])
+            if matches:
+                for match in matches:
+                    price = match[0] or match[1]
+                    if price:
+                        logger.info(f"💰 Найдена цена: {price}")
+                        return f"Цена: {price}"
     
-    logger.info(f"📌 Найдено {len(found)} сообщений в истории по ключевым словам")
-    return found
+    return None
 
 # ============================================================
 # РАСПОЗНАВАНИЕ ГОЛОСА
@@ -292,7 +311,7 @@ def recognize_image(image_url: str) -> str:
         return "⚠️ Ошибка при распознавании изображения."
 
 # ============================================================
-# ВЫЗОВ АГЕНТОВ ЯНДЕКСА (ТВОЙ — НЕ ТРОГАТЬ)
+# ВЫЗОВ АГЕНТОВ ЯНДЕКСА
 # ============================================================
 def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_city: str = "", budget: str = "") -> str:
     hash_val = hashlib.md5(f"{agent_id}:{user_text}:{user_name}:{user_city}:{budget}".encode()).hexdigest()
@@ -522,21 +541,14 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
             portrait_context = "ПОРТРЕТ: " + ", ".join(parts) + "."
 
     # ============================================================
-    # ПОИСК В ИСТОРИИ ПО КЛЮЧЕВЫМ СЛОВАМ
+    # НОВАЯ ЛОГИКА: ИЗВЛЕКАЕМ КОНКРЕТНЫЙ ФАКТ
     # ============================================================
-    found_messages = find_in_history(history, text)
+    fact = extract_fact_from_history(history, text)
     
-    history_context = ""
-    if found_messages:
-        context_parts = []
-        for msg in found_messages[-10:]:
-            role = "Пользователь" if msg['role'] == 'user' else "AURA"
-            content = msg['content'][:500]
-            context_parts.append(f"{role}: {content}")
-        history_context = "\n\n".join(context_parts)
-        logger.info(f"📌 Найдены сообщения в истории: {len(found_messages)} шт.")
+    if fact:
+        logger.info(f"📌 Извлечён факт: {fact}")
     else:
-        logger.info("📌 В истории ничего не найдено по ключевым словам")
+        logger.info("📌 Факт не найден")
 
     # Основная история (последние 10 сообщений)
     history_text = ""
@@ -549,7 +561,7 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
         history_text = "\n".join(history_lines)
 
     # ============================================================
-    # ПРОМПТ С ЯВНЫМ УКАЗАНИЕМ ИСПОЛЬЗОВАТЬ НАЙДЕННЫЕ ФАКТЫ
+    # ПРОМПТ С ГОТОВЫМ ФАКТОМ
     # ============================================================
     prompt = f"""
 Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
@@ -563,15 +575,15 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
 4. **ЖИРНЫЙ ШРИФТ:** выделяй цены, даты, названия.
 5. **ДУША:** лёгкая ирония, сарказм, эмпатия.
 6. **ЭМОДЗИ:** 1–2 по теме.
-7. **ЕСЛИ В НАЙДЕННЫХ СООБЩЕНИЯХ ЕСТЬ ОТВЕТ — ИСПОЛЬЗУЙ ЕГО.**
+7. **ИСПОЛЬЗУЙ ИЗВЛЕЧЁННЫЙ ФАКТ В ОТВЕТЕ.**
 
 {name_instruction}
 {city_instruction}
 
 """ + (f"""
-🔍 НАЙДЕННЫЕ СООБЩЕНИЯ В ИСТОРИИ (это факты, которые ты должен использовать в ответе):
-{history_context}
-""" if history_context else "⚠️ В ИСТОРИИ НЕ НАЙДЕНО СООБЩЕНИЙ ПО ЭТОМУ ЗАПРОСУ. Скажи об этом честно.") + f"""
+📌 ИЗВЛЕЧЁННЫЙ ФАКТ ИЗ ИСТОРИИ (используй его в ответе):
+{fact}
+""" if fact else "⚠️ В ИСТОРИИ НЕ НАЙДЕНО НУЖНОЙ ИНФОРМАЦИИ. Скажи об этом честно.") + f"""
 
 СЕЙЧАС ПОЛЬЗОВАТЕЛЬ СПРОСИЛ: "{text}"
 
