@@ -35,15 +35,17 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GIS_API_KEY = os.getenv("GIS_API_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
-YANDEX_VISION_API_KEY = os.getenv("YANDEX_VISION_API_KEY")
+YANDEX_VISION_API_KEY = os.getenv("YANDEX_VISION_API_KEY")  # больше не нужен, но оставил для совместимости
 
 AGENT_SEARCH_ID = os.getenv("YANDEX_AGENT_ID", "fvt3te2kgttig7u3a1fb")
 AGENT_RESEARCH_ID = os.getenv("YANDEX_AGENT_RESEARCH_ID", "fvti80ngse2778agbmdl")
 AGENT_REASONING_ID = os.getenv("YANDEX_AGENT_REASONING_ID", "fvtg0c38oi7n43d0n9gf")
 
+# Инициализация клиентов
 deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 groq = Groq(api_key=GROQ_API_KEY)
 
+# Supabase
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
@@ -167,9 +169,6 @@ def save_message(user_id, role, content):
         logger.error(f"❌ Ошибка сохранения истории: {e}")
 
 def get_all_history(user_id):
-    """
-    Загружает ВСЮ историю пользователя без лимита.
-    """
     if not supabase:
         return []
     try:
@@ -199,25 +198,16 @@ def clear_user_history(user_id):
 # УНИВЕРСАЛЬНЫЙ ПОИСК В ИСТОРИИ
 # ============================================================
 def find_in_history(history, text):
-    """
-    Находит ВСЕ сообщения, содержащие любое слово из запроса.
-    """
     if not history:
         return []
-    
-    # Разбиваем запрос на слова (убираем стоп-слова)
     stop_words = ["напомни", "скажи", "что", "я", "говорил", "про", "о", "в", "и", "с", "на", "за", "по", "из", "от", "для", "мне", "ты", "мы", "они", "он", "она", "оно", "вот", "этот", "эта", "это", "эти", "который", "которая", "которые", "которое", "мне", "меня", "тебя", "тебе", "ещё", "было", "были", "была"]
     keywords = []
     for word in text.lower().split():
         if len(word) > 2 and word not in stop_words:
             keywords.append(word)
-    
     if not keywords:
         return []
-    
     logger.info(f"🔍 Ищем в истории по словам: {keywords}")
-    
-    # Ищем ВСЕ сообщения, содержащие любое слово
     found = []
     for msg in history:
         content_lower = msg['content'].lower()
@@ -225,24 +215,15 @@ def find_in_history(history, text):
             if keyword in content_lower:
                 found.append(msg)
                 break
-    
     logger.info(f"📌 Найдено {len(found)} сообщений")
     return found
 
 def extract_facts(found_messages, text):
-    """
-    Собирает ВСЕ найденные сообщения и передаёт их DeepSeek.
-    Без фильтрации — только самые релевантные (до 10 штук).
-    """
     if not found_messages:
         return None
-    
     text_lower = text.lower()
-    
-    # Сортируем найденные сообщения по релевантности
     scored = []
     keywords = [w for w in text_lower.split() if len(w) > 2]
-    
     for msg in found_messages:
         content_lower = msg['content'].lower()
         score = 0
@@ -250,26 +231,76 @@ def extract_facts(found_messages, text):
             if keyword in content_lower:
                 score += 1
         scored.append((score, msg))
-    
-    # Сортируем по убыванию релевантности
     scored.sort(key=lambda x: x[0], reverse=True)
-    
-    # Берём топ-10 самых релевантных
     top_messages = [msg for _, msg in scored[:10]]
-    
-    # Формируем ответ
     parts = []
     for msg in top_messages:
         role = "Пользователь" if msg['role'] == 'user' else "AURA"
         content = msg['content'][:500]
         parts.append(f"{role}: {content}")
-    
     if not parts:
         return None
-    
     result = "\n\n".join(parts)
     logger.info(f"📌 Извлечено {len(parts)} сообщений")
     return result
+
+# ============================================================
+# РАСПОЗНАВАНИЕ КАРТИНОК ЧЕРЕЗ DeepSeek Vision
+# ============================================================
+async def recognize_image_with_deepseek(image_url: str) -> str:
+    """
+    Распознаёт картинку через DeepSeek-V4-Flash-Vision-Exp.
+    """
+    try:
+        # Скачиваем картинку
+        response = requests.get(image_url, timeout=30)
+        if response.status_code != 200:
+            return "⚠️ Не удалось загрузить изображение."
+        
+        # Конвертируем в base64
+        image_base64 = base64.b64encode(response.content).decode('utf-8')
+        
+        # Формируем запрос к DeepSeek Vision
+        prompt = """
+Ты — AURA. Ты видишь картинку и должен:
+1. Если на картинке есть текст — распознай его и напиши.
+2. Если есть что-то ещё — опиши кратко, что изображено.
+3. Ответь коротко, на русском, без лишней воды.
+"""
+        
+        # Используем модель vision-exp
+        vision_client = OpenAI(
+            api_key=DEEPSEEK_API_KEY,
+            base_url=DEEPSEEK_BASE_URL
+        )
+        
+        response = vision_client.chat.completions.create(
+            model="deepseek-v4-flash-vision-exp",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{image_base64}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens=300,
+            temperature=0.5
+        )
+        
+        result = response.choices[0].message.content
+        logger.info(f"🖼️ DeepSeek Vision распознал картинку")
+        return result
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка распознавания через DeepSeek Vision: {e}")
+        return "⚠️ Не удалось распознать изображение. Попробуйте ещё раз."
 
 # ============================================================
 # РАСПОЗНАВАНИЕ ГОЛОСА
@@ -293,44 +324,6 @@ def transcribe_audio(audio_url):
     except Exception as e:
         logger.error(f"❌ Ошибка распознавания: {e}")
         return None
-
-# ============================================================
-# РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ
-# ============================================================
-def recognize_image(image_url: str) -> str:
-    if not YANDEX_VISION_API_KEY:
-        return "⚠️ Ключ Vision OCR не настроен."
-    try:
-        response = requests.get(image_url, timeout=30)
-        if response.status_code != 200:
-            return "⚠️ Не удалось загрузить изображение."
-        image_base64 = base64.b64encode(response.content).decode('utf-8')
-        url = "https://vision.api.cloud.yandex.net/v1/ocr"
-        headers = {
-            "Authorization": f"Api-Key {YANDEX_VISION_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "folderId": YANDEX_FOLDER_ID,
-            "image": {"content": image_base64},
-            "language": "ru"
-        }
-        result = requests.post(url, json=payload, headers=headers, timeout=30)
-        if result.status_code != 200:
-            return f"⚠️ Ошибка распознавания: {result.status_code}"
-        data = result.json()
-        text_blocks = []
-        for page in data.get("pages", []):
-            for block in page.get("blocks", []):
-                for word in block.get("words", []):
-                    text_blocks.append(word.get("text", ""))
-        if text_blocks:
-            return " ".join(text_blocks)
-        else:
-            return "😊 Текст на изображении не найден."
-    except Exception as e:
-        logger.error(f"❌ Ошибка распознавания: {e}")
-        return "⚠️ Ошибка при распознавании изображения."
 
 # ============================================================
 # ВЫЗОВ АГЕНТОВ ЯНДЕКСА
@@ -366,43 +359,6 @@ def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_c
     except Exception as e:
         logger.error(f"❌ Ошибка агента Яндекса ({agent_id}): {e}")
         return ""
-
-# ============================================================
-# УПАКОВКА ОТВЕТА
-# ============================================================
-async def pack_response(raw_text: str, user_name: str = "", user_city: str = "") -> str:
-    try:
-        prompt = f"""
-Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
-
-Перед тобой сырой ответ. Преврати его в красивый, живой ответ.
-
-ПРАВИЛА:
-1. **ОТВЕЧАЙ КОРОТКО:** максимум 3–4 предложения.
-2. **СТРУКТУРА:** разбивай ответ на 2–3 абзаца.
-3. **МАРКЕРЫ:** ✅ — готово, 💎 — лучший вариант.
-4. **ЖИРНЫЙ ШРИФТ:** выделяй цены, даты.
-5. **ДУША:** лёгкая ирония, эмпатия.
-6. **ЭМОДЗИ:** 1–2 по теме.
-
-Используй имя пользователя: {user_name or "Гость"}.
-
-Сырой ответ:
-{raw_text}
-
-Твой ответ:
-"""
-        response = deepseek.chat.completions.create(
-            model="deepseek-chat",
-            messages=[{"role": "system", "content": prompt}],
-            temperature=0.85,
-            max_tokens=250,
-            timeout=20
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        logger.error(f"❌ Ошибка упаковки: {e}")
-        return raw_text
 
 # ============================================================
 # ОПРЕДЕЛЕНИЕ ПЛАТФОРМЫ
@@ -538,7 +494,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА
+# ОСНОВНАЯ ЛОГИКА (ОДИН ВЫЗОВ DeepSeek)
 # ============================================================
 async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
     user_name = get_fact(user_id, "name")
@@ -571,7 +527,7 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
     else:
         logger.info("📌 ФАКТЫ НЕ НАЙДЕНЫ")
 
-    # ФОРМИРУЕМ ПРОМПТ
+    # ЕДИНЫЙ ПРОМПТ
     if facts:
         prompt = f"""
 Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
@@ -595,7 +551,7 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
 
 ПОЛЬЗОВАТЕЛЬ СПРОСИЛ: "{text}"
 
-ОТВЕТЬ (коротко, живо, с эмодзи, используя факты):
+ОТВЕТЬ КОРОТКО (3-4 предложения, живым языком, с эмодзи):
 """
     else:
         prompt = f"""
@@ -608,7 +564,7 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
 
 ПОЛЬЗОВАТЕЛЬ СПРОСИЛ: "{text}"
 
-ОТВЕТЬ (коротко, живо, с эмодзи):
+ОТВЕТЬ КОРОТКО (3-4 предложения, живым языком, с эмодзи):
 """
 
     try:
@@ -616,7 +572,7 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
             model="deepseek-chat",
             messages=[{"role": "system", "content": prompt}],
             temperature=0.85,
-            max_tokens=300,
+            max_tokens=200,
             timeout=20
         )
         reply = response.choices[0].message.content
@@ -640,7 +596,9 @@ async def webhook(request: Request):
         user_id = msg["from"]["id"]
         text = msg.get("text", "")
 
-        # МЕДИА
+        # ============================================================
+        # ОБРАБОТКА КАРТИНОК (НОВАЯ ЛОГИКА)
+        # ============================================================
         if "photo" in msg or "document" in msg:
             if "photo" in msg:
                 file_id = msg["photo"][-1]["file_id"]
@@ -654,9 +612,12 @@ async def webhook(request: Request):
                 file_resp = requests.get(file_url, timeout=30)
                 if file_resp.status_code == 200 and file_resp.json().get("ok"):
                     image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_resp.json()['result']['file_path']}"
-                    recognized_text = recognize_image(image_url)
-                    await send_message(user_id, f"📷 **Распознанный текст:**\n\n{recognized_text}")
-                    save_message(user_id, "assistant", f"Распознан текст: {recognized_text[:200]}...")
+                    
+                    # Распознаём через DeepSeek Vision (вместо Яндекс.Облака)
+                    recognized_text = await recognize_image_with_deepseek(image_url)
+                    
+                    await send_message(user_id, f"🖼️ **Распознано:**\n\n{recognized_text}")
+                    save_message(user_id, "assistant", f"Распознано: {recognized_text[:200]}...")
                 else:
                     await send_message(user_id, "⚠️ Не удалось загрузить изображение.")
             except Exception as e:
@@ -664,6 +625,9 @@ async def webhook(request: Request):
                 await send_message(user_id, "⚠️ Не удалось распознать изображение.")
             return JSONResponse({"ok": True})
 
+        # ============================================================
+        # ОБРАБОТКА ГОЛОСА
+        # ============================================================
         if "voice" in msg:
             file_id = msg["voice"]["file_id"]
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
@@ -688,12 +652,16 @@ async def webhook(request: Request):
         if not text:
             return JSONResponse({"ok": True})
 
+        # ============================================================
         # ЗАЩИТА ОТ ПОВТОРОВ
+        # ============================================================
         if is_duplicate(user_id, text):
             logger.warning(f"⚠️ Повторный запрос от {user_id}: {text}")
             return JSONResponse({"ok": True})
 
+        # ============================================================
         # ВРЕМЯ
+        # ============================================================
         time_phrases = ["сколько время", "который час", "точное время", "часы покажи", "время сейчас", "какое время", "сколько сейчас время", "который сейчас час"]
         if any(phrase in text.lower() for phrase in time_phrases):
             user_city = get_fact(user_id, "city") or "Москва"
@@ -701,7 +669,9 @@ async def webhook(request: Request):
             await send_message(user_id, f"⏰ Сейчас {get_time_for_city(user_city)} по местному времени ({user_city}).")
             return JSONResponse({"ok": True})
 
+        # ============================================================
         # КОМАНДЫ
+        # ============================================================
         if text == "/start":
             await send_typing(user_id)
             await send_message(user_id, "Привет. Я AURA. Если ты здесь — значит, ты уже не просто ищешь, а хочешь, чтобы искали за тебя. Напиши, что нужно — и я покажу, на что способен.")
@@ -713,7 +683,9 @@ async def webhook(request: Request):
             await send_message(user_id, "✅ История очищена. Начинаем с чистого листа.")
             return JSONResponse({"ok": True})
 
+        # ============================================================
         # ОСНОВНАЯ ЛОГИКА
+        # ============================================================
         save_message(user_id, "user", text)
 
         # ЗАГРУЖАЕМ ВСЮ ИСТОРИЮ
@@ -761,7 +733,9 @@ async def webhook(request: Request):
                 await send_message(user_id, "А подскажи, в каком городе ты живёшь?")
                 return JSONResponse({"ok": True})
 
+        # ============================================================
         # ОСНОВНАЯ ЛОГИКА С ПОИСКОМ
+        # ============================================================
         user_name = get_fact(user_id, "name") or "Гость"
         user_city = get_fact(user_id, "city") or "Москва"
         budget = get_fact(user_id, "budget_travel") or ""
@@ -781,7 +755,36 @@ async def webhook(request: Request):
             full_query = f"{search_query} {platform_map.get(platform, 'яндекс видео')}"
             raw_result = call_yandex_agent(AGENT_SEARCH_ID, full_query, user_name, user_city)
             if raw_result:
-                packed = await pack_response(raw_result, user_name, user_city)
+                # Упаковываем ответ через DeepSeek (один вызов)
+                packed_prompt = f"""
+Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
+
+Перед тобой сырой ответ поискового агента. Преврати его в красивый, живой ответ.
+
+ПРАВИЛА:
+1. **ОТВЕЧАЙ КОРОТКО:** максимум 3–4 предложения.
+2. **СТРУКТУРА:** разбивай ответ на 2–3 абзаца.
+3. **МАРКЕРЫ:** ✅ — готово, 💎 — лучший вариант.
+4. **ЖИРНЫЙ ШРИФТ:** выделяй цены, даты.
+5. **ДУША:** лёгкая ирония, эмпатия.
+6. **ЭМОДЗИ:** 1–2 по теме.
+7. **ССЫЛКА:** если есть ссылка — добавь.
+
+Имя пользователя: {user_name}
+
+Сырой ответ:
+{raw_result}
+
+Твой ответ:
+"""
+                packed_response = deepseek.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=[{"role": "system", "content": packed_prompt}],
+                    temperature=0.85,
+                    max_tokens=200,
+                    timeout=20
+                )
+                packed = packed_response.choices[0].message.content
                 await send_message(user_id, packed)
                 save_message(user_id, "assistant", packed)
             else:
@@ -799,7 +802,34 @@ async def webhook(request: Request):
             try:
                 raw_result = call_yandex_agent(agent_id, text, user_name, user_city, budget)
                 if raw_result:
-                    packed = await pack_response(raw_result, user_name, user_city)
+                    packed_prompt = f"""
+Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
+
+Перед тобой сырой ответ. Преврати его в красивый, живой ответ.
+
+ПРАВИЛА:
+1. **ОТВЕЧАЙ КОРОТКО:** максимум 3–4 предложения.
+2. **СТРУКТУРА:** разбивай ответ на 2–3 абзаца.
+3. **МАРКЕРЫ:** ✅ — готово, 💎 — лучший вариант.
+4. **ЖИРНЫЙ ШРИФТ:** выделяй цены, даты.
+5. **ДУША:** лёгкая ирония, эмпатия.
+6. **ЭМОДЗИ:** 1–2 по теме.
+
+Имя пользователя: {user_name}
+
+Сырой ответ:
+{raw_result}
+
+Твой ответ:
+"""
+                    packed_response = deepseek.chat.completions.create(
+                        model="deepseek-chat",
+                        messages=[{"role": "system", "content": packed_prompt}],
+                        temperature=0.85,
+                        max_tokens=200,
+                        timeout=20
+                    )
+                    packed = packed_response.choices[0].message.content
                     await send_message(user_id, packed)
                     save_message(user_id, "assistant", packed)
                     return JSONResponse({"ok": True})
