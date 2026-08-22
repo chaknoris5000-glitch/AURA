@@ -150,7 +150,7 @@ def save_portrait_field(user_id, field, value):
         logger.error(f"❌ Ошибка сохранения портрета: {e}")
 
 # ============================================================
-# ИСТОРИЯ (ЗАГРУЖАЕМ ВСЁ — ИСПРАВЛЕННАЯ ВЕРСИЯ)
+# ИСТОРИЯ
 # ============================================================
 def save_message(user_id, role, content):
     if not supabase:
@@ -169,7 +169,6 @@ def save_message(user_id, role, content):
 def get_all_history(user_id):
     """
     Загружает ВСЮ историю пользователя без лимита.
-    Как я в этом чате — вижу всё.
     """
     if not supabase:
         return []
@@ -197,13 +196,17 @@ def clear_user_history(user_id):
         logger.error(f"❌ Ошибка очистки истории: {e}")
 
 # ============================================================
-# ПОИСК В ИСТОРИИ
+# УНИВЕРСАЛЬНЫЙ ПОИСК В ИСТОРИИ
 # ============================================================
 def find_in_history(history, text):
+    """
+    Находит ВСЕ сообщения, содержащие любое слово из запроса.
+    """
     if not history:
         return []
     
-    stop_words = ["напомни", "скажи", "что", "я", "говорил", "про", "о", "в", "и", "с", "на", "за", "по", "из", "от", "для", "мне", "ты", "мы", "они", "он", "она", "оно", "вот", "этот", "эта", "это", "эти", "который", "которая", "которые", "которое"]
+    # Разбиваем запрос на слова (убираем стоп-слова)
+    stop_words = ["напомни", "скажи", "что", "я", "говорил", "про", "о", "в", "и", "с", "на", "за", "по", "из", "от", "для", "мне", "ты", "мы", "они", "он", "она", "оно", "вот", "этот", "эта", "это", "эти", "который", "которая", "которые", "которое", "мне", "меня", "тебя", "тебе", "ещё", "было", "были", "была"]
     keywords = []
     for word in text.lower().split():
         if len(word) > 2 and word not in stop_words:
@@ -212,8 +215,9 @@ def find_in_history(history, text):
     if not keywords:
         return []
     
-    logger.info(f"🔍 Ищем в ПОЛНОЙ истории по ключевым словам: {keywords}")
+    logger.info(f"🔍 Ищем в истории по словам: {keywords}")
     
+    # Ищем ВСЕ сообщения, содержащие любое слово
     found = []
     for msg in history:
         content_lower = msg['content'].lower()
@@ -222,58 +226,50 @@ def find_in_history(history, text):
                 found.append(msg)
                 break
     
-    logger.info(f"📌 Найдено {len(found)} сообщений в истории")
+    logger.info(f"📌 Найдено {len(found)} сообщений")
     return found
 
-# ============================================================
-# ИЗВЛЕЧЕНИЕ ФАКТОВ
-# ============================================================
 def extract_facts(found_messages, text):
+    """
+    Собирает ВСЕ найденные сообщения и передаёт их DeepSeek.
+    Без фильтрации — только самые релевантные (до 10 штук).
+    """
     if not found_messages:
         return None
     
     text_lower = text.lower()
     
-    is_clinic = any(word in text_lower for word in ["клиник", "больниц", "медцентр", "стоматолог", "терапевт"])
-    is_address = any(word in text_lower for word in ["адрес", "улиц", "находит", "расположен"])
-    is_haval = "хавал" in text_lower or "haval" in text_lower
-    is_film = any(word in text_lower for word in ["фильм", "кино", "сериал"])
-    is_recipe = any(word in text_lower for word in ["рецепт", "блюдо", "еда"])
+    # Сортируем найденные сообщения по релевантности
+    scored = []
+    keywords = [w for w in text_lower.split() if len(w) > 2]
     
+    for msg in found_messages:
+        content_lower = msg['content'].lower()
+        score = 0
+        for keyword in keywords:
+            if keyword in content_lower:
+                score += 1
+        scored.append((score, msg))
+    
+    # Сортируем по убыванию релевантности
+    scored.sort(key=lambda x: x[0], reverse=True)
+    
+    # Берём топ-10 самых релевантных
+    top_messages = [msg for _, msg in scored[:10]]
+    
+    # Формируем ответ
     parts = []
-    
-    for msg in found_messages[:5]:
-        content = msg['content']
+    for msg in top_messages:
         role = "Пользователь" if msg['role'] == 'user' else "AURA"
-        
-        if is_clinic and ("клиник" in content.lower() or "больниц" in content.lower()):
-            parts.append(f"{role}: {content[:300]}")
-            continue
-        
-        if is_address:
-            address_pattern = r'(ул\.?\s*[А-Яа-яёЁ\s\-\.]+,\s*\d+[А-Яа-яёЁ]?)|([А-Яа-яёЁ][а-яёЁ]+\s+ул\.?\s*[А-Яа-яёЁ\s\-\.]+,\s*\d+[А-Яа-яёЁ]?)'
-            if re.search(address_pattern, content):
-                parts.append(f"{role}: {content[:300]}")
-                continue
-        
-        if is_haval and ("хавал" in content.lower() or "haval" in content.lower()):
-            parts.append(f"{role}: {content[:300]}")
-            continue
-        
-        if is_film and ("фильм" in content.lower() or "кино" in content.lower() or "сериал" in content.lower()):
-            parts.append(f"{role}: {content[:300]}")
-            continue
-        
-        if is_recipe and ("рецепт" in content.lower() or "блюдо" in content.lower() or "еда" in content.lower()):
-            parts.append(f"{role}: {content[:300]}")
-            continue
-        
-        parts.append(f"{role}: {content[:200]}")
+        content = msg['content'][:500]
+        parts.append(f"{role}: {content}")
     
     if not parts:
         return None
     
-    return "\n\n".join(parts)
+    result = "\n\n".join(parts)
+    logger.info(f"📌 Извлечено {len(parts)} сообщений")
+    return result
 
 # ============================================================
 # РАСПОЗНАВАНИЕ ГОЛОСА
@@ -566,6 +562,7 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
         if parts:
             portrait_context = "ПОРТРЕТ: " + ", ".join(parts) + "."
 
+    # УНИВЕРСАЛЬНЫЙ ПОИСК В ИСТОРИИ
     found = find_in_history(history, text)
     facts = extract_facts(found, text) if found else None
     
@@ -574,6 +571,7 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
     else:
         logger.info("📌 ФАКТЫ НЕ НАЙДЕНЫ")
 
+    # ФОРМИРУЕМ ПРОМПТ
     if facts:
         prompt = f"""
 Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
@@ -718,6 +716,7 @@ async def webhook(request: Request):
         # ОСНОВНАЯ ЛОГИКА
         save_message(user_id, "user", text)
 
+        # ЗАГРУЖАЕМ ВСЮ ИСТОРИЮ
         history = get_all_history(user_id)
         logger.info(f"📚 Загружена ПОЛНАЯ история для user_id {user_id}: {len(history)} сообщений")
 
