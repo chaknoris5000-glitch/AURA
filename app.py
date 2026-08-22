@@ -23,9 +23,6 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# ============================================================
-# КОНФИГУРАЦИЯ
-# ============================================================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
@@ -54,9 +51,6 @@ if SUPABASE_URL and SUPABASE_KEY:
 app = FastAPI()
 user_states = {}
 
-# ============================================================
-# ЗАЩИТА ОТ ПОВТОРНЫХ ЗАПРОСОВ
-# ============================================================
 user_last_requests = {}
 
 def get_request_hash(user_id, text):
@@ -71,9 +65,6 @@ def is_duplicate(user_id, text):
     user_last_requests[user_id].append(hash_val)
     return False
 
-# ============================================================
-# КЕШИРОВАНИЕ
-# ============================================================
 agent_cache = {}
 
 def get_cached_response(hash_val):
@@ -88,9 +79,6 @@ def get_cached_response(hash_val):
 def cache_response(hash_val, response):
     agent_cache[hash_val] = {"response": response, "timestamp": datetime.now()}
 
-# ============================================================
-# ПАМЯТЬ
-# ============================================================
 def save_fact(user_id, key, value):
     if not supabase:
         return
@@ -148,9 +136,6 @@ def save_portrait_field(user_id, field, value):
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения портрета: {e}")
 
-# ============================================================
-# ИСТОРИЯ
-# ============================================================
 def save_message(user_id, role, content):
     if not supabase:
         return
@@ -191,89 +176,59 @@ def clear_user_history(user_id):
     except Exception as e:
         logger.error(f"❌ Ошибка очистки истории: {e}")
 
-# ============================================================
-# НОВАЯ ЛОГИКА: БОТ КАК Я В ЭТОМ ЧАТЕ
-# ============================================================
-async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
-    """
-    Работает как я в этом чате:
-    1. Видит ВСЮ историю.
-    2. Отвечает как продолжение диалога.
-    3. Без лишних приветствий.
-    4. С иронией, по делу, с памятью.
-    """
-    user_name = get_fact(user_id, "name") or "Гость"
-    user_city = get_fact(user_id, "city") or "Москва"
-    portrait = get_portrait(user_id)
-    
-    portrait_context = ""
-    if portrait:
-        parts = []
-        if portrait.get('name'): parts.append(f"имя: {portrait['name']}")
-        if portrait.get('city'): parts.append(f"город: {portrait['city']}")
-        if portrait.get('hobbies'):
-            hobbies = ", ".join(portrait['hobbies'][:3]) if isinstance(portrait['hobbies'], list) else portrait['hobbies']
-            parts.append(f"увлечения: {hobbies}")
-        if portrait.get('favorite_cuisine'):
-            cuisine = ", ".join(portrait['favorite_cuisine']) if isinstance(portrait['favorite_cuisine'], list) else portrait['favorite_cuisine']
-            parts.append(f"любимая кухня: {cuisine}")
-        if parts:
-            portrait_context = "ПОРТРЕТ: " + ", ".join(parts) + "."
-    
-    # Формируем историю как в этом чате — все сообщения подряд
-    history_text = ""
-    if history:
-        history_lines = []
-        for h in history:
-            role = "Пользователь" if h['role'] == 'user' else "AURA"
-            content = h['content']
-            history_lines.append(f"{role}: {content}")
-        history_text = "\n".join(history_lines[-30:])  # Последние 30 сообщений
-    
-    # Как я в этом чате — без лишних инструкций, просто диалог
-    prompt = f"""
-Ты — AURA.
+def find_in_history(history, text):
+    if not history:
+        return []
+    stop_words = ["напомни", "скажи", "что", "я", "говорил", "про", "о", "в", "и", "с", "на", "за", "по", "из", "от", "для", "мне", "ты", "мы", "они", "он", "она", "оно", "вот", "этот", "эта", "это", "эти", "который", "которая", "которые", "которое", "мне", "меня", "тебя", "тебе", "ещё", "было", "были", "была"]
+    keywords = []
+    for word in text.lower().split():
+        if len(word) > 2 and word not in stop_words:
+            keywords.append(word)
+    if not keywords:
+        return []
+    logger.info(f"🔍 Ищем в истории по словам: {keywords}")
+    found = []
+    for msg in history:
+        content_lower = msg['content'].lower()
+        for keyword in keywords:
+            if keyword in content_lower:
+                found.append(msg)
+                break
+    logger.info(f"📌 Найдено {len(found)} сообщений")
+    return found
 
-Вот весь диалог с пользователем. Отвечай как продолжение разговора — без приветствий, без "здравствуйте", без представлений. Просто продолжай диалог.
+def extract_facts(found_messages, text):
+    if not found_messages:
+        return None
+    text_lower = text.lower()
+    scored = []
+    keywords = [w for w in text_lower.split() if len(w) > 2]
+    for msg in found_messages:
+        content_lower = msg['content'].lower()
+        score = 0
+        for keyword in keywords:
+            if keyword in content_lower:
+                score += 1
+        scored.append((score, msg))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top_messages = [msg for _, msg in scored[:10]]
+    parts = []
+    for msg in top_messages:
+        role = "Пользователь" if msg['role'] == 'user' else "AURA"
+        content = msg['content'][:500]
+        parts.append(f"{role}: {content}")
+    if not parts:
+        return None
+    result = "\n\n".join(parts)
+    logger.info(f"📌 Извлечено {len(parts)} сообщений")
+    return result
 
-Имя пользователя: {user_name}
-Город: {user_city}
-{portrait_context}
-
-ИСТОРИЯ ДИАЛОГА:
-{history_text}
-
-СЕЙЧАС ПОЛЬЗОВАТЕЛЬ НАПИСАЛ: "{text}"
-
-ОТВЕТЬ КАК ПРОДОЛЖЕНИЕ ДИАЛОГА (без приветствий, без лишней воды, с иронией):
-"""
-    
-    try:
-        response = deepseek.chat.completions.create(
-            model="deepseek-chat",
-            messages=[{"role": "system", "content": prompt}],
-            temperature=0.85,
-            max_tokens=250,
-            timeout=20
-        )
-        reply = response.choices[0].message.content
-        logger.info(f"✅ DeepSeek ответил как продолжение диалога")
-        return {"reply": reply, "score": 0}
-    except Exception as e:
-        logger.error(f"❌ Ошибка DeepSeek: {e}")
-        return {"reply": "😅 Не понял, перефразируй.", "score": 0}
-
-# ============================================================
-# РАСПОЗНАВАНИЕ КАРТИНОК
-# ============================================================
 async def recognize_image_with_deepseek(image_url: str) -> str:
     try:
         response = requests.get(image_url, timeout=30)
         if response.status_code != 200:
             return "⚠️ Не удалось загрузить изображение."
-        
         image_base64 = base64.b64encode(response.content).decode('utf-8')
-        
         prompt = """
 Ты — AURA. Ты видишь картинку и должен сделать ПОЛНЫЙ анализ.
 
@@ -285,12 +240,10 @@ async def recognize_image_with_deepseek(image_url: str) -> str:
 
 Ответь на русском языке, подробно, без воды.
 """
-        
         vision_client = OpenAI(
             api_key=DEEPSEEK_API_KEY,
             base_url=DEEPSEEK_BASE_URL
         )
-        
         response = vision_client.chat.completions.create(
             model="deepseek-v4-flash-vision-exp",
             messages=[
@@ -310,18 +263,13 @@ async def recognize_image_with_deepseek(image_url: str) -> str:
             max_tokens=500,
             temperature=0.2
         )
-        
         result = response.choices[0].message.content
         logger.info(f"🖼️ DeepSeek Vision распознал картинку")
         return result
-        
     except Exception as e:
         logger.error(f"❌ Ошибка распознавания через DeepSeek Vision: {e}")
         return "⚠️ Не удалось распознать изображение. Попробуйте ещё раз."
 
-# ============================================================
-# РАСПОЗНАВАНИЕ ГОЛОСА
-# ============================================================
 def transcribe_audio(audio_url):
     try:
         resp = requests.get(audio_url, timeout=30)
@@ -342,9 +290,6 @@ def transcribe_audio(audio_url):
         logger.error(f"❌ Ошибка распознавания: {e}")
         return None
 
-# ============================================================
-# ВЫЗОВ АГЕНТОВ ЯНДЕКСА
-# ============================================================
 def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_city: str = "", budget: str = "") -> str:
     hash_val = hashlib.md5(f"{agent_id}:{user_text}:{user_name}:{user_city}:{budget}".encode()).hexdigest()
     cached = get_cached_response(hash_val)
@@ -377,9 +322,6 @@ def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_c
         logger.error(f"❌ Ошибка агента Яндекса ({agent_id}): {e}")
         return ""
 
-# ============================================================
-# ОПРЕДЕЛЕНИЕ ПЛАТФОРМЫ
-# ============================================================
 def detect_content_platform(text: str) -> dict:
     try:
         prompt = f"""
@@ -410,12 +352,8 @@ def detect_content_platform(text: str) -> dict:
         logger.error(f"❌ Ошибка определения платформы: {e}")
         return {"platform": "yandex_video", "search_query": text}
 
-# ============================================================
-# ФОРМИРОВАНИЕ ССЫЛОК
-# ============================================================
 def get_platform_link(platform: str, query: str) -> str:
     query_encoded = query.replace(' ', '+')
-    
     if platform == "yandex_video":
         return f"https://yandex.ru/video/search?text={query_encoded}"
     elif platform == "youtube":
@@ -433,9 +371,6 @@ def get_platform_link(platform: str, query: str) -> str:
     else:
         return None
 
-# ============================================================
-# ТОЧНОЕ ВРЕМЯ
-# ============================================================
 def get_time_for_city(city: str = "Москва") -> str:
     timezone_map = {
         "москва": "Europe/Moscow",
@@ -469,9 +404,6 @@ def get_time_for_city(city: str = "Москва") -> str:
     now = datetime.now(tz)
     return now.strftime("%H:%M")
 
-# ============================================================
-# 2ГИС
-# ============================================================
 async def search_organization(query: str, city: str = "Белово") -> dict:
     if not GIS_API_KEY:
         return {"error": "Нет ключа 2ГИС"}
@@ -506,9 +438,6 @@ async def search_organization(query: str, city: str = "Белово") -> dict:
         logger.error(f"❌ Ошибка 2ГИС: {e}")
         return {"error": str(e)}
 
-# ============================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# ============================================================
 async def send_typing(chat_id):
     try:
         requests.post(
@@ -534,6 +463,48 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
+# ОСНОВНАЯ ЛОГИКА (КОРОТКИЕ ОТВЕТЫ)
+# ============================================================
+async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
+    user_name = get_fact(user_id, "name") or "Гость"
+    user_city = get_fact(user_id, "city") or "Москва"
+    
+    history_text = ""
+    if history:
+        history_lines = []
+        for h in history[-20:]:
+            role = "Пользователь" if h['role'] == 'user' else "AURA"
+            content = h['content']
+            history_lines.append(f"{role}: {content}")
+        history_text = "\n".join(history_lines)
+    
+    prompt = f"""
+Ты — AURA. Отвечай коротко — максимум 2-3 предложения. Без приветствий, без "здравствуйте". Просто продолжай диалог.
+
+ИСТОРИЯ:
+{history_text}
+
+ПОЛЬЗОВАТЕЛЬ: "{text}"
+
+ОТВЕТЬ (2-3 предложения, по делу):
+"""
+    
+    try:
+        response = deepseek.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "system", "content": prompt}],
+            temperature=0.85,
+            max_tokens=150,
+            timeout=20
+        )
+        reply = response.choices[0].message.content
+        logger.info(f"✅ DeepSeek ответил коротко")
+        return {"reply": reply, "score": 0}
+    except Exception as e:
+        logger.error(f"❌ Ошибка DeepSeek: {e}")
+        return {"reply": "😅 Не понял.", "score": 0}
+
+# ============================================================
 # WEBHOOK
 # ============================================================
 @app.post("/webhook")
@@ -547,25 +518,18 @@ async def webhook(request: Request):
         user_id = msg["from"]["id"]
         text = msg.get("text", "")
 
-        # ============================================================
-        # ОБРАБОТКА КАРТИНОК
-        # ============================================================
         if "photo" in msg or "document" in msg:
             if "photo" in msg:
                 file_id = msg["photo"][-1]["file_id"]
             else:
                 file_id = msg["document"]["file_id"]
-            
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
             await send_typing(user_id)
-            
             try:
                 file_resp = requests.get(file_url, timeout=30)
                 if file_resp.status_code == 200 and file_resp.json().get("ok"):
                     image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_resp.json()['result']['file_path']}"
-                    
                     recognized_text = await recognize_image_with_deepseek(image_url)
-                    
                     await send_message(user_id, f"🖼️ **Распознано:**\n\n{recognized_text}")
                     save_message(user_id, "assistant", f"Распознано: {recognized_text[:200]}")
                 else:
@@ -575,9 +539,6 @@ async def webhook(request: Request):
                 await send_message(user_id, "⚠️ Не удалось распознать изображение.")
             return JSONResponse({"ok": True})
 
-        # ============================================================
-        # ОБРАБОТКА ГОЛОСА
-        # ============================================================
         if "voice" in msg:
             file_id = msg["voice"]["file_id"]
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
@@ -602,16 +563,10 @@ async def webhook(request: Request):
         if not text:
             return JSONResponse({"ok": True})
 
-        # ============================================================
-        # ЗАЩИТА ОТ ПОВТОРОВ
-        # ============================================================
         if is_duplicate(user_id, text):
             logger.warning(f"⚠️ Повторный запрос от {user_id}: {text}")
             return JSONResponse({"ok": True})
 
-        # ============================================================
-        # ВРЕМЯ
-        # ============================================================
         time_phrases = ["сколько время", "который час", "точное время", "часы покажи", "время сейчас", "какое время", "сколько сейчас время", "который сейчас час"]
         if any(phrase in text.lower() for phrase in time_phrases):
             user_city = get_fact(user_id, "city") or "Москва"
@@ -619,9 +574,6 @@ async def webhook(request: Request):
             await send_message(user_id, f"⏰ Сейчас {get_time_for_city(user_city)} по местному времени ({user_city}).")
             return JSONResponse({"ok": True})
 
-        # ============================================================
-        # КОМАНДЫ
-        # ============================================================
         if text == "/start":
             await send_typing(user_id)
             await send_message(user_id, "Привет. Я AURA. Если ты здесь — значит, ты уже не просто ищешь, а хочешь, чтобы искали за тебя. Напиши, что нужно — и я покажу, на что способен.")
@@ -633,15 +585,12 @@ async def webhook(request: Request):
             await send_message(user_id, "✅ История очищена. Начинаем с чистого листа.")
             return JSONResponse({"ok": True})
 
-        # ============================================================
-        # ОСНОВНАЯ ЛОГИКА
-        # ============================================================
         save_message(user_id, "user", text)
 
         history = get_all_history(user_id)
         logger.info(f"📚 Загружена ПОЛНАЯ история для user_id {user_id}: {len(history)} сообщений")
 
-        # Знакомство — имя (только если нет имени в базе)
+        # Знакомство — имя
         if not get_fact(user_id, "name"):
             if len(text.split()) == 1 and text[0].isupper() and len(text) > 1:
                 save_fact(user_id, "name", text)
@@ -659,7 +608,7 @@ async def webhook(request: Request):
                 await send_message(user_id, reply)
                 return JSONResponse({"ok": True})
 
-        # Знакомство — город (только если нет города в базе)
+        # Знакомство — город
         if not get_fact(user_id, "city"):
             if len(text.split()) == 1 and text[0].isupper() and len(text) > 1:
                 save_fact(user_id, "city", text)
@@ -721,31 +670,17 @@ async def webhook(request: Request):
             
             if raw_result:
                 packed_prompt = f"""
-Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
+Ты — AURA. Отвечай коротко — 2-3 предложения. Добавь ссылку в конце.
 
-Перед тобой сырой ответ поискового агента. Преврати его в красивый, живой ответ.
+Сырой ответ: {raw_result}
 
-ПРАВИЛА:
-1. **ОТВЕЧАЙ КОРОТКО:** максимум 3–4 предложения.
-2. **СТРУКТУРА:** разбивай ответ на 2–3 абзаца.
-3. **МАРКЕРЫ:** ✅ — готово, 💎 — лучший вариант.
-4. **ЖИРНЫЙ ШРИФТ:** выделяй цены, даты.
-5. **ДУША:** лёгкая ирония, эмпатия.
-6. **ЭМОДЗИ:** 1–2 по теме.
-7. **ОБЯЗАТЕЛЬНО добавь ссылку в конце ответа:** {link_text if link_text else ""}
-
-Имя пользователя: {user_name}
-
-Сырой ответ:
-{raw_result}
-
-Твой ответ:
+Твой ответ (короткий, со ссылкой): {link_text if link_text else ""}
 """
                 packed_response = deepseek.chat.completions.create(
                     model="deepseek-chat",
                     messages=[{"role": "system", "content": packed_prompt}],
                     temperature=0.85,
-                    max_tokens=200,
+                    max_tokens=150,
                     timeout=20
                 )
                 packed = packed_response.choices[0].message.content
@@ -756,7 +691,7 @@ async def webhook(request: Request):
                 await send_message(user_id, packed)
                 save_message(user_id, "assistant", packed)
             else:
-                await send_message(user_id, "😊 Не нашёл ничего по запросу. Попробуй уточнить.")
+                await send_message(user_id, "😊 Не нашёл.")
             return JSONResponse({"ok": True})
 
         if any(word in text.lower() for word in search_triggers + analyze_triggers + reason_triggers):
@@ -771,30 +706,17 @@ async def webhook(request: Request):
                 raw_result = call_yandex_agent(agent_id, text, user_name, user_city, budget)
                 if raw_result:
                     packed_prompt = f"""
-Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
+Ты — AURA. Отвечай коротко — 2-3 предложения.
 
-Перед тобой сырой ответ. Преврати его в красивый, живой ответ.
+Сырой ответ: {raw_result}
 
-ПРАВИЛА:
-1. **ОТВЕЧАЙ КОРОТКО:** максимум 3–4 предложения.
-2. **СТРУКТУРА:** разбивай ответ на 2–3 абзаца.
-3. **МАРКЕРЫ:** ✅ — готово, 💎 — лучший вариант.
-4. **ЖИРНЫЙ ШРИФТ:** выделяй цены, даты.
-5. **ДУША:** лёгкая ирония, эмпатия.
-6. **ЭМОДЗИ:** 1–2 по теме.
-
-Имя пользователя: {user_name}
-
-Сырой ответ:
-{raw_result}
-
-Твой ответ:
+Твой ответ (короткий):
 """
                     packed_response = deepseek.chat.completions.create(
                         model="deepseek-chat",
                         messages=[{"role": "system", "content": packed_prompt}],
                         temperature=0.85,
-                        max_tokens=200,
+                        max_tokens=150,
                         timeout=20
                     )
                     packed = packed_response.choices[0].message.content
@@ -810,11 +732,11 @@ async def webhook(request: Request):
                 await send_message(user_id, reply)
                 save_message(user_id, "assistant", reply)
             else:
-                await send_message(user_id, f"😊 Не нашёл «{text}». Проверь в Яндексе или 2ГИС.")
+                await send_message(user_id, f"😊 Не нашёл.")
             return JSONResponse({"ok": True})
 
         # ============================================================
-        # ОБЫЧНЫЙ ДИАЛОГ — КАК Я В ЭТОМ ЧАТЕ
+        # ОБЫЧНЫЙ ДИАЛОГ — КОРОТКО, ПО ДЕЛУ
         # ============================================================
         history = get_all_history(user_id)
         result = await deepseek_interview(user_id, text, history)
