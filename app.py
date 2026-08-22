@@ -192,77 +192,98 @@ def clear_user_history(user_id):
         logger.error(f"❌ Ошибка очистки истории: {e}")
 
 # ============================================================
-# УНИВЕРСАЛЬНЫЙ ПОИСК В ИСТОРИИ
+# НОВАЯ ЛОГИКА: БОТ КАК Я В ЭТОМ ЧАТЕ
 # ============================================================
-def find_in_history(history, text):
-    if not history:
-        return []
-    stop_words = ["напомни", "скажи", "что", "я", "говорил", "про", "о", "в", "и", "с", "на", "за", "по", "из", "от", "для", "мне", "ты", "мы", "они", "он", "она", "оно", "вот", "этот", "эта", "это", "эти", "который", "которая", "которые", "которое", "мне", "меня", "тебя", "тебе", "ещё", "было", "были", "была"]
-    keywords = []
-    for word in text.lower().split():
-        if len(word) > 2 and word not in stop_words:
-            keywords.append(word)
-    if not keywords:
-        return []
-    logger.info(f"🔍 Ищем в истории по словам: {keywords}")
-    found = []
-    for msg in history:
-        content_lower = msg['content'].lower()
-        for keyword in keywords:
-            if keyword in content_lower:
-                found.append(msg)
-                break
-    logger.info(f"📌 Найдено {len(found)} сообщений")
-    return found
+async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
+    """
+    Работает как я в этом чате:
+    1. Видит ВСЮ историю.
+    2. Отвечает как продолжение диалога.
+    3. Без лишних приветствий.
+    4. С иронией, по делу, с памятью.
+    """
+    user_name = get_fact(user_id, "name") or "Гость"
+    user_city = get_fact(user_id, "city") or "Москва"
+    portrait = get_portrait(user_id)
+    
+    portrait_context = ""
+    if portrait:
+        parts = []
+        if portrait.get('name'): parts.append(f"имя: {portrait['name']}")
+        if portrait.get('city'): parts.append(f"город: {portrait['city']}")
+        if portrait.get('hobbies'):
+            hobbies = ", ".join(portrait['hobbies'][:3]) if isinstance(portrait['hobbies'], list) else portrait['hobbies']
+            parts.append(f"увлечения: {hobbies}")
+        if portrait.get('favorite_cuisine'):
+            cuisine = ", ".join(portrait['favorite_cuisine']) if isinstance(portrait['favorite_cuisine'], list) else portrait['favorite_cuisine']
+            parts.append(f"любимая кухня: {cuisine}")
+        if parts:
+            portrait_context = "ПОРТРЕТ: " + ", ".join(parts) + "."
+    
+    # Формируем историю как в этом чате — все сообщения подряд
+    history_text = ""
+    if history:
+        history_lines = []
+        for h in history:
+            role = "Пользователь" if h['role'] == 'user' else "AURA"
+            content = h['content']
+            history_lines.append(f"{role}: {content}")
+        history_text = "\n".join(history_lines[-30:])  # Последние 30 сообщений
+    
+    # Как я в этом чате — без лишних инструкций, просто диалог
+    prompt = f"""
+Ты — AURA.
 
-def extract_facts(found_messages, text):
-    if not found_messages:
-        return None
-    text_lower = text.lower()
-    scored = []
-    keywords = [w for w in text_lower.split() if len(w) > 2]
-    for msg in found_messages:
-        content_lower = msg['content'].lower()
-        score = 0
-        for keyword in keywords:
-            if keyword in content_lower:
-                score += 1
-        scored.append((score, msg))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top_messages = [msg for _, msg in scored[:10]]
-    parts = []
-    for msg in top_messages:
-        role = "Пользователь" if msg['role'] == 'user' else "AURA"
-        content = msg['content'][:500]
-        parts.append(f"{role}: {content}")
-    if not parts:
-        return None
-    result = "\n\n".join(parts)
-    logger.info(f"📌 Извлечено {len(parts)} сообщений")
-    return result
+Вот весь диалог с пользователем. Отвечай как продолжение разговора — без приветствий, без "здравствуйте", без представлений. Просто продолжай диалог.
+
+Имя пользователя: {user_name}
+Город: {user_city}
+{portrait_context}
+
+ИСТОРИЯ ДИАЛОГА:
+{history_text}
+
+СЕЙЧАС ПОЛЬЗОВАТЕЛЬ НАПИСАЛ: "{text}"
+
+ОТВЕТЬ КАК ПРОДОЛЖЕНИЕ ДИАЛОГА (без приветствий, без лишней воды, с иронией):
+"""
+    
+    try:
+        response = deepseek.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "system", "content": prompt}],
+            temperature=0.85,
+            max_tokens=250,
+            timeout=20
+        )
+        reply = response.choices[0].message.content
+        logger.info(f"✅ DeepSeek ответил как продолжение диалога")
+        return {"reply": reply, "score": 0}
+    except Exception as e:
+        logger.error(f"❌ Ошибка DeepSeek: {e}")
+        return {"reply": "😅 Не понял, перефразируй.", "score": 0}
 
 # ============================================================
-# РАСПОЗНАВАНИЕ КАРТИНОК ЧЕРЕЗ DeepSeek Vision (РАБОЧАЯ ВЕРСИЯ)
+# РАСПОЗНАВАНИЕ КАРТИНОК
 # ============================================================
 async def recognize_image_with_deepseek(image_url: str) -> str:
-    """
-    Распознаёт картинку через DeepSeek-V4-Flash-Vision-Exp.
-    """
     try:
-        # Скачиваем картинку
         response = requests.get(image_url, timeout=30)
         if response.status_code != 200:
             return "⚠️ Не удалось загрузить изображение."
         
-        # Конвертируем в base64
         image_base64 = base64.b64encode(response.content).decode('utf-8')
         
-        # Промпт как в рабочей версии
         prompt = """
-Ты — AURA. Ты видишь картинку и должен:
-1. Если на картинке есть текст — распознай его и напиши.
-2. Если есть что-то ещё — опиши кратко, что изображено.
-3. Ответь коротко, на русском, без лишней воды.
+Ты — AURA. Ты видишь картинку и должен сделать ПОЛНЫЙ анализ.
+
+ОБЯЗАТЕЛЬНО выполни следующие шаги:
+1. Внимательно прочитай ВСЕ тексты на картинке — даже самые мелкие надписи.
+2. Распознай бренды, названия продуктов, цены, состав, калорийность.
+3. Определи, что изображено на картинке (продукты, предметы, люди, сцена).
+4. Дай структурированный ответ.
+
+Ответь на русском языке, подробно, без воды.
 """
         
         vision_client = OpenAI(
@@ -286,8 +307,8 @@ async def recognize_image_with_deepseek(image_url: str) -> str:
                     ]
                 }
             ],
-            max_tokens=300,
-            temperature=0.5
+            max_tokens=500,
+            temperature=0.2
         )
         
         result = response.choices[0].message.content
@@ -382,7 +403,7 @@ def detect_content_platform(text: str) -> dict:
             messages=[{"role": "system", "content": prompt}],
             temperature=0.3,
             max_tokens=120,
-            timeout=10
+            timeout=5
         )
         return json.loads(response.choices[0].message.content)
     except Exception as e:
@@ -393,7 +414,6 @@ def detect_content_platform(text: str) -> dict:
 # ФОРМИРОВАНИЕ ССЫЛОК
 # ============================================================
 def get_platform_link(platform: str, query: str) -> str:
-    """Формирует ссылку для поиска на нужной платформе"""
     query_encoded = query.replace(' ', '+')
     
     if platform == "yandex_video":
@@ -514,93 +534,6 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА
-# ============================================================
-async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
-    user_name = get_fact(user_id, "name")
-    user_city = get_fact(user_id, "city")
-    portrait = get_portrait(user_id)
-
-    name_instruction = f"Зовут {user_name}." if user_name else ""
-    city_instruction = f"Город: {user_city}." if user_city else ""
-
-    portrait_context = ""
-    if portrait:
-        parts = []
-        if portrait.get('name'): parts.append(f"имя: {portrait['name']}")
-        if portrait.get('city'): parts.append(f"город: {portrait['city']}")
-        if portrait.get('hobbies'):
-            hobbies = ", ".join(portrait['hobbies'][:3]) if isinstance(portrait['hobbies'], list) else portrait['hobbies']
-            parts.append(f"увлечения: {hobbies}")
-        if portrait.get('favorite_cuisine'):
-            cuisine = ", ".join(portrait['favorite_cuisine']) if isinstance(portrait['favorite_cuisine'], list) else portrait['favorite_cuisine']
-            parts.append(f"любимая кухня: {cuisine}")
-        if parts:
-            portrait_context = "ПОРТРЕТ: " + ", ".join(parts) + "."
-
-    found = find_in_history(history, text)
-    facts = extract_facts(found, text) if found else None
-    
-    if facts:
-        logger.info(f"📌 ИЗВЛЕЧЕНЫ ФАКТЫ: {facts[:200]}...")
-    else:
-        logger.info("📌 ФАКТЫ НЕ НАЙДЕНЫ")
-
-    if facts:
-        prompt = f"""
-Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
-
-{portrait_context}
-
-⚠️ ВНИМАНИЕ! Ты ОБЯЗАН использовать следующие факты в своём ответе.
-Они извлечены из ПОЛНОЙ истории диалога и являются прямым ответом на вопрос пользователя.
-
-ФАКТЫ ИЗ ИСТОРИИ:
-{facts}
-
-ЗАДАЧА:
-1. Используй эти факты в своём ответе.
-2. Если есть адрес — назови его.
-3. Если есть название — назови его.
-4. Ответь коротко, живым языком, с эмодзи.
-
-{name_instruction}
-{city_instruction}
-
-ПОЛЬЗОВАТЕЛЬ СПРОСИЛ: "{text}"
-
-ОТВЕТЬ КОРОТКО (3-4 предложения, живым языком, с эмодзи):
-"""
-    else:
-        prompt = f"""
-Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
-
-{portrait_context}
-
-{name_instruction}
-{city_instruction}
-
-ПОЛЬЗОВАТЕЛЬ СПРОСИЛ: "{text}"
-
-ОТВЕТЬ КОРОТКО (3-4 предложения, живым языком, с эмодзи):
-"""
-
-    try:
-        response = deepseek.chat.completions.create(
-            model="deepseek-chat",
-            messages=[{"role": "system", "content": prompt}],
-            temperature=0.85,
-            max_tokens=200,
-            timeout=20
-        )
-        reply = response.choices[0].message.content
-        logger.info(f"✅ DeepSeek ответил")
-        return {"reply": reply, "score": 0}
-    except Exception as e:
-        logger.error(f"❌ Ошибка DeepSeek: {e}")
-        return {"reply": "😅 Не понял, перефразируй.", "score": 0}
-
-# ============================================================
 # WEBHOOK
 # ============================================================
 @app.post("/webhook")
@@ -708,7 +641,7 @@ async def webhook(request: Request):
         history = get_all_history(user_id)
         logger.info(f"📚 Загружена ПОЛНАЯ история для user_id {user_id}: {len(history)} сообщений")
 
-        # Знакомство — имя
+        # Знакомство — имя (только если нет имени в базе)
         if not get_fact(user_id, "name"):
             if len(text.split()) == 1 and text[0].isupper() and len(text) > 1:
                 save_fact(user_id, "name", text)
@@ -724,16 +657,14 @@ async def webhook(request: Request):
                 save_message(user_id, "assistant", reply)
                 await send_typing(user_id)
                 await send_message(user_id, reply)
-                await send_typing(user_id)
-                await send_message(user_id, "Кстати, меня зовут AURA. А как мне к тебе обращаться?")
                 return JSONResponse({"ok": True})
 
-        # Знакомство — город
+        # Знакомство — город (только если нет города в базе)
         if not get_fact(user_id, "city"):
             if len(text.split()) == 1 and text[0].isupper() and len(text) > 1:
                 save_fact(user_id, "city", text)
                 save_portrait_field(user_id, "city", text)
-                user_name = get_fact(user_id, "name")
+                user_name = get_fact(user_id, "name") or "Гость"
                 await send_typing(user_id)
                 await send_message(user_id, f"Отлично, {user_name}! Теперь я буду давать информацию по твоему городу.")
                 await send_typing(user_id)
@@ -745,8 +676,6 @@ async def webhook(request: Request):
                 save_message(user_id, "assistant", reply)
                 await send_typing(user_id)
                 await send_message(user_id, reply)
-                await send_typing(user_id)
-                await send_message(user_id, "А подскажи, в каком городе ты живёшь?")
                 return JSONResponse({"ok": True})
 
         # ============================================================
@@ -766,13 +695,11 @@ async def webhook(request: Request):
         if any(word in text.lower() for word in content_triggers):
             text_lower = text.lower()
             
-            # Если это рецепт — ищем на YouTube
             if any(word in text_lower for word in ["рецепт", "приготовить", "блюдо", "еда", "готовка", "кулинария"]):
                 platform = "youtube"
                 search_query = text
                 platform_name = "YouTube"
                 link_text = f"🔗 [Смотреть рецепты на YouTube](https://www.youtube.com/results?search_query={text.replace(' ', '+')})"
-            # Если явно просят Rutube
             elif "rutube" in text_lower:
                 platform = "rutube"
                 search_query = text
@@ -823,7 +750,6 @@ async def webhook(request: Request):
                 )
                 packed = packed_response.choices[0].message.content
                 
-                # Если ссылка есть, но DeepSeek её не добавил — принудительно вставляем
                 if link_text and "http" not in packed:
                     packed += f"\n\n{link_text}"
                 
@@ -887,7 +813,9 @@ async def webhook(request: Request):
                 await send_message(user_id, f"😊 Не нашёл «{text}». Проверь в Яндексе или 2ГИС.")
             return JSONResponse({"ok": True})
 
-        # Обычный диалог
+        # ============================================================
+        # ОБЫЧНЫЙ ДИАЛОГ — КАК Я В ЭТОМ ЧАТЕ
+        # ============================================================
         history = get_all_history(user_id)
         result = await deepseek_interview(user_id, text, history)
         reply = result.get("reply", "😅 Не понял.")
