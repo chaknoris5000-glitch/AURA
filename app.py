@@ -245,17 +245,11 @@ def extract_facts(found_messages, text):
 # РАСПОЗНАВАНИЕ КАРТИНОК ЧЕРЕЗ DeepSeek Vision
 # ============================================================
 async def recognize_image_with_deepseek(image_url: str) -> str:
-    """
-    Распознаёт картинку через DeepSeek-V4-Flash-Vision-Exp.
-    Скачиваем картинку и передаём через base64.
-    """
     try:
-        # Скачиваем картинку с авторизацией
         response = requests.get(image_url, timeout=30)
         if response.status_code != 200:
             return "⚠️ Не удалось загрузить изображение."
         
-        # Конвертируем в base64
         image_base64 = base64.b64encode(response.content).decode('utf-8')
         
         prompt = """
@@ -591,7 +585,7 @@ async def webhook(request: Request):
         text = msg.get("text", "")
 
         # ============================================================
-        # ОБРАБОТКА КАРТИНОК
+        # ОБРАБОТКА КАРТИНОК (ИСПРАВЛЕННАЯ)
         # ============================================================
         if "photo" in msg or "document" in msg:
             if "photo" in msg:
@@ -607,11 +601,14 @@ async def webhook(request: Request):
                 if file_resp.status_code == 200 and file_resp.json().get("ok"):
                     image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_resp.json()['result']['file_path']}"
                     
-                    # Распознаём через DeepSeek Vision
                     recognized_text = await recognize_image_with_deepseek(image_url)
                     
-                    await send_message(user_id, f"🖼️ **Распознано:**\n\n{recognized_text}")
-                    save_message(user_id, "assistant", f"Распознано: {recognized_text[:200]}...")
+                    if recognized_text and "⚠️" not in recognized_text:
+                        await send_message(user_id, f"🖼️ **Распознано:**\n\n{recognized_text}")
+                    else:
+                        await send_message(user_id, "🖼️ Не удалось распознать изображение. Попробуйте другое фото.")
+                    
+                    save_message(user_id, "assistant", f"Распознано: {recognized_text[:200] if recognized_text else 'пусто'}")
                 else:
                     await send_message(user_id, "⚠️ Не удалось загрузить изображение.")
             except Exception as e:
