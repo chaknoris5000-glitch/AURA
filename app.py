@@ -23,9 +23,6 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# ============================================================
-# КОНФИГУРАЦИЯ
-# ============================================================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
@@ -54,9 +51,6 @@ if SUPABASE_URL and SUPABASE_KEY:
 app = FastAPI()
 user_states = {}
 
-# ============================================================
-# ЗАЩИТА ОТ ПОВТОРНЫХ ЗАПРОСОВ
-# ============================================================
 user_last_requests = {}
 
 def get_request_hash(user_id, text):
@@ -71,9 +65,6 @@ def is_duplicate(user_id, text):
     user_last_requests[user_id].append(hash_val)
     return False
 
-# ============================================================
-# КЕШИРОВАНИЕ
-# ============================================================
 agent_cache = {}
 
 def get_cached_response(hash_val):
@@ -88,9 +79,6 @@ def get_cached_response(hash_val):
 def cache_response(hash_val, response):
     agent_cache[hash_val] = {"response": response, "timestamp": datetime.now()}
 
-# ============================================================
-# ПАМЯТЬ
-# ============================================================
 def save_fact(user_id, key, value):
     if not supabase:
         return
@@ -148,9 +136,6 @@ def save_portrait_field(user_id, field, value):
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения портрета: {e}")
 
-# ============================================================
-# ИСТОРИЯ
-# ============================================================
 def save_message(user_id, role, content):
     if not supabase:
         return
@@ -191,9 +176,6 @@ def clear_user_history(user_id):
     except Exception as e:
         logger.error(f"❌ Ошибка очистки истории: {e}")
 
-# ============================================================
-# УНИВЕРСАЛЬНЫЙ ПОИСК В ИСТОРИИ
-# ============================================================
 def find_in_history(history, text):
     if not history:
         return []
@@ -241,14 +223,11 @@ def extract_facts(found_messages, text):
     logger.info(f"📌 Извлечено {len(parts)} сообщений")
     return result
 
-# ============================================================
-# РАСПОЗНАВАНИЕ КАРТИНОК ЧЕРЕЗ DeepSeek Vision
-# ============================================================
 async def recognize_image_with_deepseek(image_url: str) -> str:
     try:
         response = requests.get(image_url, timeout=30)
         if response.status_code != 200:
-            return None
+            return "⚠️ Не удалось загрузить изображение."
         
         image_base64 = base64.b64encode(response.content).decode('utf-8')
         
@@ -291,16 +270,13 @@ async def recognize_image_with_deepseek(image_url: str) -> str:
         )
         
         result = response.choices[0].message.content
-        logger.info(f"🖼️ DeepSeek Vision распознал картинку: {result[:50] if result else 'пусто'}...")
+        logger.info(f"🖼️ DeepSeek Vision распознал картинку")
         return result
         
     except Exception as e:
         logger.error(f"❌ Ошибка распознавания через DeepSeek Vision: {e}")
-        return None
+        return "⚠️ Не удалось распознать изображение. Попробуйте ещё раз."
 
-# ============================================================
-# РАСПОЗНАВАНИЕ ГОЛОСА
-# ============================================================
 def transcribe_audio(audio_url):
     try:
         resp = requests.get(audio_url, timeout=30)
@@ -321,9 +297,6 @@ def transcribe_audio(audio_url):
         logger.error(f"❌ Ошибка распознавания: {e}")
         return None
 
-# ============================================================
-# ВЫЗОВ АГЕНТОВ ЯНДЕКСА
-# ============================================================
 def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_city: str = "", budget: str = "") -> str:
     hash_val = hashlib.md5(f"{agent_id}:{user_text}:{user_name}:{user_city}:{budget}".encode()).hexdigest()
     cached = get_cached_response(hash_val)
@@ -356,9 +329,6 @@ def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_c
         logger.error(f"❌ Ошибка агента Яндекса ({agent_id}): {e}")
         return ""
 
-# ============================================================
-# ОПРЕДЕЛЕНИЕ ПЛАТФОРМЫ
-# ============================================================
 def detect_content_platform(text: str) -> dict:
     try:
         prompt = f"""
@@ -389,13 +359,8 @@ def detect_content_platform(text: str) -> dict:
         logger.error(f"❌ Ошибка определения платформы: {e}")
         return {"platform": "yandex_video", "search_query": text}
 
-# ============================================================
-# ФОРМИРОВАНИЕ ССЫЛОК
-# ============================================================
 def get_platform_link(platform: str, query: str) -> str:
-    """Формирует ссылку для поиска на нужной платформе"""
     query_encoded = query.replace(' ', '+')
-    
     if platform == "yandex_video":
         return f"https://yandex.ru/video/search?text={query_encoded}"
     elif platform == "youtube":
@@ -413,35 +378,20 @@ def get_platform_link(platform: str, query: str) -> str:
     else:
         return None
 
-# ============================================================
-# ТОЧНОЕ ВРЕМЯ
-# ============================================================
 def get_time_for_city(city: str = "Москва") -> str:
     timezone_map = {
-        "москва": "Europe/Moscow",
-        "белово": "Asia/Novokuznetsk",
-        "новокузнецк": "Asia/Novokuznetsk",
-        "кемерово": "Asia/Novokuznetsk",
-        "новосибирск": "Asia/Novosibirsk",
-        "екатеринбург": "Asia/Yekaterinburg",
-        "казань": "Europe/Moscow",
-        "санкт-петербург": "Europe/Moscow",
-        "владивосток": "Asia/Vladivostok",
-        "иркутск": "Asia/Irkutsk",
-        "красноярск": "Asia/Krasnoyarsk",
-        "омск": "Asia/Omsk",
-        "самара": "Europe/Samara",
-        "калининград": "Europe/Kaliningrad",
-        "сочи": "Europe/Moscow",
-        "ростов-на-дону": "Europe/Moscow",
-        "краснодар": "Europe/Moscow",
-        "воронеж": "Europe/Moscow",
-        "нижний новгород": "Europe/Moscow",
-        "челябинск": "Asia/Yekaterinburg",
-        "уфа": "Asia/Yekaterinburg",
-        "пермь": "Asia/Yekaterinburg",
-        "тюмень": "Asia/Yekaterinburg",
-        "томск": "Asia/Novokuznetsk",
+        "москва": "Europe/Moscow", "белово": "Asia/Novokuznetsk",
+        "новокузнецк": "Asia/Novokuznetsk", "кемерово": "Asia/Novokuznetsk",
+        "новосибирск": "Asia/Novosibirsk", "екатеринбург": "Asia/Yekaterinburg",
+        "казань": "Europe/Moscow", "санкт-петербург": "Europe/Moscow",
+        "владивосток": "Asia/Vladivostok", "иркутск": "Asia/Irkutsk",
+        "красноярск": "Asia/Krasnoyarsk", "омск": "Asia/Omsk",
+        "самара": "Europe/Samara", "калининград": "Europe/Kaliningrad",
+        "сочи": "Europe/Moscow", "ростов-на-дону": "Europe/Moscow",
+        "краснодар": "Europe/Moscow", "воронеж": "Europe/Moscow",
+        "нижний новгород": "Europe/Moscow", "челябинск": "Asia/Yekaterinburg",
+        "уфа": "Asia/Yekaterinburg", "пермь": "Asia/Yekaterinburg",
+        "тюмень": "Asia/Yekaterinburg", "томск": "Asia/Novokuznetsk",
         "барнаул": "Asia/Novokuznetsk",
     }
     tz_name = timezone_map.get(city.lower(), "Europe/Moscow")
@@ -449,18 +399,12 @@ def get_time_for_city(city: str = "Москва") -> str:
     now = datetime.now(tz)
     return now.strftime("%H:%M")
 
-# ============================================================
-# 2ГИС
-# ============================================================
 async def search_organization(query: str, city: str = "Белово") -> dict:
     if not GIS_API_KEY:
         return {"error": "Нет ключа 2ГИС"}
     url = "https://catalog.api.2gis.com/3.0/items"
     params = {
-        "q": query,
-        "city_name": city,
-        "type": "branch",
-        "sort": "rating",
+        "q": query, "city_name": city, "type": "branch", "sort": "rating",
         "page_size": 1,
         "fields": "items.name,items.address,items.phones,items.site,items.schedule,items.rating,items.reviews_count",
         "key": GIS_API_KEY
@@ -486,9 +430,6 @@ async def search_organization(query: str, city: str = "Белово") -> dict:
         logger.error(f"❌ Ошибка 2ГИС: {e}")
         return {"error": str(e)}
 
-# ============================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# ============================================================
 async def send_typing(chat_id):
     try:
         requests.post(
@@ -513,9 +454,6 @@ async def send_message(chat_id, text):
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
 
-# ============================================================
-# ОСНОВНАЯ ЛОГИКА
-# ============================================================
 async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
     user_name = get_fact(user_id, "name")
     user_city = get_fact(user_id, "city")
@@ -600,9 +538,6 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
         logger.error(f"❌ Ошибка DeepSeek: {e}")
         return {"reply": "😅 Не понял, перефразируй.", "score": 0}
 
-# ============================================================
-# WEBHOOK
-# ============================================================
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
@@ -615,7 +550,7 @@ async def webhook(request: Request):
         text = msg.get("text", "")
 
         # ============================================================
-        # ОБРАБОТКА КАРТИНОК (РЕАЛЬНОЕ ИСПРАВЛЕНИЕ)
+        # ФОТО — ГАРАНТИРОВАННАЯ ОТПРАВКА
         # ============================================================
         if "photo" in msg or "document" in msg:
             if "photo" in msg:
@@ -633,23 +568,22 @@ async def webhook(request: Request):
                     
                     recognized_text = await recognize_image_with_deepseek(image_url)
                     
-                    # ПРИНУДИТЕЛЬНО отправляем ответ
+                    # ВСЕГДА ОТПРАВЛЯЕМ ОТВЕТ
                     if recognized_text:
                         await send_message(user_id, f"🖼️ **Распознано:**\n\n{recognized_text}")
                     else:
-                        await send_message(user_id, "🖼️ Не удалось распознать изображение. Попробуйте другое фото.")
+                        await send_message(user_id, "🖼️ Не удалось распознать изображение.")
                     
-                    # ВСЕГДА сохраняем в историю
                     save_message(user_id, "assistant", f"Распознано: {recognized_text[:200] if recognized_text else 'пусто'}")
                 else:
                     await send_message(user_id, "⚠️ Не удалось загрузить изображение.")
             except Exception as e:
                 logger.error(f"❌ Ошибка обработки медиа: {e}")
-                await send_message(user_id, "⚠️ Не удалось распознать изображение.")
+                await send_message(user_id, "⚠️ Ошибка распознавания")
             return JSONResponse({"ok": True})
 
         # ============================================================
-        # ОБРАБОТКА ГОЛОСА
+        # ГОЛОС
         # ============================================================
         if "voice" in msg:
             file_id = msg["voice"]["file_id"]
@@ -662,14 +596,14 @@ async def webhook(request: Request):
                     if text:
                         save_message(user_id, "user", text)
                     else:
-                        await send_message(user_id, "⚠️ Не удалось распознать голос. Попробуй ещё раз.")
+                        await send_message(user_id, "⚠️ Не удалось распознать голос.")
                         return JSONResponse({"ok": True})
                 else:
                     await send_message(user_id, "⚠️ Ошибка загрузки голосового сообщения.")
                     return JSONResponse({"ok": True})
             except Exception as e:
                 logger.error(f"❌ Ошибка голоса: {e}")
-                await send_message(user_id, "⚠️ Ошибка обработки голоса. Попробуй написать!")
+                await send_message(user_id, "⚠️ Ошибка обработки голоса.")
                 return JSONResponse({"ok": True})
         
         if not text:
@@ -703,7 +637,7 @@ async def webhook(request: Request):
 
         if text.lower() in ["/clear", "/reset", "сброс", "забудь", "хватит"]:
             clear_user_history(user_id)
-            await send_message(user_id, "✅ История очищена. Начинаем с чистого листа.")
+            await send_message(user_id, "✅ История очищена.")
             return JSONResponse({"ok": True})
 
         # ============================================================
@@ -756,7 +690,7 @@ async def webhook(request: Request):
                 return JSONResponse({"ok": True})
 
         # ============================================================
-        # ОСНОВНАЯ ЛОГИКА С ПОИСКОМ
+        # ПОИСК
         # ============================================================
         user_name = get_fact(user_id, "name") or "Гость"
         user_city = get_fact(user_id, "city") or "Москва"
@@ -772,13 +706,11 @@ async def webhook(request: Request):
         if any(word in text.lower() for word in content_triggers):
             text_lower = text.lower()
             
-            # Если это рецепт — ищем на YouTube
             if any(word in text_lower for word in ["рецепт", "приготовить", "блюдо", "еда", "готовка", "кулинария"]):
                 platform = "youtube"
                 search_query = text
                 platform_name = "YouTube"
                 link_text = f"🔗 [Смотреть рецепты на YouTube](https://www.youtube.com/results?search_query={text.replace(' ', '+')})"
-            # Если явно просят Rutube
             elif "rutube" in text_lower:
                 platform = "rutube"
                 search_query = text
@@ -805,13 +737,13 @@ async def webhook(request: Request):
 Перед тобой сырой ответ поискового агента. Преврати его в красивый, живой ответ.
 
 ПРАВИЛА:
-1. **ОТВЕЧАЙ КОРОТКО:** максимум 3–4 предложения.
-2. **СТРУКТУРА:** разбивай ответ на 2–3 абзаца.
-3. **МАРКЕРЫ:** ✅ — готово, 💎 — лучший вариант.
-4. **ЖИРНЫЙ ШРИФТ:** выделяй цены, даты.
-5. **ДУША:** лёгкая ирония, эмпатия.
-6. **ЭМОДЗИ:** 1–2 по теме.
-7. **ОБЯЗАТЕЛЬНО добавь ссылку в конце ответа:** {link_text if link_text else ""}
+1. ОТВЕЧАЙ КОРОТКО: максимум 3–4 предложения.
+2. СТРУКТУРА: разбивай ответ на 2–3 абзаца.
+3. МАРКЕРЫ: ✅ — готово, 💎 — лучший вариант.
+4. ЖИРНЫЙ ШРИФТ: выделяй цены, даты.
+5. ДУША: лёгкая ирония, эмпатия.
+6. ЭМОДЗИ: 1–2 по теме.
+7. ОБЯЗАТЕЛЬНО добавь ссылку в конце ответа: {link_text if link_text else ""}
 
 Имя пользователя: {user_name}
 
@@ -829,7 +761,6 @@ async def webhook(request: Request):
                 )
                 packed = packed_response.choices[0].message.content
                 
-                # Если ссылка есть, но DeepSeek её не добавил — принудительно вставляем
                 if link_text and "http" not in packed:
                     packed += f"\n\n{link_text}"
                 
@@ -856,12 +787,12 @@ async def webhook(request: Request):
 Перед тобой сырой ответ. Преврати его в красивый, живой ответ.
 
 ПРАВИЛА:
-1. **ОТВЕЧАЙ КОРОТКО:** максимум 3–4 предложения.
-2. **СТРУКТУРА:** разбивай ответ на 2–3 абзаца.
-3. **МАРКЕРЫ:** ✅ — готово, 💎 — лучший вариант.
-4. **ЖИРНЫЙ ШРИФТ:** выделяй цены, даты.
-5. **ДУША:** лёгкая ирония, эмпатия.
-6. **ЭМОДЗИ:** 1–2 по теме.
+1. ОТВЕЧАЙ КОРОТКО: максимум 3–4 предложения.
+2. СТРУКТУРА: разбивай ответ на 2–3 абзаца.
+3. МАРКЕРЫ: ✅ — готово, 💎 — лучший вариант.
+4. ЖИРНЫЙ ШРИФТ: выделяй цены, даты.
+5. ДУША: лёгкая ирония, эмпатия.
+6. ЭМОДЗИ: 1–2 по теме.
 
 Имя пользователя: {user_name}
 
