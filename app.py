@@ -150,7 +150,7 @@ def save_portrait_field(user_id, field, value):
         logger.error(f"❌ Ошибка сохранения портрета: {e}")
 
 # ============================================================
-# ИСТОРИЯ (ЗАГРУЖАЕМ ВСЁ)
+# ИСТОРИЯ (ЗАГРУЖАЕМ ВСЁ — ИСПРАВЛЕННАЯ ВЕРСИЯ)
 # ============================================================
 def save_message(user_id, role, content):
     if not supabase:
@@ -177,7 +177,7 @@ def get_all_history(user_id):
         res = supabase.table("history")\
             .select("role, content, created_at")\
             .eq("user_id", user_id)\
-            .order("created_at", asc=True)\
+            .order("created_at")\
             .execute()
         if res.data:
             logger.info(f"📚 Загружена ВСЯ история: {len(res.data)} сообщений")
@@ -197,17 +197,12 @@ def clear_user_history(user_id):
         logger.error(f"❌ Ошибка очистки истории: {e}")
 
 # ============================================================
-# ПОИСК В ИСТОРИИ (как я ищу в этом чате)
+# ПОИСК В ИСТОРИИ
 # ============================================================
 def find_in_history(history, text):
-    """
-    Ищет в ПОЛНОЙ истории сообщения, релевантные запросу.
-    Возвращает найденные сообщения.
-    """
     if not history:
         return []
     
-    # Извлекаем ключевые слова
     stop_words = ["напомни", "скажи", "что", "я", "говорил", "про", "о", "в", "и", "с", "на", "за", "по", "из", "от", "для", "мне", "ты", "мы", "они", "он", "она", "оно", "вот", "этот", "эта", "это", "эти", "который", "которая", "которые", "которое"]
     keywords = []
     for word in text.lower().split():
@@ -219,7 +214,6 @@ def find_in_history(history, text):
     
     logger.info(f"🔍 Ищем в ПОЛНОЙ истории по ключевым словам: {keywords}")
     
-    # Ищем сообщения
     found = []
     for msg in history:
         content_lower = msg['content'].lower()
@@ -232,19 +226,14 @@ def find_in_history(history, text):
     return found
 
 # ============================================================
-# ИЗВЛЕЧЕНИЕ ФАКТОВ (как я это делаю)
+# ИЗВЛЕЧЕНИЕ ФАКТОВ
 # ============================================================
 def extract_facts(found_messages, text):
-    """
-    Извлекает из найденных сообщений конкретные факты.
-    Возвращает структурированный ответ.
-    """
     if not found_messages:
         return None
     
     text_lower = text.lower()
     
-    # Определяем, что ищем
     is_clinic = any(word in text_lower for word in ["клиник", "больниц", "медцентр", "стоматолог", "терапевт"])
     is_address = any(word in text_lower for word in ["адрес", "улиц", "находит", "расположен"])
     is_haval = "хавал" in text_lower or "haval" in text_lower
@@ -257,34 +246,28 @@ def extract_facts(found_messages, text):
         content = msg['content']
         role = "Пользователь" if msg['role'] == 'user' else "AURA"
         
-        # Если ищем клинику
         if is_clinic and ("клиник" in content.lower() or "больниц" in content.lower()):
             parts.append(f"{role}: {content[:300]}")
             continue
         
-        # Если ищем адрес
         if is_address:
             address_pattern = r'(ул\.?\s*[А-Яа-яёЁ\s\-\.]+,\s*\d+[А-Яа-яёЁ]?)|([А-Яа-яёЁ][а-яёЁ]+\s+ул\.?\s*[А-Яа-яёЁ\s\-\.]+,\s*\d+[А-Яа-яёЁ]?)'
             if re.search(address_pattern, content):
                 parts.append(f"{role}: {content[:300]}")
                 continue
         
-        # Если ищем Хавал
         if is_haval and ("хавал" in content.lower() or "haval" in content.lower()):
             parts.append(f"{role}: {content[:300]}")
             continue
         
-        # Если ищем фильм
         if is_film and ("фильм" in content.lower() or "кино" in content.lower() or "сериал" in content.lower()):
             parts.append(f"{role}: {content[:300]}")
             continue
         
-        # Если ищем рецепт
         if is_recipe and ("рецепт" in content.lower() or "блюдо" in content.lower() or "еда" in content.lower()):
             parts.append(f"{role}: {content[:300]}")
             continue
         
-        # Общее совпадение
         parts.append(f"{role}: {content[:200]}")
     
     if not parts:
@@ -559,7 +542,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА (КАК Я В ЭТОМ ЧАТЕ)
+# ОСНОВНАЯ ЛОГИКА
 # ============================================================
 async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
     user_name = get_fact(user_id, "name")
@@ -583,14 +566,7 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
         if parts:
             portrait_context = "ПОРТРЕТ: " + ", ".join(parts) + "."
 
-    # ============================================================
-    # 1. Ищем в ПОЛНОЙ истории
-    # ============================================================
     found = find_in_history(history, text)
-    
-    # ============================================================
-    # 2. Извлекаем факты
-    # ============================================================
     facts = extract_facts(found, text) if found else None
     
     if facts:
@@ -598,9 +574,6 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
     else:
         logger.info("📌 ФАКТЫ НЕ НАЙДЕНЫ")
 
-    # ============================================================
-    # 3. Формируем промпт
-    # ============================================================
     if facts:
         prompt = f"""
 Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
@@ -745,7 +718,6 @@ async def webhook(request: Request):
         # ОСНОВНАЯ ЛОГИКА
         save_message(user_id, "user", text)
 
-        # ЗАГРУЖАЕМ ВСЮ ИСТОРИЮ (без лимита)
         history = get_all_history(user_id)
         logger.info(f"📚 Загружена ПОЛНАЯ история для user_id {user_id}: {len(history)} сообщений")
 
