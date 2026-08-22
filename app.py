@@ -484,6 +484,14 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
+# ФОРМИРОВАНИЕ ССЫЛКИ ДЛЯ ФИЛЬМОВ
+# ============================================================
+def get_film_link(query: str) -> str:
+    """Формирует ссылку на Яндекс.Видео для поиска фильма"""
+    query_encoded = query.replace(' ', '+')
+    return f"https://yandex.ru/video/search?text={query_encoded}"
+
+# ============================================================
 # ОСНОВНАЯ ЛОГИКА
 # ============================================================
 async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
@@ -569,14 +577,6 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
     except Exception as e:
         logger.error(f"❌ Ошибка DeepSeek: {e}")
         return {"reply": "😅 Не понял, перефразируй.", "score": 0}
-
-# ============================================================
-# ФОРМИРОВАНИЕ ССЫЛКИ ДЛЯ ФИЛЬМОВ
-# ============================================================
-def get_film_link(query: str) -> str:
-    """Формирует ссылку на Яндекс.Видео для поиска фильма"""
-    query_encoded = query.replace(' ', '+')
-    return f"https://yandex.ru/video/search?text={query_encoded}"
 
 # ============================================================
 # WEBHOOK
@@ -754,13 +754,14 @@ async def webhook(request: Request):
             raw_result = call_yandex_agent(AGENT_SEARCH_ID, full_query, user_name, user_city)
             
             # Формируем ссылку
-            if "фильм" in text.lower() or "сериал" in text.lower() or "кино" in text.lower():
+            film_link = None
+            if any(word in text.lower() for word in ["фильм", "сериал", "кино", "мульт", "клип", "трейлер"]):
                 film_link = get_film_link(search_query)
-            else:
-                film_link = None
+                logger.info(f"🔗 Ссылка на фильм: {film_link}")
             
             if raw_result:
-                packed_prompt = f"""
+                if film_link:
+                    packed_prompt = f"""
 Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
 
 Перед тобой сырой ответ поискового агента. Преврати его в красивый, живой ответ.
@@ -772,7 +773,28 @@ async def webhook(request: Request):
 4. **ЖИРНЫЙ ШРИФТ:** выделяй цены, даты.
 5. **ДУША:** лёгкая ирония, эмпатия.
 6. **ЭМОДЗИ:** 1–2 по теме.
-{f"7. **ССЫЛКА:** {film_link}" if film_link else ""}
+7. **ОБЯЗАТЕЛЬНО добавь ссылку в конце ответа:** 🔗 [Смотреть на Яндекс.Видео]({film_link})
+
+Имя пользователя: {user_name}
+
+Сырой ответ:
+{raw_result}
+
+Твой ответ:
+"""
+                else:
+                    packed_prompt = f"""
+Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
+
+Перед тобой сырой ответ поискового агента. Преврати его в красивый, живой ответ.
+
+ПРАВИЛА:
+1. **ОТВЕЧАЙ КОРОТКО:** максимум 3–4 предложения.
+2. **СТРУКТУРА:** разбивай ответ на 2–3 абзаца.
+3. **МАРКЕРЫ:** ✅ — готово, 💎 — лучший вариант.
+4. **ЖИРНЫЙ ШРИФТ:** выделяй цены, даты.
+5. **ДУША:** лёгкая ирония, эмпатия.
+6. **ЭМОДЗИ:** 1–2 по теме.
 
 Имя пользователя: {user_name}
 
@@ -790,9 +812,9 @@ async def webhook(request: Request):
                 )
                 packed = packed_response.choices[0].message.content
                 
-                # Если есть ссылка, добавляем её в конец
+                # Если ссылка есть, но DeepSeek её не добавил — принудительно вставляем
                 if film_link and "http" not in packed:
-                    packed += f"\n\n🔗 [Искать на Яндекс.Видео]({film_link})"
+                    packed += f"\n\n🔗 [Смотреть на Яндекс.Видео]({film_link})"
                 
                 await send_message(user_id, packed)
                 save_message(user_id, "assistant", packed)
