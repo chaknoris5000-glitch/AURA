@@ -56,42 +56,6 @@ app = FastAPI()
 user_states = {}
 
 # ============================================================
-# СЛОВАРЬ СИНОНИМОВ ДЛЯ РАСШИРЕННОГО ПОИСКА
-# ============================================================
-SYNONYMS = {
-    "эксперт": ["эксперт", "специалист", "профессионал", "консультант", "мастер"],
-    "юрист": ["юрист", "адвокат", "правовой", "закон", "нотариус"],
-    "психолог": ["психолог", "психиатр", "терапевт", "коуч", "консультант"],
-    "врач": ["врач", "доктор", "медик", "терапевт", "хирург"],
-    "фильм": ["фильм", "кино", "сериал", "клип", "трейлер"],
-    "рецепт": ["рецепт", "блюдо", "еда", "кулинария", "готовка"],
-    "клиника": ["клиника", "больница", "медцентр", "поликлиника", "лаборатория"]
-}
-
-def expand_keywords(text):
-    """
-    Расширяет запрос синонимами для более широкого поиска.
-    """
-    words = text.lower().split()
-    expanded = set()
-    
-    for word in words:
-        # Добавляем само слово
-        expanded.add(word)
-        # Добавляем синонимы
-        for key, synonyms in SYNONYMS.items():
-            if word in synonyms or word == key:
-                for syn in synonyms:
-                    expanded.add(syn)
-    
-    # Убираем стоп-слова
-    stop_words = ["напомни", "скажи", "что", "я", "говорил", "про", "о", "в", "и", "с", "на", "за", "по", "из", "от", "для", "мне", "ты", "мы", "они", "он", "она", "оно"]
-    result = [w for w in expanded if len(w) > 2 and w not in stop_words]
-    
-    logger.info(f"🔍 Расширенные ключевые слова: {result}")
-    return result
-
-# ============================================================
 # ЗАЩИТА ОТ ПОВТОРНЫХ ЗАПРОСОВ
 # ============================================================
 user_last_requests = {}
@@ -126,7 +90,7 @@ def cache_response(hash_val, response):
     agent_cache[hash_val] = {"response": response, "timestamp": datetime.now()}
 
 # ============================================================
-# ПАМЯТЬ
+# ПАМЯТЬ (ТВОЯ — НЕ ТРОГАТЬ)
 # ============================================================
 def save_fact(user_id, key, value):
     if not supabase:
@@ -186,7 +150,7 @@ def save_portrait_field(user_id, field, value):
         logger.error(f"❌ Ошибка сохранения портрета: {e}")
 
 # ============================================================
-# ИСТОРИЯ
+# ИСТОРИЯ (ТВОЯ — НЕ ТРОГАТЬ)
 # ============================================================
 def save_message(user_id, role, content):
     if not supabase:
@@ -231,46 +195,40 @@ def clear_user_history(user_id):
         logger.error(f"❌ Ошибка очистки истории: {e}")
 
 # ============================================================
-# НОВАЯ ЛОГИКА ПОИСКА В ИСТОРИИ (С РАСШИРЕННЫМИ КЛЮЧЕВЫМИ СЛОВАМИ)
+# ПОИСК В ИСТОРИИ ПО КЛЮЧЕВЫМ СЛОВАМ (ТВОЯ ЛОГИКА)
 # ============================================================
-def find_context_in_history(history, text):
+def find_facts_in_history(history, text):
     """
-    Ищет в истории диалог, связанный с запросом пользователя.
-    Использует расширенные ключевые слова (синонимы).
+    Ищет в истории сообщения по ключевым словам из запроса.
+    Возвращает найденные сообщения для передачи в DeepSeek.
     """
     if not history:
-        return None
+        return []
     
-    # Расширяем ключевые слова
-    keywords = expand_keywords(text)
+    # Извлекаем ключевые слова из запроса
+    stop_words = ["напомни", "скажи", "что", "я", "говорил", "про", "о", "в", "и", "с", "на", "за", "по", "из", "от", "для", "мне", "ты", "мы", "они", "он", "она", "оно", "вот", "этот", "эта", "это", "эти", "который", "которая", "которые", "которое"]
+    keywords = []
+    for word in text.lower().split():
+        if len(word) > 2 and word not in stop_words:
+            keywords.append(word)
     
     if not keywords:
         logger.info("📌 Нет ключевых слов для поиска")
-        return None
+        return []
+    
+    logger.info(f"🔍 Ищем в истории по ключевым словам: {keywords}")
     
     # Ищем сообщения, содержащие ключевые слова
-    found_messages = []
+    found = []
     for msg in history:
         content_lower = msg['content'].lower()
         for keyword in keywords:
             if keyword in content_lower:
-                found_messages.append(msg)
+                found.append(msg)
                 break
     
-    if not found_messages:
-        logger.info("📌 Релевантных сообщений не найдено")
-        return None
-    
-    # Собираем ответы
-    answer_parts = []
-    for msg in found_messages[-5:]:
-        role = "Пользователь" if msg['role'] == 'user' else "AURA"
-        content = msg['content'][:500]
-        answer_parts.append(f"{role}: {content}")
-    
-    result = "\n\n".join(answer_parts)
-    logger.info(f"📌 Найдено {len(found_messages)} релевантных сообщений")
-    return result
+    logger.info(f"📌 Найдено {len(found)} сообщений в истории по ключевым словам")
+    return found
 
 # ============================================================
 # РАСПОЗНАВАНИЕ ГОЛОСА
@@ -334,7 +292,7 @@ def recognize_image(image_url: str) -> str:
         return "⚠️ Ошибка при распознавании изображения."
 
 # ============================================================
-# ВЫЗОВ АГЕНТОВ ЯНДЕКСА
+# ВЫЗОВ АГЕНТОВ ЯНДЕКСА (ТВОЙ — НЕ ТРОГАТЬ)
 # ============================================================
 def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_city: str = "", budget: str = "") -> str:
     hash_val = hashlib.md5(f"{agent_id}:{user_text}:{user_name}:{user_city}:{budget}".encode()).hexdigest()
@@ -369,7 +327,7 @@ def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_c
         return ""
 
 # ============================================================
-# УПАКОВКА ОТВЕТА
+# УПАКОВКА ОТВЕТА (ТВОЯ — НЕ ТРОГАТЬ)
 # ============================================================
 async def pack_response(raw_text: str, user_name: str = "", user_city: str = "") -> str:
     try:
@@ -539,7 +497,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА
+# ОСНОВНАЯ ЛОГИКА (ТВОЯ — НЕ ТРОГАТЬ, ДОБАВЛЕН ПОИСК В ИСТОРИИ)
 # ============================================================
 async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
     user_name = get_fact(user_id, "name")
@@ -564,15 +522,21 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
             portrait_context = "ПОРТРЕТ: " + ", ".join(parts) + "."
 
     # ============================================================
-    # ПОИСК В ИСТОРИИ С РАСШИРЕННЫМИ КЛЮЧЕВЫМИ СЛОВАМИ
+    # ПОИСК В ИСТОРИИ ПО КЛЮЧЕВЫМ СЛОВАМ
     # ============================================================
-    context = find_context_in_history(history, text)
+    found_messages = find_facts_in_history(history, text)
     
-    if context:
-        logger.info(f"📌 Найден контекст в истории: {context[:200]}...")
-    else:
-        logger.info("📌 Контекст в истории не найден")
+    history_context = ""
+    if found_messages:
+        context_parts = []
+        for msg in found_messages[-10:]:  # Берём последние 10 найденных
+            role = "Пользователь" if msg['role'] == 'user' else "AURA"
+            content = msg['content'][:500]
+            context_parts.append(f"{role}: {content}")
+        history_context = "\n\n".join(context_parts)
+        logger.info(f"📌 Найдены сообщения в истории: {len(found_messages)} шт.")
 
+    # Основная история (последние 10 сообщений)
     history_text = ""
     if history:
         history_lines = []
@@ -599,9 +563,9 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
 {city_instruction}
 
 """ + (f"""
-КОНТЕКСТ ИЗ ИСТОРИИ (найден по ключевым словам и синонимам):
-{context}
-""" if context else "")
+НАЙДЕННЫЕ СООБЩЕНИЯ В ИСТОРИИ (по твоему запросу):
+{history_context}
+""" if history_context else "")
 
     prompt += f"""
 ИСТОРИЯ ДИАЛОГА (последние 10 сообщений):
@@ -644,7 +608,9 @@ async def webhook(request: Request):
         user_id = msg["from"]["id"]
         text = msg.get("text", "")
 
+        # ============================================================
         # МЕДИА
+        # ============================================================
         if "photo" in msg or "document" in msg:
             if "photo" in msg:
                 file_id = msg["photo"][-1]["file_id"]
@@ -692,12 +658,16 @@ async def webhook(request: Request):
         if not text:
             return JSONResponse({"ok": True})
 
+        # ============================================================
         # ЗАЩИТА ОТ ПОВТОРОВ
+        # ============================================================
         if is_duplicate(user_id, text):
             logger.warning(f"⚠️ Повторный запрос от {user_id}: {text}")
             return JSONResponse({"ok": True})
 
+        # ============================================================
         # ВРЕМЯ
+        # ============================================================
         time_phrases = ["сколько время", "который час", "точное время", "часы покажи", "время сейчас", "какое время", "сколько сейчас время", "который сейчас час"]
         if any(phrase in text.lower() for phrase in time_phrases):
             user_city = get_fact(user_id, "city") or "Москва"
@@ -705,7 +675,9 @@ async def webhook(request: Request):
             await send_message(user_id, f"⏰ Сейчас {get_time_for_city(user_city)} по местному времени ({user_city}).")
             return JSONResponse({"ok": True})
 
+        # ============================================================
         # КОМАНДЫ
+        # ============================================================
         if text == "/start":
             await send_typing(user_id)
             await send_message(user_id, "Привет. Я AURA. Если ты здесь — значит, ты уже не просто ищешь, а хочешь, чтобы искали за тебя. Напиши, что нужно — и я покажу, на что способен.")
@@ -717,7 +689,9 @@ async def webhook(request: Request):
             await send_message(user_id, "✅ История очищена. Начинаем с чистого листа.")
             return JSONResponse({"ok": True})
 
+        # ============================================================
         # ОСНОВНАЯ ЛОГИКА
+        # ============================================================
         save_message(user_id, "user", text)
 
         history = get_recent_history(user_id, limit=50)
@@ -764,7 +738,9 @@ async def webhook(request: Request):
                 await send_message(user_id, "А подскажи, в каком городе ты живёшь?")
                 return JSONResponse({"ok": True})
 
+        # ============================================================
         # ОСНОВНАЯ ЛОГИКА С ПОИСКОМ
+        # ============================================================
         user_name = get_fact(user_id, "name") or "Гость"
         user_city = get_fact(user_id, "city") or "Москва"
         budget = get_fact(user_id, "budget_travel") or ""
