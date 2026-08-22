@@ -90,7 +90,7 @@ def cache_response(hash_val, response):
     agent_cache[hash_val] = {"response": response, "timestamp": datetime.now()}
 
 # ============================================================
-# ПАМЯТЬ (ТВОЯ — НЕ ТРОГАТЬ)
+# ПАМЯТЬ (user_memory, user_portrait)
 # ============================================================
 def save_fact(user_id, key, value):
     if not supabase:
@@ -150,7 +150,7 @@ def save_portrait_field(user_id, field, value):
         logger.error(f"❌ Ошибка сохранения портрета: {e}")
 
 # ============================================================
-# ИСТОРИЯ (ТВОЯ — НЕ ТРОГАТЬ)
+# ИСТОРИЯ
 # ============================================================
 def save_message(user_id, role, content):
     if not supabase:
@@ -195,17 +195,17 @@ def clear_user_history(user_id):
         logger.error(f"❌ Ошибка очистки истории: {e}")
 
 # ============================================================
-# ПОИСК В ИСТОРИИ ПО КЛЮЧЕВЫМ СЛОВАМ (ТВОЯ ЛОГИКА)
+# ПОИСК В ИСТОРИИ ПО КЛЮЧЕВЫМ СЛОВАМ (ДОБАВЛЕНО)
 # ============================================================
-def find_facts_in_history(history, text):
+def find_in_history(history, text):
     """
     Ищет в истории сообщения по ключевым словам из запроса.
-    Возвращает найденные сообщения для передачи в DeepSeek.
+    Возвращает найденные сообщения.
     """
     if not history:
         return []
     
-    # Извлекаем ключевые слова из запроса
+    # Извлекаем ключевые слова (убираем стоп-слова)
     stop_words = ["напомни", "скажи", "что", "я", "говорил", "про", "о", "в", "и", "с", "на", "за", "по", "из", "от", "для", "мне", "ты", "мы", "они", "он", "она", "оно", "вот", "этот", "эта", "это", "эти", "который", "которая", "которые", "которое"]
     keywords = []
     for word in text.lower().split():
@@ -327,7 +327,7 @@ def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_c
         return ""
 
 # ============================================================
-# УПАКОВКА ОТВЕТА (ТВОЯ — НЕ ТРОГАТЬ)
+# УПАКОВКА ОТВЕТА
 # ============================================================
 async def pack_response(raw_text: str, user_name: str = "", user_city: str = "") -> str:
     try:
@@ -497,7 +497,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА (ТВОЯ — НЕ ТРОГАТЬ, ДОБАВЛЕН ПОИСК В ИСТОРИИ)
+# ОСНОВНАЯ ЛОГИКА
 # ============================================================
 async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
     user_name = get_fact(user_id, "name")
@@ -524,17 +524,19 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
     # ============================================================
     # ПОИСК В ИСТОРИИ ПО КЛЮЧЕВЫМ СЛОВАМ
     # ============================================================
-    found_messages = find_facts_in_history(history, text)
+    found_messages = find_in_history(history, text)
     
     history_context = ""
     if found_messages:
         context_parts = []
-        for msg in found_messages[-10:]:  # Берём последние 10 найденных
+        for msg in found_messages[-10:]:
             role = "Пользователь" if msg['role'] == 'user' else "AURA"
             content = msg['content'][:500]
             context_parts.append(f"{role}: {content}")
         history_context = "\n\n".join(context_parts)
         logger.info(f"📌 Найдены сообщения в истории: {len(found_messages)} шт.")
+    else:
+        logger.info("📌 В истории ничего не найдено по ключевым словам")
 
     # Основная история (последние 10 сообщений)
     history_text = ""
@@ -546,38 +548,34 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
             history_lines.append(f"{role}: {content}")
         history_text = "\n".join(history_lines)
 
+    # ============================================================
+    # ПРОМПТ С ЯВНЫМ УКАЗАНИЕМ ИСПОЛЬЗОВАТЬ НАЙДЕННЫЕ ФАКТЫ
+    # ============================================================
     prompt = f"""
 Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
 
 {portrait_context}
 
-ПРАВИЛА:
+ПРАВИЛА ОТВЕТА:
 1. **ОТВЕЧАЙ КОРОТКО:** максимум 3–4 предложения.
 2. **СТРУКТУРА:** разбивай ответ на 2–3 абзаца.
 3. **МАРКЕРЫ:** ✅ — готово, 💎 — лучший вариант.
-4. **ЖИРНЫЙ ШРИФТ:** выделяй цены, даты.
+4. **ЖИРНЫЙ ШРИФТ:** выделяй цены, даты, названия.
 5. **ДУША:** лёгкая ирония, сарказм, эмпатия.
 6. **ЭМОДЗИ:** 1–2 по теме.
+7. **ЕСЛИ В НАЙДЕННЫХ СООБЩЕНИЯХ ЕСТЬ ОТВЕТ — ИСПОЛЬЗУЙ ЕГО.**
 
 {name_instruction}
 {city_instruction}
 
 """ + (f"""
-НАЙДЕННЫЕ СООБЩЕНИЯ В ИСТОРИИ (по твоему запросу):
+🔍 НАЙДЕННЫЕ СООБЩЕНИЯ В ИСТОРИИ (это факты, которые ты должен использовать в ответе):
 {history_context}
-""" if history_context else "")
-
-    prompt += f"""
-ИСТОРИЯ ДИАЛОГА (последние 10 сообщений):
-{history_text}
+""" if history_context else "⚠️ В ИСТОРИИ НЕ НАЙДЕНО СООБЩЕНИЙ ПО ЭТОМУ ЗАПРОСУ. Скажи об этом честно.") + f"""
 
 СЕЙЧАС ПОЛЬЗОВАТЕЛЬ СПРОСИЛ: "{text}"
 
-ОТВЕТЬ ТОЛЬКО JSON:
-{{
-    "reply": "твой ответ (живой, структурированный)",
-    "score": 0..100
-}}
+ОТВЕТЬ (живой, структурированный):
 """
     try:
         response = deepseek.chat.completions.create(
@@ -587,9 +585,9 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
             max_tokens=250,
             timeout=20
         )
-        result = json.loads(response.choices[0].message.content)
-        logger.info(f"✅ DeepSeek ответил с учётом истории")
-        return result
+        reply = response.choices[0].message.content
+        logger.info(f"✅ DeepSeek ответил")
+        return {"reply": reply, "score": 0}
     except Exception as e:
         logger.error(f"❌ Ошибка DeepSeek: {e}")
         return {"reply": "😅 Не понял, перефразируй.", "score": 0}
@@ -608,9 +606,7 @@ async def webhook(request: Request):
         user_id = msg["from"]["id"]
         text = msg.get("text", "")
 
-        # ============================================================
         # МЕДИА
-        # ============================================================
         if "photo" in msg or "document" in msg:
             if "photo" in msg:
                 file_id = msg["photo"][-1]["file_id"]
@@ -658,16 +654,12 @@ async def webhook(request: Request):
         if not text:
             return JSONResponse({"ok": True})
 
-        # ============================================================
         # ЗАЩИТА ОТ ПОВТОРОВ
-        # ============================================================
         if is_duplicate(user_id, text):
             logger.warning(f"⚠️ Повторный запрос от {user_id}: {text}")
             return JSONResponse({"ok": True})
 
-        # ============================================================
         # ВРЕМЯ
-        # ============================================================
         time_phrases = ["сколько время", "который час", "точное время", "часы покажи", "время сейчас", "какое время", "сколько сейчас время", "который сейчас час"]
         if any(phrase in text.lower() for phrase in time_phrases):
             user_city = get_fact(user_id, "city") or "Москва"
@@ -675,9 +667,7 @@ async def webhook(request: Request):
             await send_message(user_id, f"⏰ Сейчас {get_time_for_city(user_city)} по местному времени ({user_city}).")
             return JSONResponse({"ok": True})
 
-        # ============================================================
         # КОМАНДЫ
-        # ============================================================
         if text == "/start":
             await send_typing(user_id)
             await send_message(user_id, "Привет. Я AURA. Если ты здесь — значит, ты уже не просто ищешь, а хочешь, чтобы искали за тебя. Напиши, что нужно — и я покажу, на что способен.")
@@ -689,9 +679,7 @@ async def webhook(request: Request):
             await send_message(user_id, "✅ История очищена. Начинаем с чистого листа.")
             return JSONResponse({"ok": True})
 
-        # ============================================================
         # ОСНОВНАЯ ЛОГИКА
-        # ============================================================
         save_message(user_id, "user", text)
 
         history = get_recent_history(user_id, limit=50)
@@ -738,9 +726,7 @@ async def webhook(request: Request):
                 await send_message(user_id, "А подскажи, в каком городе ты живёшь?")
                 return JSONResponse({"ok": True})
 
-        # ============================================================
         # ОСНОВНАЯ ЛОГИКА С ПОИСКОМ
-        # ============================================================
         user_name = get_fact(user_id, "name") or "Гость"
         user_city = get_fact(user_id, "city") or "Москва"
         budget = get_fact(user_id, "budget_travel") or ""
