@@ -150,7 +150,7 @@ def save_portrait_field(user_id, field, value):
         logger.error(f"❌ Ошибка сохранения портрета: {e}")
 
 # ============================================================
-# ИСТОРИЯ
+# ИСТОРИЯ (ЗАГРУЖАЕМ ВСЁ)
 # ============================================================
 def save_message(user_id, role, content):
     if not supabase:
@@ -166,20 +166,22 @@ def save_message(user_id, role, content):
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения истории: {e}")
 
-def get_recent_history(user_id, limit=100):
+def get_all_history(user_id):
+    """
+    Загружает ВСЮ историю пользователя без лимита.
+    Как я в этом чате — вижу всё.
+    """
     if not supabase:
         return []
     try:
         res = supabase.table("history")\
             .select("role, content, created_at")\
             .eq("user_id", user_id)\
-            .order("created_at", desc=True)\
-            .limit(limit)\
+            .order("created_at", asc=True)\
             .execute()
         if res.data:
-            history = list(reversed(res.data))
-            logger.info(f"📚 Загружено {len(history)} сообщений из истории")
-            return history
+            logger.info(f"📚 Загружена ВСЯ история: {len(res.data)} сообщений")
+            return res.data
         return []
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки истории: {e}")
@@ -195,112 +197,100 @@ def clear_user_history(user_id):
         logger.error(f"❌ Ошибка очистки истории: {e}")
 
 # ============================================================
-# ИЗВЛЕЧЕНИЕ ФАКТОВ ИЗ ИСТОРИИ (ЖЁСТКАЯ ВЕРСИЯ)
+# ПОИСК В ИСТОРИИ (как я ищу в этом чате)
 # ============================================================
-def extract_fact_from_history(history, text):
+def find_in_history(history, text):
     """
-    Ищет в истории и извлекает конкретный факт.
-    Возвращает готовый структурированный ответ.
+    Ищет в ПОЛНОЙ истории сообщения, релевантные запросу.
+    Возвращает найденные сообщения.
     """
     if not history:
+        return []
+    
+    # Извлекаем ключевые слова
+    stop_words = ["напомни", "скажи", "что", "я", "говорил", "про", "о", "в", "и", "с", "на", "за", "по", "из", "от", "для", "мне", "ты", "мы", "они", "он", "она", "оно", "вот", "этот", "эта", "это", "эти", "который", "которая", "которые", "которое"]
+    keywords = []
+    for word in text.lower().split():
+        if len(word) > 2 and word not in stop_words:
+            keywords.append(word)
+    
+    if not keywords:
+        return []
+    
+    logger.info(f"🔍 Ищем в ПОЛНОЙ истории по ключевым словам: {keywords}")
+    
+    # Ищем сообщения
+    found = []
+    for msg in history:
+        content_lower = msg['content'].lower()
+        for keyword in keywords:
+            if keyword in content_lower:
+                found.append(msg)
+                break
+    
+    logger.info(f"📌 Найдено {len(found)} сообщений в истории")
+    return found
+
+# ============================================================
+# ИЗВЛЕЧЕНИЕ ФАКТОВ (как я это делаю)
+# ============================================================
+def extract_facts(found_messages, text):
+    """
+    Извлекает из найденных сообщений конкретные факты.
+    Возвращает структурированный ответ.
+    """
+    if not found_messages:
         return None
     
     text_lower = text.lower()
     
-    # Определяем тип запроса
+    # Определяем, что ищем
     is_clinic = any(word in text_lower for word in ["клиник", "больниц", "медцентр", "стоматолог", "терапевт"])
     is_address = any(word in text_lower for word in ["адрес", "улиц", "находит", "расположен"])
-    is_name = any(word in text_lower for word in ["название", "как называется"])
-    is_price = any(word in text_lower for word in ["цена", "стоимость", "руб", "₽"])
     is_haval = "хавал" in text_lower or "haval" in text_lower
+    is_film = any(word in text_lower for word in ["фильм", "кино", "сериал"])
+    is_recipe = any(word in text_lower for word in ["рецепт", "блюдо", "еда"])
     
-    # ============================================================
-    # 1. Поиск про клинику
-    # ============================================================
-    if is_clinic:
-        for msg in history:
-            content = msg['content']
-            if "клиник" in content.lower() or "больниц" in content.lower() or "медцентр" in content.lower():
-                logger.info(f"🏥 Найдено сообщение про клинику")
-                return f"Ты говорил про клинику: {content[:500]}"
+    parts = []
+    
+    for msg in found_messages[:5]:
+        content = msg['content']
+        role = "Пользователь" if msg['role'] == 'user' else "AURA"
         
-        # Если не нашли — ищем по адресу
-        for msg in history:
-            content = msg['content']
-            if "ул" in content.lower() or "улиц" in content.lower():
-                if "клиник" in content.lower() or "больниц" in content.lower():
-                    logger.info(f"🏥 Найдено сообщение про клинику с адресом")
-                    return f"Ты говорил про клинику: {content[:500]}"
-    
-    # ============================================================
-    # 2. Поиск адреса
-    # ============================================================
-    if is_address:
-        address_pattern = r'(ул\.?\s*[А-Яа-яёЁ\s\-\.]+,\s*\d+[А-Яа-яёЁ]?)|([А-Яа-яёЁ][а-яёЁ]+\s+ул\.?\s*[А-Яа-яёЁ\s\-\.]+,\s*\d+[А-Яа-яёЁ]?)'
+        # Если ищем клинику
+        if is_clinic and ("клиник" in content.lower() or "больниц" in content.lower()):
+            parts.append(f"{role}: {content[:300]}")
+            continue
         
-        for msg in history:
-            matches = re.findall(address_pattern, msg['content'])
-            if matches:
-                for match in matches:
-                    address = match[0] or match[1]
-                    if address:
-                        logger.info(f"📍 Найден адрес: {address}")
-                        return f"Адрес: {address}"
-    
-    # ============================================================
-    # 3. Поиск названия
-    # ============================================================
-    if is_name:
-        name_pattern = r'(Клиника\s+[А-Яа-яёЁ]+)|([А-Яа-яёЁ]+\s+Клиника)|([А-Яа-яёЁ]+\s+Мед[иц]?[её]?[нц]?[ы]?[й]?[ъ]?)'
+        # Если ищем адрес
+        if is_address:
+            address_pattern = r'(ул\.?\s*[А-Яа-яёЁ\s\-\.]+,\s*\d+[А-Яа-яёЁ]?)|([А-Яа-яёЁ][а-яёЁ]+\s+ул\.?\s*[А-Яа-яёЁ\s\-\.]+,\s*\d+[А-Яа-яёЁ]?)'
+            if re.search(address_pattern, content):
+                parts.append(f"{role}: {content[:300]}")
+                continue
         
-        for msg in history:
-            matches = re.findall(name_pattern, msg['content'])
-            if matches:
-                for match in matches:
-                    name = match[0] or match[1] or match[2]
-                    if name:
-                        logger.info(f"🏥 Найдено название: {name}")
-                        return f"Название: {name}"
-    
-    # ============================================================
-    # 4. Поиск цены
-    # ============================================================
-    if is_price:
-        price_pattern = r'(\d+[\s]?[\d]*[\s]?[\d]*\s*₽)|(\d+[\s]?[\d]*[\s]?[\d]*\s*руб)'
+        # Если ищем Хавал
+        if is_haval and ("хавал" in content.lower() or "haval" in content.lower()):
+            parts.append(f"{role}: {content[:300]}")
+            continue
         
-        for msg in history:
-            matches = re.findall(price_pattern, msg['content'])
-            if matches:
-                for match in matches:
-                    price = match[0] or match[1]
-                    if price:
-                        logger.info(f"💰 Найдена цена: {price}")
-                        return f"Цена: {price}"
+        # Если ищем фильм
+        if is_film and ("фильм" in content.lower() or "кино" in content.lower() or "сериал" in content.lower()):
+            parts.append(f"{role}: {content[:300]}")
+            continue
+        
+        # Если ищем рецепт
+        if is_recipe and ("рецепт" in content.lower() or "блюдо" in content.lower() or "еда" in content.lower()):
+            parts.append(f"{role}: {content[:300]}")
+            continue
+        
+        # Общее совпадение
+        parts.append(f"{role}: {content[:200]}")
     
-    # ============================================================
-    # 5. Поиск про Хавал
-    # ============================================================
-    if is_haval:
-        for msg in history:
-            if "хавал" in msg['content'].lower() or "haval" in msg['content'].lower():
-                logger.info(f"🚗 Найдено сообщение про Хавал")
-                return f"Ты говорил про Хавал: {msg['content'][:500]}"
+    if not parts:
+        return None
     
-    # ============================================================
-    # 6. Если ничего не найдено — ищем по ключевым словам
-    # ============================================================
-    keywords = []
-    for word in text_lower.split():
-        if len(word) > 3:
-            keywords.append(word)
-    
-    for msg in history:
-        for keyword in keywords:
-            if keyword in msg['content'].lower():
-                logger.info(f"🔍 Найдено совпадение по слову: {keyword}")
-                return f"Найдено в истории: {msg['content'][:500]}"
-    
-    return None
+    return "\n\n".join(parts)
 
 # ============================================================
 # РАСПОЗНАВАНИЕ ГОЛОСА
@@ -569,7 +559,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА
+# ОСНОВНАЯ ЛОГИКА (КАК Я В ЭТОМ ЧАТЕ)
 # ============================================================
 async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
     user_name = get_fact(user_id, "name")
@@ -594,34 +584,39 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
             portrait_context = "ПОРТРЕТ: " + ", ".join(parts) + "."
 
     # ============================================================
-    # ИЗВЛЕКАЕМ ФАКТ ИЗ ИСТОРИИ
+    # 1. Ищем в ПОЛНОЙ истории
     # ============================================================
-    fact = extract_fact_from_history(history, text)
+    found = find_in_history(history, text)
     
-    if fact:
-        logger.info(f"📌 ИЗВЛЕЧЁН ФАКТ: {fact[:200]}...")
+    # ============================================================
+    # 2. Извлекаем факты
+    # ============================================================
+    facts = extract_facts(found, text) if found else None
+    
+    if facts:
+        logger.info(f"📌 ИЗВЛЕЧЕНЫ ФАКТЫ: {facts[:200]}...")
     else:
-        logger.info("📌 ФАКТ НЕ НАЙДЕН")
+        logger.info("📌 ФАКТЫ НЕ НАЙДЕНЫ")
 
     # ============================================================
-    # ФОРМИРУЕМ ПРОМПТ
+    # 3. Формируем промпт
     # ============================================================
-    if fact:
+    if facts:
         prompt = f"""
 Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
 
 {portrait_context}
 
-⚠️ ВНИМАНИЕ! Ты ОБЯЗАН использовать следующий факт в своём ответе.
-Этот факт извлечён из истории диалога и является прямым ответом на вопрос пользователя.
+⚠️ ВНИМАНИЕ! Ты ОБЯЗАН использовать следующие факты в своём ответе.
+Они извлечены из ПОЛНОЙ истории диалога и являются прямым ответом на вопрос пользователя.
 
-ФАКТ ИЗ ИСТОРИИ:
-{fact}
+ФАКТЫ ИЗ ИСТОРИИ:
+{facts}
 
 ЗАДАЧА:
-1. Используй этот факт в своём ответе.
-2. Если в факте есть адрес — назови его.
-3. Если в факте есть название — назови его.
+1. Используй эти факты в своём ответе.
+2. Если есть адрес — назови его.
+3. Если есть название — назови его.
 4. Ответь коротко, живым языком, с эмодзи.
 
 {name_instruction}
@@ -629,7 +624,7 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
 
 ПОЛЬЗОВАТЕЛЬ СПРОСИЛ: "{text}"
 
-ОТВЕТЬ (коротко, живо, с эмодзи, используя факт):
+ОТВЕТЬ (коротко, живо, с эмодзи, используя факты):
 """
     else:
         prompt = f"""
@@ -750,8 +745,9 @@ async def webhook(request: Request):
         # ОСНОВНАЯ ЛОГИКА
         save_message(user_id, "user", text)
 
-        history = get_recent_history(user_id, limit=100)
-        logger.info(f"📚 Загружено {len(history)} сообщений для user_id {user_id}")
+        # ЗАГРУЖАЕМ ВСЮ ИСТОРИЮ (без лимита)
+        history = get_all_history(user_id)
+        logger.info(f"📚 Загружена ПОЛНАЯ история для user_id {user_id}: {len(history)} сообщений")
 
         # Знакомство — имя
         if not get_fact(user_id, "name"):
@@ -849,7 +845,7 @@ async def webhook(request: Request):
             return JSONResponse({"ok": True})
 
         # Обычный диалог
-        history = get_recent_history(user_id, limit=100)
+        history = get_all_history(user_id)
         result = await deepseek_interview(user_id, text, history)
         reply = result.get("reply", "😅 Не понял.")
         save_message(user_id, "assistant", reply)
