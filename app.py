@@ -247,9 +247,17 @@ def extract_facts(found_messages, text):
 async def recognize_image_with_deepseek(image_url: str) -> str:
     """
     Распознаёт картинку через DeepSeek-V4-Flash-Vision-Exp.
-    Передаём URL напрямую (без скачивания).
+    Скачиваем картинку и передаём через base64.
     """
     try:
+        # Скачиваем картинку с авторизацией
+        response = requests.get(image_url, timeout=30)
+        if response.status_code != 200:
+            return "⚠️ Не удалось загрузить изображение."
+        
+        # Конвертируем в base64
+        image_base64 = base64.b64encode(response.content).decode('utf-8')
+        
         prompt = """
 Ты — AURA. Ты видишь картинку и должен:
 1. Если на картинке есть текст — распознай его и напиши.
@@ -272,7 +280,7 @@ async def recognize_image_with_deepseek(image_url: str) -> str:
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": image_url
+                                "url": f"data:image/jpeg;base64,{image_base64}"
                             }
                         }
                     ]
