@@ -35,17 +35,14 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GIS_API_KEY = os.getenv("GIS_API_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
-YANDEX_VISION_API_KEY = os.getenv("YANDEX_VISION_API_KEY")  # больше не нужен, но оставил для совместимости
 
 AGENT_SEARCH_ID = os.getenv("YANDEX_AGENT_ID", "fvt3te2kgttig7u3a1fb")
 AGENT_RESEARCH_ID = os.getenv("YANDEX_AGENT_RESEARCH_ID", "fvti80ngse2778agbmdl")
 AGENT_REASONING_ID = os.getenv("YANDEX_AGENT_REASONING_ID", "fvtg0c38oi7n43d0n9gf")
 
-# Инициализация клиентов
 deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 groq = Groq(api_key=GROQ_API_KEY)
 
-# Supabase
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
@@ -250,17 +247,9 @@ def extract_facts(found_messages, text):
 async def recognize_image_with_deepseek(image_url: str) -> str:
     """
     Распознаёт картинку через DeepSeek-V4-Flash-Vision-Exp.
+    Передаём URL напрямую (без скачивания).
     """
     try:
-        # Скачиваем картинку
-        response = requests.get(image_url, timeout=30)
-        if response.status_code != 200:
-            return "⚠️ Не удалось загрузить изображение."
-        
-        # Конвертируем в base64
-        image_base64 = base64.b64encode(response.content).decode('utf-8')
-        
-        # Формируем запрос к DeepSeek Vision
         prompt = """
 Ты — AURA. Ты видишь картинку и должен:
 1. Если на картинке есть текст — распознай его и напиши.
@@ -268,7 +257,6 @@ async def recognize_image_with_deepseek(image_url: str) -> str:
 3. Ответь коротко, на русском, без лишней воды.
 """
         
-        # Используем модель vision-exp
         vision_client = OpenAI(
             api_key=DEEPSEEK_API_KEY,
             base_url=DEEPSEEK_BASE_URL
@@ -284,7 +272,7 @@ async def recognize_image_with_deepseek(image_url: str) -> str:
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:image/jpeg;base64,{image_base64}"
+                                "url": image_url
                             }
                         }
                     ]
@@ -494,7 +482,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА (ОДИН ВЫЗОВ DeepSeek)
+# ОСНОВНАЯ ЛОГИКА
 # ============================================================
 async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
     user_name = get_fact(user_id, "name")
@@ -518,7 +506,6 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
         if parts:
             portrait_context = "ПОРТРЕТ: " + ", ".join(parts) + "."
 
-    # УНИВЕРСАЛЬНЫЙ ПОИСК В ИСТОРИИ
     found = find_in_history(history, text)
     facts = extract_facts(found, text) if found else None
     
@@ -527,7 +514,6 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
     else:
         logger.info("📌 ФАКТЫ НЕ НАЙДЕНЫ")
 
-    # ЕДИНЫЙ ПРОМПТ
     if facts:
         prompt = f"""
 Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
@@ -597,7 +583,7 @@ async def webhook(request: Request):
         text = msg.get("text", "")
 
         # ============================================================
-        # ОБРАБОТКА КАРТИНОК (НОВАЯ ЛОГИКА)
+        # ОБРАБОТКА КАРТИНОК
         # ============================================================
         if "photo" in msg or "document" in msg:
             if "photo" in msg:
@@ -613,7 +599,7 @@ async def webhook(request: Request):
                 if file_resp.status_code == 200 and file_resp.json().get("ok"):
                     image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_resp.json()['result']['file_path']}"
                     
-                    # Распознаём через DeepSeek Vision (вместо Яндекс.Облака)
+                    # Распознаём через DeepSeek Vision
                     recognized_text = await recognize_image_with_deepseek(image_url)
                     
                     await send_message(user_id, f"🖼️ **Распознано:**\n\n{recognized_text}")
@@ -688,7 +674,6 @@ async def webhook(request: Request):
         # ============================================================
         save_message(user_id, "user", text)
 
-        # ЗАГРУЖАЕМ ВСЮ ИСТОРИЮ
         history = get_all_history(user_id)
         logger.info(f"📚 Загружена ПОЛНАЯ история для user_id {user_id}: {len(history)} сообщений")
 
@@ -755,7 +740,6 @@ async def webhook(request: Request):
             full_query = f"{search_query} {platform_map.get(platform, 'яндекс видео')}"
             raw_result = call_yandex_agent(AGENT_SEARCH_ID, full_query, user_name, user_city)
             if raw_result:
-                # Упаковываем ответ через DeepSeek (один вызов)
                 packed_prompt = f"""
 Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
 
