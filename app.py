@@ -242,7 +242,7 @@ def extract_facts(found_messages, text):
     return result
 
 # ============================================================
-# РАСПОЗНАВАНИЕ КАРТИНОК ЧЕРЕЗ DeepSeek Vision (УЛУЧШЕННЫЙ ПРОМПТ)
+# РАСПОЗНАВАНИЕ КАРТИНОК ЧЕРЕЗ DeepSeek Vision
 # ============================================================
 async def recognize_image_with_deepseek(image_url: str) -> str:
     try:
@@ -615,7 +615,7 @@ async def webhook(request: Request):
         text = msg.get("text", "")
 
         # ============================================================
-        # ОБРАБОТКА КАРТИНОК (УЛУЧШЕННАЯ)
+        # ОБРАБОТКА КАРТИНОК (ИСПРАВЛЕННАЯ)
         # ============================================================
         if "photo" in msg or "document" in msg:
             if "photo" in msg:
@@ -633,7 +633,8 @@ async def webhook(request: Request):
                     
                     recognized_text = await recognize_image_with_deepseek(image_url)
                     
-                    if recognized_text and "⚠️" not in recognized_text:
+                    # Всегда отправляем ответ от DeepSeek Vision
+                    if recognized_text:
                         await send_message(user_id, f"🖼️ **Распознано:**\n\n{recognized_text}")
                     else:
                         await send_message(user_id, "🖼️ Не удалось распознать изображение. Попробуйте другое фото.")
