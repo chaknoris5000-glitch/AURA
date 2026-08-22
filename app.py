@@ -248,7 +248,7 @@ async def recognize_image_with_deepseek(image_url: str) -> str:
     try:
         response = requests.get(image_url, timeout=30)
         if response.status_code != 200:
-            return "⚠️ Не удалось загрузить изображение."
+            return None
         
         image_base64 = base64.b64encode(response.content).decode('utf-8')
         
@@ -291,12 +291,12 @@ async def recognize_image_with_deepseek(image_url: str) -> str:
         )
         
         result = response.choices[0].message.content
-        logger.info(f"🖼️ DeepSeek Vision распознал картинку")
+        logger.info(f"🖼️ DeepSeek Vision распознал картинку: {result[:50] if result else 'пусто'}...")
         return result
         
     except Exception as e:
         logger.error(f"❌ Ошибка распознавания через DeepSeek Vision: {e}")
-        return "⚠️ Не удалось распознать изображение. Попробуйте ещё раз."
+        return None
 
 # ============================================================
 # РАСПОЗНАВАНИЕ ГОЛОСА
@@ -615,7 +615,7 @@ async def webhook(request: Request):
         text = msg.get("text", "")
 
         # ============================================================
-        # ОБРАБОТКА КАРТИНОК (ИСПРАВЛЕННАЯ)
+        # ОБРАБОТКА КАРТИНОК (РЕАЛЬНОЕ ИСПРАВЛЕНИЕ)
         # ============================================================
         if "photo" in msg or "document" in msg:
             if "photo" in msg:
@@ -633,12 +633,13 @@ async def webhook(request: Request):
                     
                     recognized_text = await recognize_image_with_deepseek(image_url)
                     
-                    # Всегда отправляем ответ от DeepSeek Vision
+                    # ПРИНУДИТЕЛЬНО отправляем ответ
                     if recognized_text:
                         await send_message(user_id, f"🖼️ **Распознано:**\n\n{recognized_text}")
                     else:
                         await send_message(user_id, "🖼️ Не удалось распознать изображение. Попробуйте другое фото.")
                     
+                    # ВСЕГДА сохраняем в историю
                     save_message(user_id, "assistant", f"Распознано: {recognized_text[:200] if recognized_text else 'пусто'}")
                 else:
                     await send_message(user_id, "⚠️ Не удалось загрузить изображение.")
