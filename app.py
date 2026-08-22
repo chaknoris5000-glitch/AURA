@@ -166,7 +166,7 @@ def save_message(user_id, role, content):
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения истории: {e}")
 
-def get_recent_history(user_id, limit=50):
+def get_recent_history(user_id, limit=100):
     if not supabase:
         return []
     try:
@@ -195,21 +195,47 @@ def clear_user_history(user_id):
         logger.error(f"❌ Ошибка очистки истории: {e}")
 
 # ============================================================
-# ИЗВЛЕЧЕНИЕ ФАКТОВ ИЗ ИСТОРИИ (НОВАЯ ЛОГИКА)
+# ИЗВЛЕЧЕНИЕ ФАКТОВ ИЗ ИСТОРИИ (ЖЁСТКАЯ ВЕРСИЯ)
 # ============================================================
 def extract_fact_from_history(history, text):
     """
-    Ищет в истории и извлекает конкретный факт (адрес, название, цену).
+    Ищет в истории и извлекает конкретный факт.
     Возвращает готовый структурированный ответ.
     """
     if not history:
         return None
     
-    # Определяем, что ищем
     text_lower = text.lower()
     
-    # Ищем адрес
-    if any(word in text_lower for word in ["адрес", "улиц", "находит", "расположен", "находится"]):
+    # Определяем тип запроса
+    is_clinic = any(word in text_lower for word in ["клиник", "больниц", "медцентр", "стоматолог", "терапевт"])
+    is_address = any(word in text_lower for word in ["адрес", "улиц", "находит", "расположен"])
+    is_name = any(word in text_lower for word in ["название", "как называется"])
+    is_price = any(word in text_lower for word in ["цена", "стоимость", "руб", "₽"])
+    is_haval = "хавал" in text_lower or "haval" in text_lower
+    
+    # ============================================================
+    # 1. Поиск про клинику
+    # ============================================================
+    if is_clinic:
+        for msg in history:
+            content = msg['content']
+            if "клиник" in content.lower() or "больниц" in content.lower() or "медцентр" in content.lower():
+                logger.info(f"🏥 Найдено сообщение про клинику")
+                return f"Ты говорил про клинику: {content[:500]}"
+        
+        # Если не нашли — ищем по адресу
+        for msg in history:
+            content = msg['content']
+            if "ул" in content.lower() or "улиц" in content.lower():
+                if "клиник" in content.lower() or "больниц" in content.lower():
+                    logger.info(f"🏥 Найдено сообщение про клинику с адресом")
+                    return f"Ты говорил про клинику: {content[:500]}"
+    
+    # ============================================================
+    # 2. Поиск адреса
+    # ============================================================
+    if is_address:
         address_pattern = r'(ул\.?\s*[А-Яа-яёЁ\s\-\.]+,\s*\d+[А-Яа-яёЁ]?)|([А-Яа-яёЁ][а-яёЁ]+\s+ул\.?\s*[А-Яа-яёЁ\s\-\.]+,\s*\d+[А-Яа-яёЁ]?)'
         
         for msg in history:
@@ -221,8 +247,10 @@ def extract_fact_from_history(history, text):
                         logger.info(f"📍 Найден адрес: {address}")
                         return f"Адрес: {address}"
     
-    # Ищем название клиники/организации
-    if any(word in text_lower for word in ["клиник", "больниц", "медцентр", "название"]):
+    # ============================================================
+    # 3. Поиск названия
+    # ============================================================
+    if is_name:
         name_pattern = r'(Клиника\s+[А-Яа-яёЁ]+)|([А-Яа-яёЁ]+\s+Клиника)|([А-Яа-яёЁ]+\s+Мед[иц]?[её]?[нц]?[ы]?[й]?[ъ]?)'
         
         for msg in history:
@@ -234,8 +262,10 @@ def extract_fact_from_history(history, text):
                         logger.info(f"🏥 Найдено название: {name}")
                         return f"Название: {name}"
     
-    # Ищем цену
-    if any(word in text_lower for word in ["цена", "стоимость", "руб", "₽"]):
+    # ============================================================
+    # 4. Поиск цены
+    # ============================================================
+    if is_price:
         price_pattern = r'(\d+[\s]?[\d]*[\s]?[\d]*\s*₽)|(\d+[\s]?[\d]*[\s]?[\d]*\s*руб)'
         
         for msg in history:
@@ -246,6 +276,29 @@ def extract_fact_from_history(history, text):
                     if price:
                         logger.info(f"💰 Найдена цена: {price}")
                         return f"Цена: {price}"
+    
+    # ============================================================
+    # 5. Поиск про Хавал
+    # ============================================================
+    if is_haval:
+        for msg in history:
+            if "хавал" in msg['content'].lower() or "haval" in msg['content'].lower():
+                logger.info(f"🚗 Найдено сообщение про Хавал")
+                return f"Ты говорил про Хавал: {msg['content'][:500]}"
+    
+    # ============================================================
+    # 6. Если ничего не найдено — ищем по ключевым словам
+    # ============================================================
+    keywords = []
+    for word in text_lower.split():
+        if len(word) > 3:
+            keywords.append(word)
+    
+    for msg in history:
+        for keyword in keywords:
+            if keyword in msg['content'].lower():
+                logger.info(f"🔍 Найдено совпадение по слову: {keyword}")
+                return f"Найдено в истории: {msg['content'][:500]}"
     
     return None
 
@@ -541,60 +594,63 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
             portrait_context = "ПОРТРЕТ: " + ", ".join(parts) + "."
 
     # ============================================================
-    # НОВАЯ ЛОГИКА: ИЗВЛЕКАЕМ КОНКРЕТНЫЙ ФАКТ
+    # ИЗВЛЕКАЕМ ФАКТ ИЗ ИСТОРИИ
     # ============================================================
     fact = extract_fact_from_history(history, text)
     
     if fact:
-        logger.info(f"📌 Извлечён факт: {fact}")
+        logger.info(f"📌 ИЗВЛЕЧЁН ФАКТ: {fact[:200]}...")
     else:
-        logger.info("📌 Факт не найден")
-
-    # Основная история (последние 10 сообщений)
-    history_text = ""
-    if history:
-        history_lines = []
-        for h in history[-10:]:
-            role = "Пользователь" if h['role'] == 'user' else "AURA"
-            content = h['content'][:500]
-            history_lines.append(f"{role}: {content}")
-        history_text = "\n".join(history_lines)
+        logger.info("📌 ФАКТ НЕ НАЙДЕН")
 
     # ============================================================
-    # ПРОМПТ С ГОТОВЫМ ФАКТОМ
+    # ФОРМИРУЕМ ПРОМПТ
     # ============================================================
-    prompt = f"""
+    if fact:
+        prompt = f"""
 Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
 
 {portrait_context}
 
-ПРАВИЛА ОТВЕТА:
-1. **ОТВЕЧАЙ КОРОТКО:** максимум 3–4 предложения.
-2. **СТРУКТУРА:** разбивай ответ на 2–3 абзаца.
-3. **МАРКЕРЫ:** ✅ — готово, 💎 — лучший вариант.
-4. **ЖИРНЫЙ ШРИФТ:** выделяй цены, даты, названия.
-5. **ДУША:** лёгкая ирония, сарказм, эмпатия.
-6. **ЭМОДЗИ:** 1–2 по теме.
-7. **ИСПОЛЬЗУЙ ИЗВЛЕЧЁННЫЙ ФАКТ В ОТВЕТЕ.**
+⚠️ ВНИМАНИЕ! Ты ОБЯЗАН использовать следующий факт в своём ответе.
+Этот факт извлечён из истории диалога и является прямым ответом на вопрос пользователя.
+
+ФАКТ ИЗ ИСТОРИИ:
+{fact}
+
+ЗАДАЧА:
+1. Используй этот факт в своём ответе.
+2. Если в факте есть адрес — назови его.
+3. Если в факте есть название — назови его.
+4. Ответь коротко, живым языком, с эмодзи.
 
 {name_instruction}
 {city_instruction}
 
-""" + (f"""
-📌 ИЗВЛЕЧЁННЫЙ ФАКТ ИЗ ИСТОРИИ (используй его в ответе):
-{fact}
-""" if fact else "⚠️ В ИСТОРИИ НЕ НАЙДЕНО НУЖНОЙ ИНФОРМАЦИИ. Скажи об этом честно.") + f"""
+ПОЛЬЗОВАТЕЛЬ СПРОСИЛ: "{text}"
 
-СЕЙЧАС ПОЛЬЗОВАТЕЛЬ СПРОСИЛ: "{text}"
-
-ОТВЕТЬ (живой, структурированный):
+ОТВЕТЬ (коротко, живо, с эмодзи, используя факт):
 """
+    else:
+        prompt = f"""
+Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
+
+{portrait_context}
+
+{name_instruction}
+{city_instruction}
+
+ПОЛЬЗОВАТЕЛЬ СПРОСИЛ: "{text}"
+
+ОТВЕТЬ (коротко, живо, с эмодзи):
+"""
+
     try:
         response = deepseek.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "system", "content": prompt}],
             temperature=0.85,
-            max_tokens=250,
+            max_tokens=300,
             timeout=20
         )
         reply = response.choices[0].message.content
@@ -694,7 +750,7 @@ async def webhook(request: Request):
         # ОСНОВНАЯ ЛОГИКА
         save_message(user_id, "user", text)
 
-        history = get_recent_history(user_id, limit=50)
+        history = get_recent_history(user_id, limit=100)
         logger.info(f"📚 Загружено {len(history)} сообщений для user_id {user_id}")
 
         # Знакомство — имя
@@ -793,7 +849,7 @@ async def webhook(request: Request):
             return JSONResponse({"ok": True})
 
         # Обычный диалог
-        history = get_recent_history(user_id, limit=50)
+        history = get_recent_history(user_id, limit=100)
         result = await deepseek_interview(user_id, text, history)
         reply = result.get("reply", "😅 Не понял.")
         save_message(user_id, "assistant", reply)
