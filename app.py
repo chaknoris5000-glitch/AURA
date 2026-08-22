@@ -360,7 +360,7 @@ def detect_content_platform(text: str) -> dict:
 
 Правила:
 - Фильм, сериал, клип → Яндекс.Видео
-- Рецепт, обзор → YouTube
+- Рецепт, обзор, как приготовить → YouTube
 - Картинки, фото → Яндекс.Картинки
 - Товар → Wildberries или Ozon
 - Билеты, отели → Aviasales
@@ -381,7 +381,31 @@ def detect_content_platform(text: str) -> dict:
         return json.loads(response.choices[0].message.content)
     except Exception as e:
         logger.error(f"❌ Ошибка определения платформы: {e}")
-        return {"platform": "none", "search_query": text}
+        return {"platform": "yandex_video", "search_query": text}
+
+# ============================================================
+# ФОРМИРОВАНИЕ ССЫЛОК
+# ============================================================
+def get_platform_link(platform: str, query: str) -> str:
+    """Формирует ссылку для поиска на нужной платформе"""
+    query_encoded = query.replace(' ', '+')
+    
+    if platform == "yandex_video":
+        return f"https://yandex.ru/video/search?text={query_encoded}"
+    elif platform == "youtube":
+        return f"https://www.youtube.com/results?search_query={query_encoded}"
+    elif platform == "rutube":
+        return f"https://rutube.ru/search/?q={query_encoded}"
+    elif platform == "yandex_images":
+        return f"https://yandex.ru/images/search?text={query_encoded}"
+    elif platform == "wildberries":
+        return f"https://www.wildberries.ru/catalog/0/search.aspx?search={query_encoded}"
+    elif platform == "ozon":
+        return f"https://www.ozon.ru/search/?text={query_encoded}"
+    elif platform == "aviasales":
+        return f"https://www.aviasales.ru/search?q={query_encoded}"
+    else:
+        return None
 
 # ============================================================
 # ТОЧНОЕ ВРЕМЯ
@@ -482,14 +506,6 @@ async def send_message(chat_id, text):
         )
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
-
-# ============================================================
-# ФОРМИРОВАНИЕ ССЫЛКИ ДЛЯ ФИЛЬМОВ
-# ============================================================
-def get_film_link(query: str) -> str:
-    """Формирует ссылку на Яндекс.Видео для поиска фильма"""
-    query_encoded = query.replace(' ', '+')
-    return f"https://yandex.ru/video/search?text={query_encoded}"
 
 # ============================================================
 # ОСНОВНАЯ ЛОГИКА
@@ -732,7 +748,7 @@ async def webhook(request: Request):
                 return JSONResponse({"ok": True})
 
         # ============================================================
-        # ОСНОВНАЯ ЛОГИКА С ПОИСКОМ
+        # ОСНОВНАЯ ЛОГИКА С ПОИСКОМ (С ИСПРАВЛЕНИЕМ ДЛЯ РЕЦЕПТОВ)
         # ============================================================
         user_name = get_fact(user_id, "name") or "Гость"
         user_city = get_fact(user_id, "city") or "Москва"
@@ -746,22 +762,39 @@ async def webhook(request: Request):
         reason_triggers = ["посоветуй", "что лучше", "как поступить", "выбери", "рекомендуй", "стоит ли"]
 
         if any(word in text.lower() for word in content_triggers):
-            platform_info = detect_content_platform(text)
-            platform = platform_info.get("platform", "yandex_video")
-            search_query = platform_info.get("search_query", text)
-            platform_map = {"yandex_video": "яндекс видео", "youtube": "youtube", "yandex_images": "яндекс картинки"}
+            # ============================================================
+            # ОПРЕДЕЛЯЕМ ПЛАТФОРМУ (С ПРИОРИТЕТОМ ДЛЯ РЕЦЕПТОВ)
+            # ============================================================
+            text_lower = text.lower()
+            
+            # Если это рецепт — ищем на YouTube
+            if any(word in text_lower for word in ["рецепт", "приготовить", "блюдо", "еда", "готовка", "кулинария"]):
+                platform = "youtube"
+                search_query = text
+                platform_name = "YouTube"
+                link_text = f"🔗 [Смотреть рецепты на YouTube](https://www.youtube.com/results?search_query={text.replace(' ', '+')})"
+            # Если явно просят Rutube
+            elif "rutube" in text_lower:
+                platform = "rutube"
+                search_query = text
+                platform_name = "Rutube"
+                link_text = f"🔗 [Смотреть на Rutube](https://rutube.ru/search/?q={text.replace(' ', '+')})"
+            else:
+                platform_info = detect_content_platform(text)
+                platform = platform_info.get("platform", "yandex_video")
+                search_query = platform_info.get("search_query", text)
+                platform_name = {"yandex_video": "Яндекс.Видео", "youtube": "YouTube", "yandex_images": "Яндекс.Картинки"}.get(platform, "Яндекс.Видео")
+                link_text = get_platform_link(platform, search_query)
+                if link_text:
+                    link_text = f"🔗 [Смотреть на {platform_name}]({link_text})"
+            
+            platform_map = {"yandex_video": "яндекс видео", "youtube": "youtube", "yandex_images": "яндекс картинки", "rutube": "rutube"}
             full_query = f"{search_query} {platform_map.get(platform, 'яндекс видео')}"
+            
             raw_result = call_yandex_agent(AGENT_SEARCH_ID, full_query, user_name, user_city)
             
-            # Формируем ссылку
-            film_link = None
-            if any(word in text.lower() for word in ["фильм", "сериал", "кино", "мульт", "клип", "трейлер"]):
-                film_link = get_film_link(search_query)
-                logger.info(f"🔗 Ссылка на фильм: {film_link}")
-            
             if raw_result:
-                if film_link:
-                    packed_prompt = f"""
+                packed_prompt = f"""
 Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
 
 Перед тобой сырой ответ поискового агента. Преврати его в красивый, живой ответ.
@@ -773,28 +806,7 @@ async def webhook(request: Request):
 4. **ЖИРНЫЙ ШРИФТ:** выделяй цены, даты.
 5. **ДУША:** лёгкая ирония, эмпатия.
 6. **ЭМОДЗИ:** 1–2 по теме.
-7. **ОБЯЗАТЕЛЬНО добавь ссылку в конце ответа:** 🔗 [Смотреть на Яндекс.Видео]({film_link})
-
-Имя пользователя: {user_name}
-
-Сырой ответ:
-{raw_result}
-
-Твой ответ:
-"""
-                else:
-                    packed_prompt = f"""
-Ты — AURA. Твой стиль — Тони Старк: уверенный, с иронией, живой.
-
-Перед тобой сырой ответ поискового агента. Преврати его в красивый, живой ответ.
-
-ПРАВИЛА:
-1. **ОТВЕЧАЙ КОРОТКО:** максимум 3–4 предложения.
-2. **СТРУКТУРА:** разбивай ответ на 2–3 абзаца.
-3. **МАРКЕРЫ:** ✅ — готово, 💎 — лучший вариант.
-4. **ЖИРНЫЙ ШРИФТ:** выделяй цены, даты.
-5. **ДУША:** лёгкая ирония, эмпатия.
-6. **ЭМОДЗИ:** 1–2 по теме.
+7. **ОБЯЗАТЕЛЬНО добавь ссылку в конце ответа:** {link_text if link_text else ""}
 
 Имя пользователя: {user_name}
 
@@ -813,8 +825,8 @@ async def webhook(request: Request):
                 packed = packed_response.choices[0].message.content
                 
                 # Если ссылка есть, но DeepSeek её не добавил — принудительно вставляем
-                if film_link and "http" not in packed:
-                    packed += f"\n\n🔗 [Смотреть на Яндекс.Видео]({film_link})"
+                if link_text and "http" not in packed:
+                    packed += f"\n\n{link_text}"
                 
                 await send_message(user_id, packed)
                 save_message(user_id, "assistant", packed)
