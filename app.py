@@ -158,9 +158,6 @@ def save_message(user_id, role, content):
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения истории: {e}")
 
-# ============================================================
-# ЗАГРУЖАЕМ ТОЛЬКО 20 ПОСЛЕДНИХ СООБЩЕНИЙ
-# ============================================================
 def get_recent_history(user_id, limit=20):
     if not supabase:
         return []
@@ -189,9 +186,6 @@ def clear_user_history(user_id):
     except Exception as e:
         logger.error(f"❌ Ошибка очистки истории: {e}")
 
-# ============================================================
-# ПОИСК В ИСТОРИИ
-# ============================================================
 def find_in_history(history, text):
     if not history:
         return []
@@ -239,9 +233,6 @@ def extract_facts(found_messages, text):
     logger.info(f"📌 Извлечено {len(parts)} сообщений")
     return result
 
-# ============================================================
-# РУКИ
-# ============================================================
 async def collect_lead(user_id: int, name: str, phone: str, question: str = ""):
     if not supabase:
         return {"error": "Supabase не подключён"}
@@ -269,31 +260,6 @@ async def collect_lead(user_id: int, name: str, phone: str, question: str = ""):
         logger.error(f"❌ Ошибка сохранения заявки: {e}")
         return {"error": str(e)}
 
-async def add_calendar_event(user_id: int, title: str, date: str, time: str, description: str = ""):
-    if not supabase:
-        return {"error": "Supabase не подключён"}
-    try:
-        supabase.table("calendar_events").insert({
-            "user_id": user_id,
-            "title": title,
-            "date": date,
-            "time": time,
-            "description": description,
-            "created_at": datetime.now().isoformat()
-        }).execute()
-        logger.info(f"✅ Событие сохранено: {title} на {date} в {time}")
-        return {"status": "success", "title": title, "date": date, "time": time}
-    except Exception as e:
-        logger.error(f"❌ Ошибка сохранения события: {e}")
-        return {"error": str(e)}
-
-async def send_sms_via_telegram(phone: str, text: str):
-    logger.info(f"📱 СМС на {phone}: {text}")
-    return {"status": "success", "message": "СМС отправлена"}
-
-# ============================================================
-# РАСПОЗНАВАНИЕ КАРТИНОК
-# ============================================================
 async def recognize_image_with_deepseek(image_url: str) -> str:
     try:
         response = requests.get(image_url, timeout=30)
@@ -338,9 +304,6 @@ async def recognize_image_with_deepseek(image_url: str) -> str:
         logger.error(f"❌ Ошибка распознавания через DeepSeek Vision: {e}")
         return "⚠️ Не удалось распознать изображение. Попробуйте ещё раз."
 
-# ============================================================
-# РАСПОЗНАВАНИЕ ГОЛОСА
-# ============================================================
 def transcribe_audio(audio_url):
     try:
         resp = requests.get(audio_url, timeout=30)
@@ -532,9 +495,6 @@ async def send_message(chat_id, text):
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
 
-# ============================================================
-# ОСНОВНАЯ ЛОГИКА
-# ============================================================
 async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
     user_name = get_fact(user_id, "name") or "Гость"
     user_city = get_fact(user_id, "city") or "Москва"
@@ -554,16 +514,15 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
         if parts:
             portrait_context = "ПОРТРЕТ: " + ", ".join(parts) + "."
 
-    found = find_in_history(history, text)
-    facts = extract_facts(found, text) if found else None
+    is_reminder = any(word in text.lower() for word in ["напомни", "вспомни", "что я говорил", "повтори"])
 
-    if facts:
-        logger.info(f"📌 ИЗВЛЕЧЕНЫ ФАКТЫ: {facts[:200]}...")
-    else:
-        logger.info("📌 ФАКТЫ НЕ НАЙДЕНЫ")
-
-    if facts:
-        context = f"ФАКТЫ ИЗ ИСТОРИИ:\n{facts}"
+    if is_reminder:
+        found = find_in_history(history, text)
+        facts = extract_facts(found, text) if found else None
+        if facts:
+            context = f"ВОТ ЧТО БЫЛО В ИСТОРИИ:\n{facts}"
+        else:
+            context = "В ИСТОРИИ НИЧЕГО НЕ НАЙДЕНО."
     else:
         history_text = ""
         if history:
@@ -576,7 +535,7 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
         context = f"ИСТОРИЯ (последние 15 сообщений):\n{history_text}"
 
     prompt = f"""
-Ты — AURA. Отвечай коротко — максимум 2-3 предложения. Без приветствий, без "здравствуйте". Просто продолжай диалог.
+Ты — AURA. Отвечай коротко — максимум 2-3 предложения. Без приветствий. Просто продолжай диалог.
 
 {portrait_context}
 
@@ -753,7 +712,6 @@ async def webhook(request: Request):
                 await send_message(user_id, "А в каком городе ты живёшь? 😊")
                 return JSONResponse({"ok": True})
             else:
-                # Не навязываемся
                 result = await deepseek_interview(user_id, text, history)
                 reply = result.get("reply", "😅 Не понял.")
                 save_message(user_id, "assistant", reply)
@@ -785,7 +743,6 @@ async def webhook(request: Request):
                 await send_message(user_id, f"Отлично, {user_name}! Теперь я буду давать информацию по твоему городу. 🏙️")
                 return JSONResponse({"ok": True})
             else:
-                # Не навязываемся
                 result = await deepseek_interview(user_id, text, history)
                 reply = result.get("reply", "😅 Не понял.")
                 save_message(user_id, "assistant", reply)
@@ -794,76 +751,23 @@ async def webhook(request: Request):
                 return JSONResponse({"ok": True})
 
         # ============================================================
-        # ОСНОВНАЯ ЛОГИКА С ПОИСКОМ
+        # ПОИСК В ИНТЕРНЕТЕ (ЕСЛИ НЕТ В ИСТОРИИ)
         # ============================================================
-        user_name = get_fact(user_id, "name") or "Гость"
-        user_city = get_fact(user_id, "city") or "Москва"
-        budget = get_fact(user_id, "budget_travel") or ""
+        is_reminder = any(word in text.lower() for word in ["напомни", "вспомни", "что я говорил", "повтори"])
+        is_search = any(word in text.lower() for word in ["найди", "поищи", "найти", "искать"])
 
-        await send_typing(user_id)
+        # Если это не напоминание — пробуем найти в интернете
+        if is_search and not is_reminder:
+            user_name = get_fact(user_id, "name") or "Гость"
+            user_city = get_fact(user_id, "city") or "Москва"
+            budget = get_fact(user_id, "budget_travel") or ""
 
-        content_triggers = ["фильм", "сериал", "видео", "рецепт", "картинки", "фото", "изображения", "обзор", "как приготовить", "как сделать", "смотреть", "клип", "трейлер"]
-        search_triggers = ["найди", "поищи", "цены", "билеты", "скидки", "акции", "новости", "погода", "курс", "стоимость", "купить", "товар"]
-        analyze_triggers = ["сравни", "проанализируй", "исследуй", "изучи", "разбери"]
-        reason_triggers = ["посоветуй", "что лучше", "как поступить", "выбери", "рекомендуй", "стоит ли"]
+            await send_typing(user_id)
 
-        if any(word in text.lower() for word in content_triggers):
-            text_lower = text.lower()
-            
-            if any(word in text_lower for word in ["рецепт", "приготовить", "блюдо", "еда", "готовка", "кулинария"]):
-                platform = "youtube"
-                search_query = text
-                platform_name = "YouTube"
-                link_text = f"🔗 [Смотреть рецепты на YouTube](https://www.youtube.com/results?search_query={text.replace(' ', '+')})"
-            elif "rutube" in text_lower:
-                platform = "rutube"
-                search_query = text
-                platform_name = "Rutube"
-                link_text = f"🔗 [Смотреть на Rutube](https://rutube.ru/search/?q={text.replace(' ', '+')})"
-            else:
-                platform_info = detect_content_platform(text)
-                platform = platform_info.get("platform", "yandex_video")
-                search_query = platform_info.get("search_query", text)
-                platform_name = {"yandex_video": "Яндекс.Видео", "youtube": "YouTube", "yandex_images": "Яндекс.Картинки"}.get(platform, "Яндекс.Видео")
-                link_text = get_platform_link(platform, search_query)
-                if link_text:
-                    link_text = f"🔗 [Смотреть на {platform_name}]({link_text})"
-            
-            platform_map = {"yandex_video": "яндекс видео", "youtube": "youtube", "yandex_images": "яндекс картинки", "rutube": "rutube"}
-            full_query = f"{search_query} {platform_map.get(platform, 'яндекс видео')}"
-            
-            raw_result = call_yandex_agent(AGENT_SEARCH_ID, full_query, user_name, user_city)
-            
-            if raw_result:
-                packed_prompt = f"""
-Ты — AURA. Отвечай коротко — 2-3 предложения. Добавь ссылку в конце.
-
-Сырой ответ: {raw_result}
-
-Твой ответ (короткий, со ссылкой): {link_text if link_text else ""}
-"""
-                packed_response = deepseek.chat.completions.create(
-                    model="deepseek-chat",
-                    messages=[{"role": "system", "content": packed_prompt}],
-                    temperature=0.85,
-                    max_tokens=150,
-                    timeout=20
-                )
-                packed = packed_response.choices[0].message.content
-                
-                if link_text and "http" not in packed:
-                    packed += f"\n\n{link_text}"
-                
-                await send_message(user_id, packed)
-                save_message(user_id, "assistant", packed)
-            else:
-                await send_message(user_id, "Не нашёл.")
-            return JSONResponse({"ok": True})
-
-        if any(word in text.lower() for word in search_triggers + analyze_triggers + reason_triggers):
-            if any(word in text.lower() for word in reason_triggers):
+            # Определяем агента
+            if any(word in text.lower() for word in ["посоветуй", "что лучше", "стоит ли"]):
                 agent_id = AGENT_REASONING_ID
-            elif any(word in text.lower() for word in analyze_triggers):
+            elif any(word in text.lower() for word in ["сравни", "проанализируй", "исследуй"]):
                 agent_id = AGENT_RESEARCH_ID
             else:
                 agent_id = AGENT_SEARCH_ID
@@ -871,12 +775,21 @@ async def webhook(request: Request):
             try:
                 raw_result = call_yandex_agent(agent_id, text, user_name, user_city, budget)
                 if raw_result:
+                    # Формируем ссылку
+                    link_text = ""
+                    if "фильм" in text.lower() or "кино" in text.lower():
+                        link_text = f"🔗 [Смотреть на Яндекс.Видео](https://yandex.ru/video/search?text={text.replace(' ', '+')})"
+                    elif "рецепт" in text.lower():
+                        link_text = f"🔗 [Смотреть на YouTube](https://www.youtube.com/results?search_query={text.replace(' ', '+')})"
+                    elif "билет" in text.lower() or "рейс" in text.lower():
+                        link_text = f"✈️ [Найти билеты на Aviasales](https://www.aviasales.ru/search?q={text.replace(' ', '+')})"
+                    
                     packed_prompt = f"""
-Ты — AURA. Отвечай коротко — 2-3 предложения.
+Ты — AURA. Отвечай коротко — 2-3 предложения. Добавь ссылку в конце.
 
-Сырой ответ: {raw_result}
+Сырой ответ из интернета: {raw_result}
 
-Твой ответ (короткий):
+Твой ответ (короткий, по делу): {link_text if link_text else ""}
 """
                     packed_response = deepseek.chat.completions.create(
                         model="deepseek-chat",
@@ -886,19 +799,17 @@ async def webhook(request: Request):
                         timeout=20
                     )
                     packed = packed_response.choices[0].message.content
+                    
+                    if link_text and "http" not in packed:
+                        packed += f"\n\n{link_text}"
+                    
                     await send_message(user_id, packed)
                     save_message(user_id, "assistant", packed)
-                    return JSONResponse({"ok": True})
+                else:
+                    await send_message(user_id, "Не нашёл в интернете. Попробуй уточнить запрос.")
             except Exception as e:
-                logger.error(f"❌ Ошибка агента Яндекса: {e}")
-
-            result = await search_organization(text, get_fact(user_id, "city") or "Белово")
-            if result and "error" not in result:
-                reply = f"🏥 **{result['name']}**\n📍 {result['address']}\n📞 {', '.join(result['phones'][:3])}\n🌐 [Сайт]({result['site']})"
-                await send_message(user_id, reply)
-                save_message(user_id, "assistant", reply)
-            else:
-                await send_message(user_id, "Не нашёл.")
+                logger.error(f"❌ Ошибка поиска: {e}")
+                await send_message(user_id, "Ошибка поиска. Попробуй позже.")
             return JSONResponse({"ok": True})
 
         # ============================================================
