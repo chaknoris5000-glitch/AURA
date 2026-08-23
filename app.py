@@ -181,7 +181,7 @@ def clear_user_history(user_id):
         logger.error(f"❌ Ошибка очистки истории: {e}")
 
 # ============================================================
-# ПОИСК В ИСТОРИИ (ВОССТАНОВЛЕН)
+# ПОИСК В ИСТОРИИ
 # ============================================================
 def find_in_history(history, text):
     if not history:
@@ -261,24 +261,19 @@ async def collect_lead(user_id: int, name: str, phone: str, question: str = ""):
         return {"error": str(e)}
 
 # ============================================================
-# РАСПОЗНАВАНИЕ КАРТИНОК
+# РАСПОЗНАВАНИЕ КАРТИНОК (КОРОТКО)
 # ============================================================
 async def recognize_image_with_deepseek(image_url: str) -> str:
     try:
         response = requests.get(image_url, timeout=30)
         if response.status_code != 200:
-            return "⚠️ Не удалось загрузить изображение."
+            return "Не удалось загрузить изображение."
         image_base64 = base64.b64encode(response.content).decode('utf-8')
         prompt = """
-Ты — AURA. Ты видишь картинку и должен сделать ПОЛНЫЙ анализ.
-
-ОБЯЗАТЕЛЬНО выполни следующие шаги:
-1. Внимательно прочитай ВСЕ тексты на картинке — даже самые мелкие надписи.
-2. Распознай бренды, названия продуктов, цены, состав, калорийность.
-3. Определи, что изображено на картинке (продукты, предметы, люди, сцена).
-4. Дай структурированный ответ.
-
-Ответь на русском языке, подробно, без воды.
+Ты — AURA. Опиши картинку коротко, 2-3 предложения.
+Что видишь на картинке? Назови объекты, цвета, стиль.
+Без лишней воды, без "распознано", без структуры.
+Просто описание.
 """
         vision_client = OpenAI(
             api_key=DEEPSEEK_API_KEY,
@@ -300,15 +295,15 @@ async def recognize_image_with_deepseek(image_url: str) -> str:
                     ]
                 }
             ],
-            max_tokens=500,
-            temperature=0.2
+            max_tokens=150,
+            temperature=0.3
         )
         result = response.choices[0].message.content
         logger.info(f"🖼️ DeepSeek Vision распознал картинку")
         return result
     except Exception as e:
         logger.error(f"❌ Ошибка распознавания через DeepSeek Vision: {e}")
-        return "⚠️ Не удалось распознать изображение. Попробуйте ещё раз."
+        return "Не удалось распознать изображение."
 
 # ============================================================
 # РАСПОЗНАВАНИЕ ГОЛОСА
@@ -506,7 +501,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА (С ПОИСКОМ В ИСТОРИИ)
+# ОСНОВНАЯ ЛОГИКА
 # ============================================================
 async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
     user_name = get_fact(user_id, "name") or "Гость"
@@ -527,7 +522,6 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
         if parts:
             portrait_context = "ПОРТРЕТ: " + ", ".join(parts) + "."
 
-    # Ищем в истории по ключевым словам
     found = find_in_history(history, text)
     facts = extract_facts(found, text) if found else None
 
@@ -536,7 +530,6 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
     else:
         logger.info("📌 ФАКТЫ НЕ НАЙДЕНЫ")
 
-    # Формируем контекст
     if facts:
         context = f"ФАКТЫ ИЗ ИСТОРИИ:\n{facts}"
     else:
@@ -605,14 +598,13 @@ async def webhook(request: Request):
                 if file_resp.status_code == 200 and file_resp.json().get("ok"):
                     image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_resp.json()['result']['file_path']}"
                     recognized_text = await recognize_image_with_deepseek(image_url)
-                    reply = f"🖼️ **Распознано:**\n\n{recognized_text}"
-                    await send_message(user_id, reply)
-                    save_message(user_id, "assistant", reply)
+                    await send_message(user_id, recognized_text)
+                    save_message(user_id, "assistant", recognized_text)
                 else:
-                    await send_message(user_id, "⚠️ Не удалось загрузить изображение.")
+                    await send_message(user_id, "Не удалось загрузить изображение.")
             except Exception as e:
                 logger.error(f"❌ Ошибка обработки медиа: {e}")
-                await send_message(user_id, "⚠️ Не удалось распознать изображение.")
+                await send_message(user_id, "Не удалось распознать изображение.")
             return JSONResponse({"ok": True})
 
         # ============================================================
@@ -629,14 +621,14 @@ async def webhook(request: Request):
                     if text:
                         save_message(user_id, "user", text)
                     else:
-                        await send_message(user_id, "⚠️ Не удалось распознать голос. Попробуй ещё раз.")
+                        await send_message(user_id, "Не удалось распознать голос. Попробуй ещё раз.")
                         return JSONResponse({"ok": True})
                 else:
-                    await send_message(user_id, "⚠️ Ошибка загрузки голосового сообщения.")
+                    await send_message(user_id, "Ошибка загрузки голосового сообщения.")
                     return JSONResponse({"ok": True})
             except Exception as e:
                 logger.error(f"❌ Ошибка голоса: {e}")
-                await send_message(user_id, "⚠️ Ошибка обработки голоса. Попробуй написать!")
+                await send_message(user_id, "Ошибка обработки голоса. Попробуй написать!")
                 return JSONResponse({"ok": True})
         
         if not text:
@@ -805,7 +797,7 @@ async def webhook(request: Request):
                 await send_message(user_id, packed)
                 save_message(user_id, "assistant", packed)
             else:
-                await send_message(user_id, "😊 Не нашёл.")
+                await send_message(user_id, "Не нашёл.")
             return JSONResponse({"ok": True})
 
         if any(word in text.lower() for word in search_triggers + analyze_triggers + reason_triggers):
@@ -846,7 +838,7 @@ async def webhook(request: Request):
                 await send_message(user_id, reply)
                 save_message(user_id, "assistant", reply)
             else:
-                await send_message(user_id, f"😊 Не нашёл.")
+                await send_message(user_id, "Не нашёл.")
             return JSONResponse({"ok": True})
 
         # ============================================================
