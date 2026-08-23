@@ -261,7 +261,7 @@ async def collect_lead(user_id: int, name: str, phone: str, question: str = ""):
         return {"error": str(e)}
 
 # ============================================================
-# РАСПОЗНАВАНИЕ КАРТИНОК (РАБОЧАЯ ВЕРСИЯ ОТ 22.08)
+# РАСПОЗНАВАНИЕ КАРТИНОК (С ДЕБАГОМ)
 # ============================================================
 async def recognize_image_with_deepseek(image_url: str) -> str:
     try:
@@ -299,7 +299,9 @@ async def recognize_image_with_deepseek(image_url: str) -> str:
             temperature=0.5
         )
         result = response.choices[0].message.content
-        logger.info(f"🖼️ DeepSeek Vision распознал картинку")
+        logger.info(f"🖼️ DeepSeek Vision ответ: {result[:100] if result else 'пустой'}...")
+        if not result or len(result.strip()) < 5:
+            return "На картинке не удалось ничего распознать."
         return result
     except Exception as e:
         logger.error(f"❌ Ошибка распознавания через DeepSeek Vision: {e}")
