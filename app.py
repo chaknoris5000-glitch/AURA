@@ -41,7 +41,6 @@ AGENT_SEARCH_ID = os.getenv("YANDEX_AGENT_ID", "fvt3te2kgttig7u3a1fb")
 AGENT_RESEARCH_ID = os.getenv("YANDEX_AGENT_RESEARCH_ID", "fvti80ngse2778agbmdl")
 AGENT_REASONING_ID = os.getenv("YANDEX_AGENT_REASONING_ID", "fvtg0c38oi7n43d0n9gf")
 
-# ТОЛЬКО FLASH — БЕЗ PRO
 deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 groq = Groq(api_key=GROQ_API_KEY)
 
@@ -293,7 +292,7 @@ async def send_sms_via_telegram(phone: str, text: str):
     return {"status": "success", "message": "СМС отправлена"}
 
 # ============================================================
-# РАСПОЗНАВАНИЕ КАРТИНОК (ТОЛЬКО FLASH)
+# РАСПОЗНАВАНИЕ КАРТИНОК
 # ============================================================
 async def recognize_image_with_deepseek(image_url: str) -> str:
     try:
@@ -729,17 +728,32 @@ async def webhook(request: Request):
         history = get_recent_history(user_id, limit=20)
         logger.info(f"📚 Загружено {len(history)} последних сообщений")
 
-        # Знакомство — имя
+        # ============================================================
+        # ЗНАКОМСТВО — ИМЯ (ТОЛЬКО ЯВНОЕ ПРЕДСТАВЛЕНИЕ)
+        # ============================================================
         if not get_fact(user_id, "name"):
-            if len(text.split()) == 1 and text[0].isupper() and len(text) > 1:
-                save_fact(user_id, "name", text)
-                save_portrait_field(user_id, "name", text)
+            name = None
+            if "меня зовут" in text.lower():
+                name = text.lower().split("меня зовут")[-1].strip().split()[0]
+            elif "зовут" in text.lower():
+                name = text.lower().split("зовут")[-1].strip().split()[0]
+            elif "моё имя" in text.lower():
+                name = text.lower().split("моё имя")[-1].strip().split()[0]
+            elif text.lower().startswith("я ") and len(text) > 3:
+                name = text[2:].strip().split()[0]
+            elif text.lower().startswith("это ") and len(text) > 4:
+                name = text[4:].strip().split()[0]
+            
+            if name and len(name) > 1 and name[0].isupper():
+                save_fact(user_id, "name", name)
+                save_portrait_field(user_id, "name", name)
                 await send_typing(user_id)
-                await send_message(user_id, f"Приятно познакомиться, {text}! ✈️")
+                await send_message(user_id, f"Приятно познакомиться, {name}! ✈️")
                 await send_typing(user_id)
-                await send_message(user_id, "А подскажи, в каком городе ты живёшь?")
+                await send_message(user_id, "А в каком городе ты живёшь? 😊")
                 return JSONResponse({"ok": True})
             else:
+                # Не навязываемся
                 result = await deepseek_interview(user_id, text, history)
                 reply = result.get("reply", "😅 Не понял.")
                 save_message(user_id, "assistant", reply)
@@ -747,18 +761,31 @@ async def webhook(request: Request):
                 await send_message(user_id, reply)
                 return JSONResponse({"ok": True})
 
-        # Знакомство — город
+        # ============================================================
+        # ЗНАКОМСТВО — ГОРОД (ТОЛЬКО ЯВНОЕ УПОМИНАНИЕ)
+        # ============================================================
         if not get_fact(user_id, "city"):
-            if len(text.split()) == 1 and text[0].isupper() and len(text) > 1:
-                save_fact(user_id, "city", text)
-                save_portrait_field(user_id, "city", text)
+            city = None
+            if "живу в" in text.lower():
+                city = text.lower().split("живу в")[-1].strip().split()[0]
+            elif "город " in text.lower():
+                city = text.lower().split("город ")[-1].strip().split()[0]
+            elif "из " in text.lower() and len(text.split()) > 2:
+                parts = text.lower().split("из ")
+                if len(parts) > 1:
+                    city = parts[-1].strip().split()[0]
+            elif "проживаю в" in text.lower():
+                city = text.lower().split("проживаю в")[-1].strip().split()[0]
+            
+            if city and len(city) > 1 and city[0].isupper():
+                save_fact(user_id, "city", city)
+                save_portrait_field(user_id, "city", city)
                 user_name = get_fact(user_id, "name") or "Гость"
                 await send_typing(user_id)
-                await send_message(user_id, f"Отлично, {user_name}! Теперь я буду давать информацию по твоему городу.")
-                await send_typing(user_id)
-                await send_message(user_id, f"Кстати, в {text} сейчас есть интересные события. Могу подобрать кино, рестораны или парковки, если нужно.")
+                await send_message(user_id, f"Отлично, {user_name}! Теперь я буду давать информацию по твоему городу. 🏙️")
                 return JSONResponse({"ok": True})
             else:
+                # Не навязываемся
                 result = await deepseek_interview(user_id, text, history)
                 reply = result.get("reply", "😅 Не понял.")
                 save_message(user_id, "assistant", reply)
