@@ -261,19 +261,19 @@ async def collect_lead(user_id: int, name: str, phone: str, question: str = ""):
         return {"error": str(e)}
 
 # ============================================================
-# РАСПОЗНАВАНИЕ КАРТИНОК (КОРОТКО, БЕЗ ЛИШНЕЙ ВОДЫ)
+# РАСПОЗНАВАНИЕ КАРТИНОК (РАБОЧАЯ ВЕРСИЯ ОТ 22.08)
 # ============================================================
 async def recognize_image_with_deepseek(image_url: str) -> str:
     try:
         response = requests.get(image_url, timeout=30)
         if response.status_code != 200:
-            return "Не удалось загрузить изображение."
+            return "⚠️ Не удалось загрузить изображение."
         image_base64 = base64.b64encode(response.content).decode('utf-8')
         prompt = """
-Ты — AURA. Опиши картинку коротко, 2-3 предложения.
-Что видишь на картинке? Назови объекты, цвета, стиль.
-Без лишней воды, без "распознано", без структуры.
-Просто описание. Максимум 150 символов.
+Ты — AURA. Ты видишь картинку и должен:
+1. Если на картинке есть текст — распознай его и напиши.
+2. Если есть что-то ещё — опиши кратко, что изображено.
+3. Ответь коротко, на русском, без лишней воды.
 """
         vision_client = OpenAI(
             api_key=DEEPSEEK_API_KEY,
@@ -295,17 +295,15 @@ async def recognize_image_with_deepseek(image_url: str) -> str:
                     ]
                 }
             ],
-            max_tokens=100,
-            temperature=0.3
+            max_tokens=300,
+            temperature=0.5
         )
         result = response.choices[0].message.content
-        if len(result) > 150:
-            result = result[:147] + "..."
-        logger.info(f"🖼️ DeepSeek Vision распознал картинку: {result[:50]}...")
+        logger.info(f"🖼️ DeepSeek Vision распознал картинку")
         return result
     except Exception as e:
         logger.error(f"❌ Ошибка распознавания через DeepSeek Vision: {e}")
-        return "Не удалось распознать изображение."
+        return "⚠️ Не удалось распознать изображение. Попробуйте ещё раз."
 
 # ============================================================
 # РАСПОЗНАВАНИЕ ГОЛОСА
@@ -603,10 +601,10 @@ async def webhook(request: Request):
                     await send_message(user_id, recognized_text)
                     save_message(user_id, "assistant", recognized_text)
                 else:
-                    await send_message(user_id, "Не удалось загрузить изображение.")
+                    await send_message(user_id, "⚠️ Не удалось загрузить изображение.")
             except Exception as e:
                 logger.error(f"❌ Ошибка обработки медиа: {e}")
-                await send_message(user_id, "Не удалось распознать изображение.")
+                await send_message(user_id, "⚠️ Не удалось распознать изображение.")
             return JSONResponse({"ok": True})
 
         # ============================================================
@@ -623,14 +621,14 @@ async def webhook(request: Request):
                     if text:
                         save_message(user_id, "user", text)
                     else:
-                        await send_message(user_id, "Не удалось распознать голос. Попробуй ещё раз.")
+                        await send_message(user_id, "⚠️ Не удалось распознать голос. Попробуй ещё раз.")
                         return JSONResponse({"ok": True})
                 else:
-                    await send_message(user_id, "Ошибка загрузки голосового сообщения.")
+                    await send_message(user_id, "⚠️ Ошибка загрузки голосового сообщения.")
                     return JSONResponse({"ok": True})
             except Exception as e:
                 logger.error(f"❌ Ошибка голоса: {e}")
-                await send_message(user_id, "Ошибка обработки голоса. Попробуй написать!")
+                await send_message(user_id, "⚠️ Ошибка обработки голоса. Попробуй написать!")
                 return JSONResponse({"ok": True})
         
         if not text:
