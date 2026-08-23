@@ -261,7 +261,7 @@ async def collect_lead(user_id: int, name: str, phone: str, question: str = ""):
         return {"error": str(e)}
 
 # ============================================================
-# РАСПОЗНАВАНИЕ КАРТИНОК (С ДЕБАГОМ)
+# РАСПОЗНАВАНИЕ КАРТИНОК
 # ============================================================
 async def recognize_image_with_deepseek(image_url: str) -> str:
     try:
@@ -503,6 +503,39 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
+# ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ССЫЛОК
+# ============================================================
+def add_links_to_response(text: str, user_query: str) -> str:
+    """Добавляет ссылки в ответ в зависимости от запроса"""
+    query_lower = user_query.lower()
+    link = None
+    
+    # Фильмы
+    if any(word in query_lower for word in ["фильм", "кино", "сериал", "мульт"]):
+        link = f"https://yandex.ru/video/search?text={user_query.replace(' ', '+')}"
+        return text + f"\n\n🔗 [Смотреть на Яндекс.Видео]({link})"
+    
+    # Билеты
+    if any(word in query_lower for word in ["билет", "рейс", "самолёт", "лететь"]):
+        link = f"https://www.aviasales.ru/search?q={user_query.replace(' ', '+')}"
+        return text + f"\n\n✈️ [Найти билеты на Aviasales]({link})"
+    
+    # Рецепты
+    if any(word in query_lower for word in ["рецепт", "приготовить", "блюдо", "еда"]):
+        link = f"https://www.youtube.com/results?search_query={user_query.replace(' ', '+')}"
+        return text + f"\n\n📺 [Смотреть рецепты на YouTube]({link})"
+    
+    # Клиника (сайт)
+    if any(word in query_lower for word in ["клиник", "больниц", "медцентр"]):
+        # Ищем название клиники
+        clinic_name = user_query.replace("клиника", "").strip()
+        if clinic_name:
+            link = f"https://yandex.ru/search/?text={clinic_name.replace(' ', '+')}+клиника"
+            return text + f"\n\n🔍 [Найти клинику в Яндексе]({link})"
+    
+    return text
+
+# ============================================================
 # ОСНОВНАЯ ЛОГИКА
 # ============================================================
 async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
@@ -698,9 +731,61 @@ async def webhook(request: Request):
         history = get_all_history(user_id)
         logger.info(f"📚 Загружена ПОЛНАЯ история для user_id {user_id}: {len(history)} сообщений")
 
-        # Знакомство — имя
+        # ============================================================
+        # ПОИСКОВЫЕ ЗАПРОСЫ — ВСЕГДА ИДЁМ В ЯНДЕКС-АГЕНТЫ
+        # ============================================================
+        search_keywords = ["найди", "поищи", "найти", "искать", "где", "как найти"]
+        if any(text.lower().startswith(word) for word in search_keywords) or len(text.split()) > 1:
+            user_name = get_fact(user_id, "name") or "Гость"
+            user_city = get_fact(user_id, "city") or "Москва"
+            budget = get_fact(user_id, "budget_travel") or ""
+
+            await send_typing(user_id)
+
+            # Определяем агента
+            if any(word in text.lower() for word in ["посоветуй", "что лучше", "стоит ли"]):
+                agent_id = AGENT_REASONING_ID
+            elif any(word in text.lower() for word in ["сравни", "проанализируй", "исследуй"]):
+                agent_id = AGENT_RESEARCH_ID
+            else:
+                agent_id = AGENT_SEARCH_ID
+
+            try:
+                raw_result = call_yandex_agent(agent_id, text, user_name, user_city, budget)
+                if raw_result:
+                    # Упаковываем ответ
+                    packed_prompt = f"""
+Ты — AURA. Отвечай коротко — 2-3 предложения. Добавь ссылку в конце, если уместно.
+
+Сырой ответ: {raw_result}
+
+Твой ответ (короткий, по делу):
+"""
+                    packed_response = deepseek.chat.completions.create(
+                        model="deepseek-chat",
+                        messages=[{"role": "system", "content": packed_prompt}],
+                        temperature=0.85,
+                        max_tokens=150,
+                        timeout=20
+                    )
+                    reply = packed_response.choices[0].message.content
+                    
+                    # Добавляем ссылки принудительно
+                    reply = add_links_to_response(reply, text)
+                    
+                    await send_message(user_id, reply)
+                    save_message(user_id, "assistant", reply)
+                    return JSONResponse({"ok": True})
+            except Exception as e:
+                logger.error(f"❌ Ошибка агента Яндекса: {e}")
+
+        # ============================================================
+        # ЗНАКОМСТВО — ИМЯ (НО НЕ "НАЙДИ")
+        # ============================================================
         if not get_fact(user_id, "name"):
-            if len(text.split()) == 1 and text[0].isupper() and len(text) > 1:
+            # Проверяем, что это не поисковый запрос
+            is_search_query = any(text.lower().startswith(word) for word in ["найди", "поищи", "найти", "искать"])
+            if len(text.split()) == 1 and text[0].isupper() and len(text) > 1 and not is_search_query:
                 save_fact(user_id, "name", text)
                 save_portrait_field(user_id, "name", text)
                 await send_typing(user_id)
@@ -716,7 +801,9 @@ async def webhook(request: Request):
                 await send_message(user_id, reply)
                 return JSONResponse({"ok": True})
 
-        # Знакомство — город
+        # ============================================================
+        # ЗНАКОМСТВО — ГОРОД
+        # ============================================================
         if not get_fact(user_id, "city"):
             if len(text.split()) == 1 and text[0].isupper() and len(text) > 1:
                 save_fact(user_id, "city", text)
@@ -736,119 +823,15 @@ async def webhook(request: Request):
                 return JSONResponse({"ok": True})
 
         # ============================================================
-        # ОСНОВНАЯ ЛОГИКА С ПОИСКОМ
-        # ============================================================
-        user_name = get_fact(user_id, "name") or "Гость"
-        user_city = get_fact(user_id, "city") or "Москва"
-        budget = get_fact(user_id, "budget_travel") or ""
-
-        await send_typing(user_id)
-
-        content_triggers = ["фильм", "сериал", "видео", "рецепт", "картинки", "фото", "изображения", "обзор", "как приготовить", "как сделать", "смотреть", "клип", "трейлер"]
-        search_triggers = ["найди", "поищи", "цены", "билеты", "скидки", "акции", "новости", "погода", "курс", "стоимость", "купить", "товар"]
-        analyze_triggers = ["сравни", "проанализируй", "исследуй", "изучи", "разбери"]
-        reason_triggers = ["посоветуй", "что лучше", "как поступить", "выбери", "рекомендуй", "стоит ли"]
-
-        if any(word in text.lower() for word in content_triggers):
-            text_lower = text.lower()
-            
-            if any(word in text_lower for word in ["рецепт", "приготовить", "блюдо", "еда", "готовка", "кулинария"]):
-                platform = "youtube"
-                search_query = text
-                platform_name = "YouTube"
-                link_text = f"🔗 [Смотреть рецепты на YouTube](https://www.youtube.com/results?search_query={text.replace(' ', '+')})"
-            elif "rutube" in text_lower:
-                platform = "rutube"
-                search_query = text
-                platform_name = "Rutube"
-                link_text = f"🔗 [Смотреть на Rutube](https://rutube.ru/search/?q={text.replace(' ', '+')})"
-            else:
-                platform_info = detect_content_platform(text)
-                platform = platform_info.get("platform", "yandex_video")
-                search_query = platform_info.get("search_query", text)
-                platform_name = {"yandex_video": "Яндекс.Видео", "youtube": "YouTube", "yandex_images": "Яндекс.Картинки"}.get(platform, "Яндекс.Видео")
-                link_text = get_platform_link(platform, search_query)
-                if link_text:
-                    link_text = f"🔗 [Смотреть на {platform_name}]({link_text})"
-            
-            platform_map = {"yandex_video": "яндекс видео", "youtube": "youtube", "yandex_images": "яндекс картинки", "rutube": "rutube"}
-            full_query = f"{search_query} {platform_map.get(platform, 'яндекс видео')}"
-            
-            raw_result = call_yandex_agent(AGENT_SEARCH_ID, full_query, user_name, user_city)
-            
-            if raw_result:
-                packed_prompt = f"""
-Ты — AURA. Отвечай коротко — 2-3 предложения. Добавь ссылку в конце.
-
-Сырой ответ: {raw_result}
-
-Твой ответ (короткий, со ссылкой): {link_text if link_text else ""}
-"""
-                packed_response = deepseek.chat.completions.create(
-                    model="deepseek-chat",
-                    messages=[{"role": "system", "content": packed_prompt}],
-                    temperature=0.85,
-                    max_tokens=150,
-                    timeout=20
-                )
-                packed = packed_response.choices[0].message.content
-                
-                if link_text and "http" not in packed:
-                    packed += f"\n\n{link_text}"
-                
-                await send_message(user_id, packed)
-                save_message(user_id, "assistant", packed)
-            else:
-                await send_message(user_id, "Не нашёл.")
-            return JSONResponse({"ok": True})
-
-        if any(word in text.lower() for word in search_triggers + analyze_triggers + reason_triggers):
-            if any(word in text.lower() for word in reason_triggers):
-                agent_id = AGENT_REASONING_ID
-            elif any(word in text.lower() for word in analyze_triggers):
-                agent_id = AGENT_RESEARCH_ID
-            else:
-                agent_id = AGENT_SEARCH_ID
-
-            try:
-                raw_result = call_yandex_agent(agent_id, text, user_name, user_city, budget)
-                if raw_result:
-                    packed_prompt = f"""
-Ты — AURA. Отвечай коротко — 2-3 предложения.
-
-Сырой ответ: {raw_result}
-
-Твой ответ (короткий):
-"""
-                    packed_response = deepseek.chat.completions.create(
-                        model="deepseek-chat",
-                        messages=[{"role": "system", "content": packed_prompt}],
-                        temperature=0.85,
-                        max_tokens=150,
-                        timeout=20
-                    )
-                    packed = packed_response.choices[0].message.content
-                    await send_message(user_id, packed)
-                    save_message(user_id, "assistant", packed)
-                    return JSONResponse({"ok": True})
-            except Exception as e:
-                logger.error(f"❌ Ошибка агента Яндекса: {e}")
-
-            result = await search_organization(text, get_fact(user_id, "city") or "Белово")
-            if result and "error" not in result:
-                reply = f"🏥 **{result['name']}**\n📍 {result['address']}\n📞 {', '.join(result['phones'][:3])}\n🌐 [Сайт]({result['site']})"
-                await send_message(user_id, reply)
-                save_message(user_id, "assistant", reply)
-            else:
-                await send_message(user_id, "Не нашёл.")
-            return JSONResponse({"ok": True})
-
-        # ============================================================
         # ОБЫЧНЫЙ ДИАЛОГ
         # ============================================================
         history = get_all_history(user_id)
         result = await deepseek_interview(user_id, text, history)
         reply = result.get("reply", "😅 Не понял.")
+        
+        # Добавляем ссылки, если нужно
+        reply = add_links_to_response(reply, text)
+        
         save_message(user_id, "assistant", reply)
         await send_typing(user_id)
         await send_message(user_id, reply)
