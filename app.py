@@ -35,7 +35,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GIS_API_KEY = os.getenv("GIS_API_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "5818548555")  # Твой Telegram ID
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "5818548555")
 
 AGENT_SEARCH_ID = os.getenv("YANDEX_AGENT_ID", "fvt3te2kgttig7u3a1fb")
 AGENT_RESEARCH_ID = os.getenv("YANDEX_AGENT_RESEARCH_ID", "fvti80ngse2778agbmdl")
@@ -55,9 +55,6 @@ if SUPABASE_URL and SUPABASE_KEY:
 app = FastAPI()
 user_states = {}
 
-# ============================================================
-# ЗАЩИТА ОТ ПОВТОРНЫХ ЗАПРОСОВ
-# ============================================================
 user_last_requests = {}
 
 def get_request_hash(user_id, text):
@@ -72,9 +69,6 @@ def is_duplicate(user_id, text):
     user_last_requests[user_id].append(hash_val)
     return False
 
-# ============================================================
-# КЕШИРОВАНИЕ
-# ============================================================
 agent_cache = {}
 
 def get_cached_response(hash_val):
@@ -89,9 +83,6 @@ def get_cached_response(hash_val):
 def cache_response(hash_val, response):
     agent_cache[hash_val] = {"response": response, "timestamp": datetime.now()}
 
-# ============================================================
-# ПАМЯТЬ
-# ============================================================
 def save_fact(user_id, key, value):
     if not supabase:
         return
@@ -149,9 +140,6 @@ def save_portrait_field(user_id, field, value):
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения портрета: {e}")
 
-# ============================================================
-# ИСТОРИЯ
-# ============================================================
 def save_message(user_id, role, content):
     if not supabase:
         return
@@ -193,78 +181,7 @@ def clear_user_history(user_id):
         logger.error(f"❌ Ошибка очистки истории: {e}")
 
 # ============================================================
-# РУКИ — МОДУЛЬ ДЕЙСТВИЙ
-# ============================================================
-
-async def collect_lead(user_id: int, name: str, phone: str, question: str = ""):
-    """Собирает заявку и уведомляет админа"""
-    if not supabase:
-        return {"error": "Supabase не подключён"}
-    
-    try:
-        # Сохраняем в Supabase
-        supabase.table("leads").insert({
-            "user_id": user_id,
-            "name": name,
-            "phone": phone,
-            "question": question,
-            "created_at": datetime.now().isoformat()
-        }).execute()
-        logger.info(f"✅ Заявка сохранена: {name} ({phone})")
-        
-        # Уведомляем админа
-        admin_message = f"""
-📩 **Новая заявка!**
-
-👤 Имя: {name}
-📱 Телефон: {phone}
-💬 Вопрос: {question if question else "Не указан"}
-
-📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}
-"""
-        await send_message(ADMIN_CHAT_ID, admin_message)
-        
-        return {"status": "success", "name": name, "phone": phone}
-    except Exception as e:
-        logger.error(f"❌ Ошибка сохранения заявки: {e}")
-        return {"error": str(e)}
-
-async def add_calendar_event(user_id: int, title: str, date: str, time: str, description: str = ""):
-    """Добавляет событие в Google Calendar (заглушка — требует настройки API)"""
-    # TODO: Подключить Google Calendar API
-    # Пока просто сохраняем в Supabase
-    if not supabase:
-        return {"error": "Supabase не подключён"}
-    
-    try:
-        supabase.table("calendar_events").insert({
-            "user_id": user_id,
-            "title": title,
-            "date": date,
-            "time": time,
-            "description": description,
-            "created_at": datetime.now().isoformat()
-        }).execute()
-        logger.info(f"✅ Событие сохранено: {title} на {date} в {time}")
-        return {"status": "success", "title": title, "date": date, "time": time}
-    except Exception as e:
-        logger.error(f"❌ Ошибка сохранения события: {e}")
-        return {"error": str(e)}
-
-async def send_sms_via_telegram(phone: str, text: str):
-    """Отправляет СМС через Telegram API (если номер зарегистрирован в Telegram)"""
-    # TODO: Для реальных СМС использовать Twilio или SMS-шлюз
-    try:
-        # Через Telegram можно отправлять только если номер в Telegram
-        # Временно — логируем
-        logger.info(f"📱 СМС на {phone}: {text}")
-        return {"status": "success", "message": "СМС отправлена"}
-    except Exception as e:
-        logger.error(f"❌ Ошибка отправки СМС: {e}")
-        return {"error": str(e)}
-
-# ============================================================
-# ПОИСК В ИСТОРИИ
+# ПОИСК В ИСТОРИИ (ВОССТАНОВЛЕН)
 # ============================================================
 def find_in_history(history, text):
     if not history:
@@ -312,6 +229,59 @@ def extract_facts(found_messages, text):
     result = "\n\n".join(parts)
     logger.info(f"📌 Извлечено {len(parts)} сообщений")
     return result
+
+# ============================================================
+# РУКИ
+# ============================================================
+async def collect_lead(user_id: int, name: str, phone: str, question: str = ""):
+    if not supabase:
+        return {"error": "Supabase не подключён"}
+    try:
+        supabase.table("leads").insert({
+            "user_id": user_id,
+            "name": name,
+            "phone": phone,
+            "question": question,
+            "created_at": datetime.now().isoformat()
+        }).execute()
+        logger.info(f"✅ Заявка сохранена: {name} ({phone})")
+        admin_message = f"""
+📩 **Новая заявка!**
+
+👤 Имя: {name}
+📱 Телефон: {phone}
+💬 Вопрос: {question if question else "Не указан"}
+
+📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}
+"""
+        await send_message(ADMIN_CHAT_ID, admin_message)
+        return {"status": "success", "name": name, "phone": phone}
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения заявки: {e}")
+        return {"error": str(e)}
+
+async def add_calendar_event(user_id: int, title: str, date: str, time: str, description: str = ""):
+    # Заглушка
+    if not supabase:
+        return {"error": "Supabase не подключён"}
+    try:
+        supabase.table("calendar_events").insert({
+            "user_id": user_id,
+            "title": title,
+            "date": date,
+            "time": time,
+            "description": description,
+            "created_at": datetime.now().isoformat()
+        }).execute()
+        logger.info(f"✅ Событие сохранено: {title} на {date} в {time}")
+        return {"status": "success", "title": title, "date": date, "time": time}
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения события: {e}")
+        return {"error": str(e)}
+
+async def send_sms_via_telegram(phone: str, text: str):
+    logger.info(f"📱 СМС на {phone}: {text}")
+    return {"status": "success", "message": "СМС отправлена"}
 
 # ============================================================
 # РАСПОЗНАВАНИЕ КАРТИНОК
@@ -386,9 +356,6 @@ def transcribe_audio(audio_url):
         logger.error(f"❌ Ошибка распознавания: {e}")
         return None
 
-# ============================================================
-# ВЫЗОВ АГЕНТОВ ЯНДЕКСА
-# ============================================================
 def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_city: str = "", budget: str = "") -> str:
     hash_val = hashlib.md5(f"{agent_id}:{user_text}:{user_name}:{user_city}:{budget}".encode()).hexdigest()
     cached = get_cached_response(hash_val)
@@ -421,9 +388,6 @@ def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_c
         logger.error(f"❌ Ошибка агента Яндекса ({agent_id}): {e}")
         return ""
 
-# ============================================================
-# ОПРЕДЕЛЕНИЕ ПЛАТФОРМЫ
-# ============================================================
 def detect_content_platform(text: str) -> dict:
     try:
         prompt = f"""
@@ -565,32 +529,63 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА
+# ОСНОВНАЯ ЛОГИКА (С ПОИСКОМ В ИСТОРИИ)
 # ============================================================
 async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
     user_name = get_fact(user_id, "name") or "Гость"
     user_city = get_fact(user_id, "city") or "Москва"
+    portrait = get_portrait(user_id)
     
-    history_text = ""
-    if history:
-        history_lines = []
-        for h in history[-20:]:
-            role = "Пользователь" if h['role'] == 'user' else "AURA"
-            content = h['content']
-            history_lines.append(f"{role}: {content}")
-        history_text = "\n".join(history_lines)
-    
+    portrait_context = ""
+    if portrait:
+        parts = []
+        if portrait.get('name'): parts.append(f"имя: {portrait['name']}")
+        if portrait.get('city'): parts.append(f"город: {portrait['city']}")
+        if portrait.get('hobbies'):
+            hobbies = ", ".join(portrait['hobbies'][:3]) if isinstance(portrait['hobbies'], list) else portrait['hobbies']
+            parts.append(f"увлечения: {hobbies}")
+        if portrait.get('favorite_cuisine'):
+            cuisine = ", ".join(portrait['favorite_cuisine']) if isinstance(portrait['favorite_cuisine'], list) else portrait['favorite_cuisine']
+            parts.append(f"любимая кухня: {cuisine}")
+        if parts:
+            portrait_context = "ПОРТРЕТ: " + ", ".join(parts) + "."
+
+    # Ищем в истории по ключевым словам
+    found = find_in_history(history, text)
+    facts = extract_facts(found, text) if found else None
+
+    if facts:
+        logger.info(f"📌 ИЗВЛЕЧЕНЫ ФАКТЫ: {facts[:200]}...")
+    else:
+        logger.info("📌 ФАКТЫ НЕ НАЙДЕНЫ")
+
+    # Формируем историю (последние 20 сообщений, если факты не найдены)
+    if facts:
+        # Если факты найдены, используем их, а не всю историю
+        context = f"ФАКТЫ ИЗ ИСТОРИИ:\n{facts}"
+    else:
+        # Иначе используем последние 20 сообщений
+        history_text = ""
+        if history:
+            history_lines = []
+            for h in history[-20:]:
+                role = "Пользователь" if h['role'] == 'user' else "AURA"
+                content = h['content']
+                history_lines.append(f"{role}: {content}")
+            history_text = "\n".join(history_lines)
+        context = f"ИСТОРИЯ (последние 20 сообщений):\n{history_text}"
+
     prompt = f"""
 Ты — AURA. Отвечай коротко — максимум 2-3 предложения. Без приветствий, без "здравствуйте". Просто продолжай диалог.
 
-ИСТОРИЯ:
-{history_text}
+{portrait_context}
 
-ПОЛЬЗОВАТЕЛЬ: "{text}"
+{context}
+
+СЕЙЧАС ПОЛЬЗОВАТЕЛЬ: "{text}"
 
 ОТВЕТЬ (2-3 предложения, по делу):
 """
-    
     try:
         response = deepseek.chat.completions.create(
             model="deepseek-chat",
@@ -600,7 +595,7 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
             timeout=20
         )
         reply = response.choices[0].message.content
-        logger.info(f"✅ DeepSeek ответил коротко")
+        logger.info(f"✅ DeepSeek ответил")
         return {"reply": reply, "score": 0}
     except Exception as e:
         logger.error(f"❌ Ошибка DeepSeek: {e}")
@@ -635,8 +630,10 @@ async def webhook(request: Request):
                 if file_resp.status_code == 200 and file_resp.json().get("ok"):
                     image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_resp.json()['result']['file_path']}"
                     recognized_text = await recognize_image_with_deepseek(image_url)
-                    await send_message(user_id, f"🖼️ **Распознано:**\n\n{recognized_text}")
-                    save_message(user_id, "assistant", f"Распознано: {recognized_text[:200]}")
+                    reply = f"🖼️ **Распознано:**\n\n{recognized_text}"
+                    await send_message(user_id, reply)
+                    # Сохраняем в историю с пометкой "распознано"
+                    save_message(user_id, "assistant", reply)
                 else:
                     await send_message(user_id, "⚠️ Не удалось загрузить изображение.")
             except Exception as e:
@@ -703,7 +700,7 @@ async def webhook(request: Request):
             return JSONResponse({"ok": True})
 
         # ============================================================
-        # ОБРАБОТКА ЗАЯВОК (НОВОЕ)
+        # ОБРАБОТКА ЗАЯВОК
         # ============================================================
         if any(word in text.lower() for word in ["заявк", "хочу сотрудничать", "свяжитесь", "обратная связь"]):
             await send_message(user_id, "📩 Отлично! Давайте соберём ваши контакты.\n\nКак вас зовут?")
@@ -720,10 +717,8 @@ async def webhook(request: Request):
         if user_id in user_states and user_states[user_id].get("state") == "collecting_phone":
             phone = text.strip()
             name = user_states[user_id].get("name", "Гость")
-            # Сохраняем заявку
             await collect_lead(user_id, name, phone, "")
             await send_message(user_id, f"✅ Спасибо, {name}! Ваша заявка принята. С вами свяжутся в ближайшее время.")
-            # Очищаем состояние
             del user_states[user_id]
             return JSONResponse({"ok": True})
 
@@ -881,7 +876,7 @@ async def webhook(request: Request):
             return JSONResponse({"ok": True})
 
         # ============================================================
-        # ОБЫЧНЫЙ ДИАЛОГ — КОРОТКО, ПО ДЕЛУ
+        # ОБЫЧНЫЙ ДИАЛОГ
         # ============================================================
         history = get_all_history(user_id)
         result = await deepseek_interview(user_id, text, history)
