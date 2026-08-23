@@ -261,7 +261,7 @@ async def collect_lead(user_id: int, name: str, phone: str, question: str = ""):
         return {"error": str(e)}
 
 # ============================================================
-# РАСПОЗНАВАНИЕ КАРТИНОК (КОРОТКО)
+# РАСПОЗНАВАНИЕ КАРТИНОК (КОРОТКО, БЕЗ ЛИШНЕЙ ВОДЫ)
 # ============================================================
 async def recognize_image_with_deepseek(image_url: str) -> str:
     try:
@@ -273,7 +273,7 @@ async def recognize_image_with_deepseek(image_url: str) -> str:
 Ты — AURA. Опиши картинку коротко, 2-3 предложения.
 Что видишь на картинке? Назови объекты, цвета, стиль.
 Без лишней воды, без "распознано", без структуры.
-Просто описание.
+Просто описание. Максимум 150 символов.
 """
         vision_client = OpenAI(
             api_key=DEEPSEEK_API_KEY,
@@ -295,11 +295,13 @@ async def recognize_image_with_deepseek(image_url: str) -> str:
                     ]
                 }
             ],
-            max_tokens=150,
+            max_tokens=100,
             temperature=0.3
         )
         result = response.choices[0].message.content
-        logger.info(f"🖼️ DeepSeek Vision распознал картинку")
+        if len(result) > 150:
+            result = result[:147] + "..."
+        logger.info(f"🖼️ DeepSeek Vision распознал картинку: {result[:50]}...")
         return result
     except Exception as e:
         logger.error(f"❌ Ошибка распознавания через DeepSeek Vision: {e}")
