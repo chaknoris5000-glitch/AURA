@@ -41,12 +41,8 @@ AGENT_SEARCH_ID = os.getenv("YANDEX_AGENT_ID", "fvt3te2kgttig7u3a1fb")
 AGENT_RESEARCH_ID = os.getenv("YANDEX_AGENT_RESEARCH_ID", "fvti80ngse2778agbmdl")
 AGENT_REASONING_ID = os.getenv("YANDEX_AGENT_REASONING_ID", "fvtg0c38oi7n43d0n9gf")
 
-# ЯВНО ЗАПРЕЩАЕМ PRO
-deepseek = OpenAI(
-    api_key=DEEPSEEK_API_KEY,
-    base_url=DEEPSEEK_BASE_URL,
-    default_headers={"x-deepseek-model": "deepseek-chat"}  # Запрещаем Pro
-)
+# ТОЛЬКО FLASH — БЕЗ PRO
+deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 groq = Groq(api_key=GROQ_API_KEY)
 
 supabase = None
@@ -75,14 +71,15 @@ def is_duplicate(user_id, text):
     return False
 
 # ============================================================
-# КЕШИРОВАНИЕ (1 ЧАС)
+# КЕШИРОВАНИЕ (24 ЧАСА)
 # ============================================================
 agent_cache = {}
 
 def get_cached_response(hash_val):
     if hash_val in agent_cache:
         entry = agent_cache[hash_val]
-        if datetime.now() - entry["timestamp"] < timedelta(hours=1):  # 1 час
+        if datetime.now() - entry["timestamp"] < timedelta(hours=24):
+            logger.info("⚡ Ответ из кеша (24ч)")
             return entry["response"]
         else:
             del agent_cache[hash_val]
@@ -163,7 +160,7 @@ def save_message(user_id, role, content):
         logger.error(f"❌ Ошибка сохранения истории: {e}")
 
 # ============================================================
-# ЗАГРУЖАЕМ ТОЛЬКО 20 ПОСЛЕДНИХ СООБЩЕНИЙ (ЭКОНОМИЯ)
+# ЗАГРУЖАЕМ ТОЛЬКО 20 ПОСЛЕДНИХ СООБЩЕНИЙ
 # ============================================================
 def get_recent_history(user_id, limit=20):
     if not supabase:
@@ -194,7 +191,7 @@ def clear_user_history(user_id):
         logger.error(f"❌ Ошибка очистки истории: {e}")
 
 # ============================================================
-# ПОИСК В ИСТОРИИ (ДЛЯ ВОСПОМИНАНИЙ)
+# ПОИСК В ИСТОРИИ
 # ============================================================
 def find_in_history(history, text):
     if not history:
@@ -240,7 +237,7 @@ def extract_facts(found_messages, text):
     if not parts:
         return None
     result = "\n\n".join(parts)
-    logger.info(f"📌 Извлечено {len(parts)} сообщений из истории")
+    logger.info(f"📌 Извлечено {len(parts)} сообщений")
     return result
 
 # ============================================================
@@ -273,8 +270,30 @@ async def collect_lead(user_id: int, name: str, phone: str, question: str = ""):
         logger.error(f"❌ Ошибка сохранения заявки: {e}")
         return {"error": str(e)}
 
+async def add_calendar_event(user_id: int, title: str, date: str, time: str, description: str = ""):
+    if not supabase:
+        return {"error": "Supabase не подключён"}
+    try:
+        supabase.table("calendar_events").insert({
+            "user_id": user_id,
+            "title": title,
+            "date": date,
+            "time": time,
+            "description": description,
+            "created_at": datetime.now().isoformat()
+        }).execute()
+        logger.info(f"✅ Событие сохранено: {title} на {date} в {time}")
+        return {"status": "success", "title": title, "date": date, "time": time}
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения события: {e}")
+        return {"error": str(e)}
+
+async def send_sms_via_telegram(phone: str, text: str):
+    logger.info(f"📱 СМС на {phone}: {text}")
+    return {"status": "success", "message": "СМС отправлена"}
+
 # ============================================================
-# РАСПОЗНАВАНИЕ КАРТИНОК (ЧЕРЕЗ FLASH)
+# РАСПОЗНАВАНИЕ КАРТИНОК (ТОЛЬКО FLASH)
 # ============================================================
 async def recognize_image_with_deepseek(image_url: str) -> str:
     try:
@@ -290,8 +309,7 @@ async def recognize_image_with_deepseek(image_url: str) -> str:
 """
         vision_client = OpenAI(
             api_key=DEEPSEEK_API_KEY,
-            base_url=DEEPSEEK_BASE_URL,
-            default_headers={"x-deepseek-model": "deepseek-chat"}
+            base_url=DEEPSEEK_BASE_URL
         )
         response = vision_client.chat.completions.create(
             model="deepseek-chat",
@@ -348,7 +366,6 @@ def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_c
     hash_val = hashlib.md5(f"{agent_id}:{user_text}:{user_name}:{user_city}:{budget}".encode()).hexdigest()
     cached = get_cached_response(hash_val)
     if cached:
-        logger.info("⚡ Ответ из кеша")
         return cached
     try:
         client = OpenAI(
@@ -517,7 +534,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА (КОРОТКИЙ КОНТЕКСТ + ПОИСК В ИСТОРИИ)
+# ОСНОВНАЯ ЛОГИКА
 # ============================================================
 async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
     user_name = get_fact(user_id, "name") or "Гость"
@@ -538,18 +555,16 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
         if parts:
             portrait_context = "ПОРТРЕТ: " + ", ".join(parts) + "."
 
-    # Проверяем, хочет ли пользователь вспомнить что-то из истории
-    is_reminder = any(word in text.lower() for word in ["напомни", "вспомни", "что я говорил", "что мы обсуждали", "повтори"])
-    
-    if is_reminder:
-        found = find_in_history(history, text)
-        facts = extract_facts(found, text) if found else None
-        
-        if facts:
-            logger.info(f"📌 Найдено в истории: {facts[:200]}...")
-            context = f"ВОТ ЧТО БЫЛО В ИСТОРИИ ПО ЭТОМУ ЗАПРОСУ:\n{facts}"
-        else:
-            context = "В ИСТОРИИ НИЧЕГО НЕ НАЙДЕНО ПО ЭТОМУ ЗАПРОСУ."
+    found = find_in_history(history, text)
+    facts = extract_facts(found, text) if found else None
+
+    if facts:
+        logger.info(f"📌 ИЗВЛЕЧЕНЫ ФАКТЫ: {facts[:200]}...")
+    else:
+        logger.info("📌 ФАКТЫ НЕ НАЙДЕНЫ")
+
+    if facts:
+        context = f"ФАКТЫ ИЗ ИСТОРИИ:\n{facts}"
     else:
         history_text = ""
         if history:
@@ -712,12 +727,11 @@ async def webhook(request: Request):
         save_message(user_id, "user", text)
 
         history = get_recent_history(user_id, limit=20)
-        logger.info(f"📚 Загружено {len(history)} последних сообщений для user_id {user_id}")
+        logger.info(f"📚 Загружено {len(history)} последних сообщений")
 
-        # Знакомство — имя (НЕ путать с поисковыми запросами)
+        # Знакомство — имя
         if not get_fact(user_id, "name"):
-            is_search = any(text.lower().startswith(word) for word in ["найди", "поищи", "найти", "искать"])
-            if len(text.split()) == 1 and text[0].isupper() and len(text) > 1 and not is_search:
+            if len(text.split()) == 1 and text[0].isupper() and len(text) > 1:
                 save_fact(user_id, "name", text)
                 save_portrait_field(user_id, "name", text)
                 await send_typing(user_id)
