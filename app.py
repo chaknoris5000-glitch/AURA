@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
+# ============================================================
+# КОНФИГУРАЦИЯ
+# ============================================================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
@@ -32,6 +35,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GIS_API_KEY = os.getenv("GIS_API_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "5818548555")  # Твой Telegram ID
 
 AGENT_SEARCH_ID = os.getenv("YANDEX_AGENT_ID", "fvt3te2kgttig7u3a1fb")
 AGENT_RESEARCH_ID = os.getenv("YANDEX_AGENT_RESEARCH_ID", "fvti80ngse2778agbmdl")
@@ -51,6 +55,9 @@ if SUPABASE_URL and SUPABASE_KEY:
 app = FastAPI()
 user_states = {}
 
+# ============================================================
+# ЗАЩИТА ОТ ПОВТОРНЫХ ЗАПРОСОВ
+# ============================================================
 user_last_requests = {}
 
 def get_request_hash(user_id, text):
@@ -65,6 +72,9 @@ def is_duplicate(user_id, text):
     user_last_requests[user_id].append(hash_val)
     return False
 
+# ============================================================
+# КЕШИРОВАНИЕ
+# ============================================================
 agent_cache = {}
 
 def get_cached_response(hash_val):
@@ -79,6 +89,9 @@ def get_cached_response(hash_val):
 def cache_response(hash_val, response):
     agent_cache[hash_val] = {"response": response, "timestamp": datetime.now()}
 
+# ============================================================
+# ПАМЯТЬ
+# ============================================================
 def save_fact(user_id, key, value):
     if not supabase:
         return
@@ -136,6 +149,9 @@ def save_portrait_field(user_id, field, value):
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения портрета: {e}")
 
+# ============================================================
+# ИСТОРИЯ
+# ============================================================
 def save_message(user_id, role, content):
     if not supabase:
         return
@@ -176,6 +192,80 @@ def clear_user_history(user_id):
     except Exception as e:
         logger.error(f"❌ Ошибка очистки истории: {e}")
 
+# ============================================================
+# РУКИ — МОДУЛЬ ДЕЙСТВИЙ
+# ============================================================
+
+async def collect_lead(user_id: int, name: str, phone: str, question: str = ""):
+    """Собирает заявку и уведомляет админа"""
+    if not supabase:
+        return {"error": "Supabase не подключён"}
+    
+    try:
+        # Сохраняем в Supabase
+        supabase.table("leads").insert({
+            "user_id": user_id,
+            "name": name,
+            "phone": phone,
+            "question": question,
+            "created_at": datetime.now().isoformat()
+        }).execute()
+        logger.info(f"✅ Заявка сохранена: {name} ({phone})")
+        
+        # Уведомляем админа
+        admin_message = f"""
+📩 **Новая заявка!**
+
+👤 Имя: {name}
+📱 Телефон: {phone}
+💬 Вопрос: {question if question else "Не указан"}
+
+📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}
+"""
+        await send_message(ADMIN_CHAT_ID, admin_message)
+        
+        return {"status": "success", "name": name, "phone": phone}
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения заявки: {e}")
+        return {"error": str(e)}
+
+async def add_calendar_event(user_id: int, title: str, date: str, time: str, description: str = ""):
+    """Добавляет событие в Google Calendar (заглушка — требует настройки API)"""
+    # TODO: Подключить Google Calendar API
+    # Пока просто сохраняем в Supabase
+    if not supabase:
+        return {"error": "Supabase не подключён"}
+    
+    try:
+        supabase.table("calendar_events").insert({
+            "user_id": user_id,
+            "title": title,
+            "date": date,
+            "time": time,
+            "description": description,
+            "created_at": datetime.now().isoformat()
+        }).execute()
+        logger.info(f"✅ Событие сохранено: {title} на {date} в {time}")
+        return {"status": "success", "title": title, "date": date, "time": time}
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения события: {e}")
+        return {"error": str(e)}
+
+async def send_sms_via_telegram(phone: str, text: str):
+    """Отправляет СМС через Telegram API (если номер зарегистрирован в Telegram)"""
+    # TODO: Для реальных СМС использовать Twilio или SMS-шлюз
+    try:
+        # Через Telegram можно отправлять только если номер в Telegram
+        # Временно — логируем
+        logger.info(f"📱 СМС на {phone}: {text}")
+        return {"status": "success", "message": "СМС отправлена"}
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки СМС: {e}")
+        return {"error": str(e)}
+
+# ============================================================
+# ПОИСК В ИСТОРИИ
+# ============================================================
 def find_in_history(history, text):
     if not history:
         return []
@@ -223,6 +313,9 @@ def extract_facts(found_messages, text):
     logger.info(f"📌 Извлечено {len(parts)} сообщений")
     return result
 
+# ============================================================
+# РАСПОЗНАВАНИЕ КАРТИНОК
+# ============================================================
 async def recognize_image_with_deepseek(image_url: str) -> str:
     try:
         response = requests.get(image_url, timeout=30)
@@ -270,6 +363,9 @@ async def recognize_image_with_deepseek(image_url: str) -> str:
         logger.error(f"❌ Ошибка распознавания через DeepSeek Vision: {e}")
         return "⚠️ Не удалось распознать изображение. Попробуйте ещё раз."
 
+# ============================================================
+# РАСПОЗНАВАНИЕ ГОЛОСА
+# ============================================================
 def transcribe_audio(audio_url):
     try:
         resp = requests.get(audio_url, timeout=30)
@@ -290,6 +386,9 @@ def transcribe_audio(audio_url):
         logger.error(f"❌ Ошибка распознавания: {e}")
         return None
 
+# ============================================================
+# ВЫЗОВ АГЕНТОВ ЯНДЕКСА
+# ============================================================
 def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_city: str = "", budget: str = "") -> str:
     hash_val = hashlib.md5(f"{agent_id}:{user_text}:{user_name}:{user_city}:{budget}".encode()).hexdigest()
     cached = get_cached_response(hash_val)
@@ -322,6 +421,9 @@ def call_yandex_agent(agent_id: str, user_text: str, user_name: str = "", user_c
         logger.error(f"❌ Ошибка агента Яндекса ({agent_id}): {e}")
         return ""
 
+# ============================================================
+# ОПРЕДЕЛЕНИЕ ПЛАТФОРМЫ
+# ============================================================
 def detect_content_platform(text: str) -> dict:
     try:
         prompt = f"""
@@ -463,7 +565,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА (КОРОТКИЕ ОТВЕТЫ)
+# ОСНОВНАЯ ЛОГИКА
 # ============================================================
 async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
     user_name = get_fact(user_id, "name") or "Гость"
@@ -518,6 +620,9 @@ async def webhook(request: Request):
         user_id = msg["from"]["id"]
         text = msg.get("text", "")
 
+        # ============================================================
+        # ОБРАБОТКА КАРТИНОК
+        # ============================================================
         if "photo" in msg or "document" in msg:
             if "photo" in msg:
                 file_id = msg["photo"][-1]["file_id"]
@@ -539,6 +644,9 @@ async def webhook(request: Request):
                 await send_message(user_id, "⚠️ Не удалось распознать изображение.")
             return JSONResponse({"ok": True})
 
+        # ============================================================
+        # ОБРАБОТКА ГОЛОСА
+        # ============================================================
         if "voice" in msg:
             file_id = msg["voice"]["file_id"]
             file_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
@@ -563,10 +671,16 @@ async def webhook(request: Request):
         if not text:
             return JSONResponse({"ok": True})
 
+        # ============================================================
+        # ЗАЩИТА ОТ ПОВТОРОВ
+        # ============================================================
         if is_duplicate(user_id, text):
             logger.warning(f"⚠️ Повторный запрос от {user_id}: {text}")
             return JSONResponse({"ok": True})
 
+        # ============================================================
+        # ВРЕМЯ
+        # ============================================================
         time_phrases = ["сколько время", "который час", "точное время", "часы покажи", "время сейчас", "какое время", "сколько сейчас время", "который сейчас час"]
         if any(phrase in text.lower() for phrase in time_phrases):
             user_city = get_fact(user_id, "city") or "Москва"
@@ -574,6 +688,9 @@ async def webhook(request: Request):
             await send_message(user_id, f"⏰ Сейчас {get_time_for_city(user_city)} по местному времени ({user_city}).")
             return JSONResponse({"ok": True})
 
+        # ============================================================
+        # КОМАНДЫ
+        # ============================================================
         if text == "/start":
             await send_typing(user_id)
             await send_message(user_id, "Привет. Я AURA. Если ты здесь — значит, ты уже не просто ищешь, а хочешь, чтобы искали за тебя. Напиши, что нужно — и я покажу, на что способен.")
@@ -585,6 +702,34 @@ async def webhook(request: Request):
             await send_message(user_id, "✅ История очищена. Начинаем с чистого листа.")
             return JSONResponse({"ok": True})
 
+        # ============================================================
+        # ОБРАБОТКА ЗАЯВОК (НОВОЕ)
+        # ============================================================
+        if any(word in text.lower() for word in ["заявк", "хочу сотрудничать", "свяжитесь", "обратная связь"]):
+            await send_message(user_id, "📩 Отлично! Давайте соберём ваши контакты.\n\nКак вас зовут?")
+            user_states[user_id] = {"state": "collecting_name"}
+            return JSONResponse({"ok": True})
+
+        if user_id in user_states and user_states[user_id].get("state") == "collecting_name":
+            name = text.strip()
+            user_states[user_id]["name"] = name
+            user_states[user_id]["state"] = "collecting_phone"
+            await send_message(user_id, f"Спасибо, {name}! Теперь ваш номер телефона (в формате +7...).")
+            return JSONResponse({"ok": True})
+
+        if user_id in user_states and user_states[user_id].get("state") == "collecting_phone":
+            phone = text.strip()
+            name = user_states[user_id].get("name", "Гость")
+            # Сохраняем заявку
+            await collect_lead(user_id, name, phone, "")
+            await send_message(user_id, f"✅ Спасибо, {name}! Ваша заявка принята. С вами свяжутся в ближайшее время.")
+            # Очищаем состояние
+            del user_states[user_id]
+            return JSONResponse({"ok": True})
+
+        # ============================================================
+        # ОСНОВНАЯ ЛОГИКА
+        # ============================================================
         save_message(user_id, "user", text)
 
         history = get_all_history(user_id)
