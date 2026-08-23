@@ -41,7 +41,12 @@ AGENT_SEARCH_ID = os.getenv("YANDEX_AGENT_ID", "fvt3te2kgttig7u3a1fb")
 AGENT_RESEARCH_ID = os.getenv("YANDEX_AGENT_RESEARCH_ID", "fvti80ngse2778agbmdl")
 AGENT_REASONING_ID = os.getenv("YANDEX_AGENT_REASONING_ID", "fvtg0c38oi7n43d0n9gf")
 
-deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+# ЯВНО ЗАПРЕЩАЕМ PRO
+deepseek = OpenAI(
+    api_key=DEEPSEEK_API_KEY,
+    base_url=DEEPSEEK_BASE_URL,
+    default_headers={"x-deepseek-model": "deepseek-chat"}  # Запрещаем Pro
+)
 groq = Groq(api_key=GROQ_API_KEY)
 
 supabase = None
@@ -69,12 +74,15 @@ def is_duplicate(user_id, text):
     user_last_requests[user_id].append(hash_val)
     return False
 
+# ============================================================
+# КЕШИРОВАНИЕ (1 ЧАС)
+# ============================================================
 agent_cache = {}
 
 def get_cached_response(hash_val):
     if hash_val in agent_cache:
         entry = agent_cache[hash_val]
-        if datetime.now() - entry["timestamp"] < timedelta(minutes=5):
+        if datetime.now() - entry["timestamp"] < timedelta(hours=1):  # 1 час
             return entry["response"]
         else:
             del agent_cache[hash_val]
@@ -154,18 +162,23 @@ def save_message(user_id, role, content):
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения истории: {e}")
 
-def get_all_history(user_id):
+# ============================================================
+# ЗАГРУЖАЕМ ТОЛЬКО 20 ПОСЛЕДНИХ СООБЩЕНИЙ (ЭКОНОМИЯ)
+# ============================================================
+def get_recent_history(user_id, limit=20):
     if not supabase:
         return []
     try:
         res = supabase.table("history")\
             .select("role, content, created_at")\
             .eq("user_id", user_id)\
-            .order("created_at")\
+            .order("created_at", desc=True)\
+            .limit(limit)\
             .execute()
         if res.data:
-            logger.info(f"📚 Загружена ВСЯ история: {len(res.data)} сообщений")
-            return res.data
+            history = list(reversed(res.data))
+            logger.info(f"📚 Загружено {len(history)} последних сообщений")
+            return history
         return []
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки истории: {e}")
@@ -261,7 +274,7 @@ async def collect_lead(user_id: int, name: str, phone: str, question: str = ""):
         return {"error": str(e)}
 
 # ============================================================
-# РАСПОЗНАВАНИЕ КАРТИНОК (ОСТАВЛЯЮ)
+# РАСПОЗНАВАНИЕ КАРТИНОК (ЧЕРЕЗ FLASH)
 # ============================================================
 async def recognize_image_with_deepseek(image_url: str) -> str:
     try:
@@ -277,7 +290,8 @@ async def recognize_image_with_deepseek(image_url: str) -> str:
 """
         vision_client = OpenAI(
             api_key=DEEPSEEK_API_KEY,
-            base_url=DEEPSEEK_BASE_URL
+            base_url=DEEPSEEK_BASE_URL,
+            default_headers={"x-deepseek-model": "deepseek-chat"}
         )
         response = vision_client.chat.completions.create(
             model="deepseek-chat",
@@ -528,7 +542,6 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
     is_reminder = any(word in text.lower() for word in ["напомни", "вспомни", "что я говорил", "что мы обсуждали", "повтори"])
     
     if is_reminder:
-        # Ищем в истории по ключевым словам
         found = find_in_history(history, text)
         facts = extract_facts(found, text) if found else None
         
@@ -538,7 +551,6 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
         else:
             context = "В ИСТОРИИ НИЧЕГО НЕ НАЙДЕНО ПО ЭТОМУ ЗАПРОСУ."
     else:
-        # Обычный запрос — передаём только последние 15 сообщений для контекста
         history_text = ""
         if history:
             history_lines = []
@@ -699,8 +711,8 @@ async def webhook(request: Request):
         # ============================================================
         save_message(user_id, "user", text)
 
-        history = get_all_history(user_id)
-        logger.info(f"📚 Загружена ПОЛНАЯ история для user_id {user_id}: {len(history)} сообщений")
+        history = get_recent_history(user_id, limit=20)
+        logger.info(f"📚 Загружено {len(history)} последних сообщений для user_id {user_id}")
 
         # Знакомство — имя (НЕ путать с поисковыми запросами)
         if not get_fact(user_id, "name"):
