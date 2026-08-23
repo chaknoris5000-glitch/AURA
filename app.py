@@ -181,56 +181,6 @@ def clear_user_history(user_id):
         logger.error(f"❌ Ошибка очистки истории: {e}")
 
 # ============================================================
-# ПОИСК В ИСТОРИИ (ВОССТАНОВЛЕН)
-# ============================================================
-def find_in_history(history, text):
-    if not history:
-        return []
-    stop_words = ["напомни", "скажи", "что", "я", "говорил", "про", "о", "в", "и", "с", "на", "за", "по", "из", "от", "для", "мне", "ты", "мы", "они", "он", "она", "оно", "вот", "этот", "эта", "это", "эти", "который", "которая", "которые", "которое", "мне", "меня", "тебя", "тебе", "ещё", "было", "были", "была"]
-    keywords = []
-    for word in text.lower().split():
-        if len(word) > 2 and word not in stop_words:
-            keywords.append(word)
-    if not keywords:
-        return []
-    logger.info(f"🔍 Ищем в истории по словам: {keywords}")
-    found = []
-    for msg in history:
-        content_lower = msg['content'].lower()
-        for keyword in keywords:
-            if keyword in content_lower:
-                found.append(msg)
-                break
-    logger.info(f"📌 Найдено {len(found)} сообщений")
-    return found
-
-def extract_facts(found_messages, text):
-    if not found_messages:
-        return None
-    text_lower = text.lower()
-    scored = []
-    keywords = [w for w in text_lower.split() if len(w) > 2]
-    for msg in found_messages:
-        content_lower = msg['content'].lower()
-        score = 0
-        for keyword in keywords:
-            if keyword in content_lower:
-                score += 1
-        scored.append((score, msg))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top_messages = [msg for _, msg in scored[:10]]
-    parts = []
-    for msg in top_messages:
-        role = "Пользователь" if msg['role'] == 'user' else "AURA"
-        content = msg['content'][:500]
-        parts.append(f"{role}: {content}")
-    if not parts:
-        return None
-    result = "\n\n".join(parts)
-    logger.info(f"📌 Извлечено {len(parts)} сообщений")
-    return result
-
-# ============================================================
 # РУКИ
 # ============================================================
 async def collect_lead(user_id: int, name: str, phone: str, question: str = ""):
@@ -261,7 +211,6 @@ async def collect_lead(user_id: int, name: str, phone: str, question: str = ""):
         return {"error": str(e)}
 
 async def add_calendar_event(user_id: int, title: str, date: str, time: str, description: str = ""):
-    # Заглушка
     if not supabase:
         return {"error": "Supabase не подключён"}
     try:
@@ -529,7 +478,7 @@ async def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
 
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА (С ПОИСКОМ В ИСТОРИИ)
+# ОСНОВНАЯ ЛОГИКА (КОНТЕКСТ, А НЕ КЛЮЧЕВЫЕ СЛОВА)
 # ============================================================
 async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
     user_name = get_fact(user_id, "name") or "Гость"
@@ -550,37 +499,25 @@ async def deepseek_interview(user_id: int, text: str, history: list) -> dict:
         if parts:
             portrait_context = "ПОРТРЕТ: " + ", ".join(parts) + "."
 
-    # Ищем в истории по ключевым словам
-    found = find_in_history(history, text)
-    facts = extract_facts(found, text) if found else None
-
-    if facts:
-        logger.info(f"📌 ИЗВЛЕЧЕНЫ ФАКТЫ: {facts[:200]}...")
-    else:
-        logger.info("📌 ФАКТЫ НЕ НАЙДЕНЫ")
-
-    # Формируем историю (последние 20 сообщений, если факты не найдены)
-    if facts:
-        # Если факты найдены, используем их, а не всю историю
-        context = f"ФАКТЫ ИЗ ИСТОРИИ:\n{facts}"
-    else:
-        # Иначе используем последние 20 сообщений
-        history_text = ""
-        if history:
-            history_lines = []
-            for h in history[-20:]:
-                role = "Пользователь" if h['role'] == 'user' else "AURA"
-                content = h['content']
-                history_lines.append(f"{role}: {content}")
-            history_text = "\n".join(history_lines)
-        context = f"ИСТОРИЯ (последние 20 сообщений):\n{history_text}"
+    # Передаём ВСЮ историю (DeepSeek сам поймёт)
+    history_text = ""
+    if history:
+        history_lines = []
+        for h in history[-50:]:  # Последние 50 сообщений
+            role = "Пользователь" if h['role'] == 'user' else "AURA"
+            content = h['content']
+            history_lines.append(f"{role}: {content}")
+        history_text = "\n".join(history_lines)
 
     prompt = f"""
-Ты — AURA. Отвечай коротко — максимум 2-3 предложения. Без приветствий, без "здравствуйте". Просто продолжай диалог.
+Ты — AURA. Отвечай коротко — максимум 2-3 предложения.
 
-{portrait_context}
+Портрет пользователя: {portrait_context}
 
-{context}
+Вот ВЕСЬ диалог с пользователем. Используй его, чтобы понять, о чём он спрашивает.
+
+ИСТОРИЯ ДИАЛОГА:
+{history_text}
 
 СЕЙЧАС ПОЛЬЗОВАТЕЛЬ: "{text}"
 
@@ -632,7 +569,6 @@ async def webhook(request: Request):
                     recognized_text = await recognize_image_with_deepseek(image_url)
                     reply = f"🖼️ **Распознано:**\n\n{recognized_text}"
                     await send_message(user_id, reply)
-                    # Сохраняем в историю с пометкой "распознано"
                     save_message(user_id, "assistant", reply)
                 else:
                     await send_message(user_id, "⚠️ Не удалось загрузить изображение.")
