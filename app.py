@@ -102,6 +102,10 @@ def search_history(user_id, keywords):
         return []
 
 def call_yandex_agent(agent_id, user_text, user_name="", user_city="", budget=""):
+    # Добавляем город в запрос, чтобы поиск был локальным
+    if user_city and user_city != "Москва":
+        user_text = f"{user_text} в городе {user_city}"
+    
     hash_val = hashlib.md5(f"{agent_id}:{user_text}:{user_name}:{user_city}:{budget}".encode()).hexdigest()
     if hash_val in agent_cache:
         entry = agent_cache[hash_val]
@@ -123,7 +127,14 @@ def call_yandex_agent(agent_id, user_text, user_name="", user_city="", budget=""
 
 async def send_message(chat_id, text):
     if not text: text = "😅 Не понял."
-    if len(text) > 4096: text = text[:4093] + "..."
+    # Обрезаем до 200 символов, но не разрываем посреди слова
+    if len(text) > 200:
+        # Находим последний пробел перед 200 символами
+        cut = text[:200].rfind(' ')
+        if cut > 0:
+            text = text[:cut] + "..."
+        else:
+            text = text[:197] + "..."
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}, timeout=30)
     except Exception as e:
@@ -210,7 +221,7 @@ async def webhook(request: Request):
         user_city = get_fact(user_id, "city") or "Москва"
         budget = get_fact(user_id, "budget_travel") or ""
 
-        # Загружаем всю историю для контекста
+        # Загружаем историю для контекста
         history = get_recent_history(user_id, limit=10)
         history_text = ""
         if history:
@@ -234,26 +245,25 @@ async def webhook(request: Request):
             found_text = "\n".join(found_lines)
 
         # ===== ПРОМПТ ДЛЯ DEEPSEEK =====
-        prompt = f"""Ты — AURA. Ты — личный ассистент в Telegram. Ты ведёшь себя как живой человек, понимаешь эмоции и контекст.
+        prompt = f"""Ты — AURA. Личный ассистент. Отвечай коротко (1-2 предложения), всегда по делу.
 
-Ты знаешь о пользователе:
+О пользователе:
 - Имя: {user_name}
 - Город: {user_city}
 
-Вот что было в диалоге (история):
+История диалога:
 {history_text}
 
-Вот что найдено по ключевым словам (может помочь):
-{found_text if found_text else "Ничего не найдено"}
+Найдено по ключевым словам:
+{found_text if found_text else "Ничего"}
 
-Вопрос пользователя: "{text}"
+Вопрос: "{text}"
 
-Твоя задача — ответить как живой человек, понимая весь контекст диалога.
-- Если пользователь спрашивает о проекте, который ты делаешь — отвечай честно, с эмпатией.
-- Если пользователь просит найти что-то — дай короткий ответ (1-2 предложения) и добавь ссылку, если есть.
-- Если пользователь говорит о своих проблемах — поддержи его.
-- Не повторяй одно и то же.
-- Будь кратким, но душевным.
+Правила:
+1. Если ищешь клинику/магазин/услугу — ищи в городе пользователя ({user_city}).
+2. Если есть ссылка — добавь её сразу.
+3. Ответ должен быть коротким, завершённым по смыслу.
+4. Не повторяй одно и то же.
 
 Ответ:"""
 
@@ -261,23 +271,25 @@ async def webhook(request: Request):
             resp = deepseek.chat.completions.create(
                 model="deepseek-chat",
                 messages=[{"role": "system", "content": prompt}],
-                max_tokens=150,
-                temperature=0.8,
+                max_tokens=120,
+                temperature=0.7,
                 timeout=15
             )
             answer = resp.choices[0].message.content
         except Exception as e:
             logger.error(f"❌ Ошибка DeepSeek: {e}")
-            answer = "😅 Что-то пошло не так. Попробуй ещё раз."
+            answer = "Ошибка. Попробуй ещё раз."
 
-        # ===== ДОБАВЛЯЕМ ССЫЛКУ, ЕСЛИ НУЖНО =====
+        # ===== ДОБАВЛЯЕМ ССЫЛКУ =====
         if "фильм" in text.lower() and "http" not in answer:
-            answer += f"\n\n🔗 [Смотреть на Яндекс.Видео](https://yandex.ru/video/search?text={text.replace(' ', '+')})"
+            answer += f"\n\n🔗 [Смотреть](https://yandex.ru/video/search?text={text.replace(' ', '+')})"
         elif "билет" in text.lower() and "http" not in answer:
             answer += f"\n\n✈️ [Найти билеты](https://www.aviasales.ru/search?q={text.replace(' ', '+')})"
-        elif "клиника" in text.lower() and "http" not in answer and "Клиника Калашникова" in answer:
-            # Ссылка не добавляется, если её нет
-            pass
+        elif "клиника" in text.lower() and "http" not in answer:
+            # Ссылка добавляется только если есть сайт в ответе
+            if "сайт" not in answer.lower() and ".ru" not in answer.lower():
+                # Если нет сайта — добавляем ссылку на поиск Яндекса
+                answer += f"\n\n🔍 [Поиск](https://yandex.ru/search/?text={text.replace(' ', '+')}%20{user_city})"
 
         await send_message(user_id, answer)
         save_message(user_id, "assistant", answer)
