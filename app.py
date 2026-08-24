@@ -56,7 +56,7 @@ agent_cache = {}
 portrait_cache = {}
 
 # ============================================================
-# ПАМЯТЬ (КОРОТКО)
+# ПАМЯТЬ
 # ============================================================
 def save_fact(user_id, key, value):
     if not supabase: return
@@ -80,7 +80,6 @@ def get_fact(user_id, key):
 def get_portrait(user_id):
     if not supabase: return None
     try:
-        # Кеш портрета на 1 час
         if user_id in portrait_cache:
             entry = portrait_cache[user_id]
             if datetime.now() - entry["timestamp"] < timedelta(hours=1):
@@ -125,30 +124,6 @@ def clear_user_history(user_id):
         supabase.table("history").delete().eq("user_id", user_id).execute()
     except Exception as e:
         logger.error(f"❌ Ошибка очистки: {e}")
-
-def find_in_history(history, text):
-    if not history: return []
-    keywords = [w for w in text.lower().split() if len(w) > 3]
-    if not keywords: return []
-    found = []
-    for msg in history:
-        if any(k in msg['content'].lower() for k in keywords):
-            found.append(msg)
-    return found
-
-def extract_facts(found_messages, text):
-    if not found_messages: return None
-    scored = []
-    keywords = [w for w in text.lower().split() if len(w) > 3]
-    for msg in found_messages:
-        score = sum(1 for k in keywords if k in msg['content'].lower())
-        scored.append((score, msg))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    parts = []
-    for _, msg in scored[:3]:
-        role = "Пользователь" if msg['role'] == 'user' else "AURA"
-        parts.append(f"{role}: {msg['content'][:200]}")
-    return "\n".join(parts) if parts else None
 
 async def recognize_image_with_deepseek(image_url: str) -> str:
     try:
@@ -202,6 +177,9 @@ async def send_message(chat_id, text):
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
 
+# ============================================================
+# ОСНОВНОЙ WEBHOOK
+# ============================================================
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
@@ -315,25 +293,29 @@ async def webhook(request: Request):
                 await send_message(user_id, "Расскажи, чем занимаешься.")
             return JSONResponse({"ok": True})
 
-        # === ОСНОВНАЯ ЛОГИКА (ОДИН ЗАПРОС) ===
+        # === ОСНОВНАЯ ЛОГИКА ===
         save_message(user_id, "user", text)
-        history = get_recent_history(user_id, limit=5)
 
-        # 1. Проверяем историю (бесплатно)
-        found = find_in_history(history, text)
-        if found:
-            facts = extract_facts(found, text)
-            if facts:
-                await send_message(user_id, f"📌 В истории: {facts[:200]}")
-                save_message(user_id, "assistant", f"Из истории: {facts[:200]}")
-                return JSONResponse({"ok": True})
+        # Проверяем, есть ли в истории готовый ответ от бота
+        history = get_recent_history(user_id, limit=10)
+        found_answer = None
+        for msg in history:
+            if msg['role'] == 'assistant':
+                # Ищем ответ, который относится к этому вопросу
+                found_answer = msg['content']
+                break
 
-        # 2. Ищем в интернете (1 запрос)
+        if found_answer:
+            # Если в истории есть ответ — отдаём его
+            await send_message(user_id, found_answer)
+            save_message(user_id, "assistant", found_answer)
+            return JSONResponse({"ok": True})
+
+        # Если ответа нет в истории — идём в интернет
         user_name = get_fact(user_id, "name") or "Гость"
         user_city = get_fact(user_id, "city") or "Москва"
         budget = get_fact(user_id, "budget_travel") or ""
 
-        # Определяем агента
         if "билет" in text.lower():
             agent_id = AGENT_SEARCH_ID
         elif any(w in text.lower() for w in ["посоветуй", "что лучше"]):
@@ -345,18 +327,18 @@ async def webhook(request: Request):
 
         raw = call_yandex_agent(agent_id, text, user_name, user_city, budget)
         if raw:
-            # Формируем КОРОТКИЙ ответ (без двойного вызова)
-            prompt = f"Коротко (2-3 предложения) ответь пользователю на основе данных:\n{raw[:500]}"
+            prompt = f"Ты — AURA, личный ассистент. Отвечай коротко, 2-3 предложения, как живой человек. Без приветствий. На основе данных:\n{raw[:500]}"
             try:
                 resp = deepseek.chat.completions.create(
                     model="deepseek-chat",
                     messages=[{"role": "system", "content": prompt}],
-                    max_tokens=80,
-                    temperature=0.5,
+                    max_tokens=100,
+                    temperature=0.7,
                     timeout=15
                 )
                 answer = resp.choices[0].message.content
-            except:
+            except Exception as e:
+                logger.error(f"❌ Ошибка DeepSeek: {e}")
                 answer = raw[:300]
             await send_message(user_id, answer)
             save_message(user_id, "assistant", answer)
