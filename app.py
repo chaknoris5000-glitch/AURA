@@ -76,7 +76,7 @@ def save_message(user_id, role, content):
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения истории: {e}")
 
-def get_recent_history(user_id, limit=5):
+def get_recent_history(user_id, limit=10):
     if not supabase: return []
     try:
         res = supabase.table("history").select("role, content, created_at").eq("user_id", user_id).order("created_at", desc=True).limit(limit).execute()
@@ -206,20 +206,21 @@ async def webhook(request: Request):
         # ===== ОСНОВНАЯ ЛОГИКА =====
         save_message(user_id, "user", text)
         
-        # Собираем контекст
         user_name = get_fact(user_id, "name") or "Гость"
         user_city = get_fact(user_id, "city") or "Москва"
         budget = get_fact(user_id, "budget_travel") or ""
-        
-        recent = get_recent_history(user_id, limit=5)
-        recent_text = ""
-        if recent:
-            recent_lines = []
-            for msg in recent:
+
+        # Загружаем всю историю для контекста
+        history = get_recent_history(user_id, limit=10)
+        history_text = ""
+        if history:
+            history_lines = []
+            for msg in history:
                 role = "Пользователь" if msg['role'] == 'user' else "AURA"
-                recent_lines.append(f"{role}: {msg['content'][:200]}")
-            recent_text = "\n".join(recent_lines)
-        
+                history_lines.append(f"{role}: {msg['content'][:300]}")
+            history_text = "\n".join(history_lines)
+
+        # Поиск по ключевым словам
         keywords = [w for w in text.lower().split() if len(w) > 3 and w not in ["найди", "меня", "что", "это"]]
         found = []
         if keywords:
@@ -232,106 +233,51 @@ async def webhook(request: Request):
                 found_lines.append(f"{role}: {msg['content'][:300]}")
             found_text = "\n".join(found_lines)
 
-        # ===== ОПРЕДЕЛЯЕМ, ЧТО ДЕЛАТЬ =====
-        decision_prompt = f"""
-Ты — DeepSeek. Твоя задача — решить, что делать.
+        # ===== ПРОМПТ ДЛЯ DEEPSEEK =====
+        prompt = f"""Ты — AURA. Ты — личный ассистент в Telegram. Ты ведёшь себя как живой человек, понимаешь эмоции и контекст.
 
-Вопрос: "{text}"
+Ты знаешь о пользователе:
+- Имя: {user_name}
+- Город: {user_city}
 
-Если в истории есть готовый ответ — скажи "ИСТОРИЯ".
-Если знаешь ответ сам — скажи "ЗНАЮ".
-Если нужно поискать в интернете — скажи "ИНТЕРНЕТ".
+Вот что было в диалоге (история):
+{history_text}
 
-История:
-{found_text if found_text else "Нет ответа"}
+Вот что найдено по ключевым словам (может помочь):
+{found_text if found_text else "Ничего не найдено"}
 
-Ответь ТОЛЬКО одним словом: ИСТОРИЯ, ЗНАЮ или ИНТЕРНЕТ.
-"""
+Вопрос пользователя: "{text}"
+
+Твоя задача — ответить как живой человек, понимая весь контекст диалога.
+- Если пользователь спрашивает о проекте, который ты делаешь — отвечай честно, с эмпатией.
+- Если пользователь просит найти что-то — дай короткий ответ (1-2 предложения) и добавь ссылку, если есть.
+- Если пользователь говорит о своих проблемах — поддержи его.
+- Не повторяй одно и то же.
+- Будь кратким, но душевным.
+
+Ответ:"""
 
         try:
             resp = deepseek.chat.completions.create(
                 model="deepseek-chat",
-                messages=[{"role": "system", "content": decision_prompt}],
-                max_tokens=10,
-                temperature=0.1,
-                timeout=5
+                messages=[{"role": "system", "content": prompt}],
+                max_tokens=150,
+                temperature=0.8,
+                timeout=15
             )
-            decision = resp.choices[0].message.content.strip().upper()
-        except:
-            decision = "ИНТЕРНЕТ"
+            answer = resp.choices[0].message.content
+        except Exception as e:
+            logger.error(f"❌ Ошибка DeepSeek: {e}")
+            answer = "😅 Что-то пошло не так. Попробуй ещё раз."
 
-        # ===== ФОРМИРУЕМ ОТВЕТ =====
-        answer = ""
-        link = ""
-
-        if decision == "ИСТОРИЯ" and found:
-            # Берём последний ответ из истории
-            for msg in reversed(found):
-                if msg['role'] == 'assistant' and len(msg['content']) > 5:
-                    answer = msg['content']
-                    break
-            if not answer:
-                decision = "ИНТЕРНЕТ"
-
-        if decision == "ИНТЕРНЕТ" or not answer:
-            # Ищем в интернете
-            if "билет" in text.lower():
-                agent_id = AGENT_SEARCH_ID
-            elif any(w in text.lower() for w in ["посоветуй", "что лучше"]):
-                agent_id = AGENT_REASONING_ID
-            elif any(w in text.lower() for w in ["сравни", "проанализируй"]):
-                agent_id = AGENT_RESEARCH_ID
-            else:
-                agent_id = AGENT_SEARCH_ID
-            
-            raw = call_yandex_agent(agent_id, text, user_name, user_city, budget)
-            if raw:
-                prompt = f"""Ты — DeepSeek. Дай короткий ответ (1-2 предложения) на вопрос.
-Вопрос: {text}
-Данные: {raw[:500]}
-Ответ:"""
-                try:
-                    resp = deepseek.chat.completions.create(
-                        model="deepseek-chat",
-                        messages=[{"role": "system", "content": prompt}],
-                        max_tokens=80,
-                        temperature=0.3,
-                        timeout=10
-                    )
-                    answer = resp.choices[0].message.content
-                except:
-                    answer = raw[:200]
-            else:
-                answer = "Не нашёл в интернете. Попробуй уточнить."
-
-        if not answer:
-            # Если DeepSeek сказал "ЗНАЮ" или просто нет ответа
-            prompt = f"""Ты — DeepSeek. Ответь кратко (1-2 предложения) на вопрос.
-Вопрос: {text}
-Ответ:"""
-            try:
-                resp = deepseek.chat.completions.create(
-                    model="deepseek-chat",
-                    messages=[{"role": "system", "content": prompt}],
-                    max_tokens=80,
-                    temperature=0.3,
-                    timeout=10
-                )
-                answer = resp.choices[0].message.content
-            except:
-                answer = "Не понял вопроса. Попробуй уточнить."
-
-        # ===== ДОБАВЛЯЕМ ССЫЛКУ =====
+        # ===== ДОБАВЛЯЕМ ССЫЛКУ, ЕСЛИ НУЖНО =====
         if "фильм" in text.lower() and "http" not in answer:
-            link = f"🔗 [Смотреть](https://yandex.ru/video/search?text={text.replace(' ', '+')})"
+            answer += f"\n\n🔗 [Смотреть на Яндекс.Видео](https://yandex.ru/video/search?text={text.replace(' ', '+')})"
         elif "билет" in text.lower() and "http" not in answer:
-            link = f"✈️ [Найти билеты](https://www.aviasales.ru/search?q={text.replace(' ', '+')})"
-        elif "клиника" in text.lower() and "http" not in answer:
-            # Если есть сайт в ответе, оставляем
+            answer += f"\n\n✈️ [Найти билеты](https://www.aviasales.ru/search?q={text.replace(' ', '+')})"
+        elif "клиника" in text.lower() and "http" not in answer and "Клиника Калашникова" in answer:
+            # Ссылка не добавляется, если её нет
             pass
-
-        if link:
-            answer += f"\n\n{link}"
 
         await send_message(user_id, answer)
         save_message(user_id, "assistant", answer)
