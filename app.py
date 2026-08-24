@@ -332,12 +332,6 @@ async def webhook(request: Request):
                 user_states[user_id] = {"state": "entering_password"}
                 return JSONResponse({"ok": True})
 
-        # === ПРИВЕТСТВИЕ ПРИ ПЕРВОМ ЗАПУСКЕ ===
-        if not get_fact(user_id, "name"):
-            await send_message(user_id, "Привет! Я AURA — твой личный ассистент. Давай познакомимся. Как тебя зовут?")
-            user_states[user_id] = {"state": "collecting_name"}
-            return JSONResponse({"ok": True})
-
         # === ОБРАБОТКА ИЗОБРАЖЕНИЙ ===
         if "photo" in msg or "document" in msg:
             file_id = msg["photo"][-1]["file_id"] if "photo" in msg else msg["document"]["file_id"]
@@ -394,8 +388,14 @@ async def webhook(request: Request):
 
         # === КОМАНДЫ ===
         if text == "/start":
-            await send_message(user_id, "Привет. Я AURA. Чем могу помочь?")
+            if get_fact(user_id, "name"):
+                # Если имя уже есть — просто поздоровайся
+                await send_message(user_id, f"Привет, {get_fact(user_id, 'name')}! Чем могу помочь?")
+            else:
+                await send_message(user_id, "Привет! Я AURA — твой личный ассистент. Давай познакомимся. Как тебя зовут?")
+                user_states[user_id] = {"state": "collecting_name"}
             return JSONResponse({"ok": True})
+
         if text.lower() in ["/clear", "/reset"]:
             clear_user_history(user_id)
             await send_message(user_id, "✅ История очищена.")
