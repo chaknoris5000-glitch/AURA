@@ -184,10 +184,52 @@ async def send_message(chat_id, text):
 async def webhook(request: Request):
     try:
         body = await request.json()
-        if "message" not in body: return JSONResponse({"ok": True})
+        # Если это не сообщение от пользователя — игнорируем
+        if "message" not in body:
+            return JSONResponse({"ok": True})
+        
         msg = body["message"]
         user_id = msg["from"]["id"]
         text = msg.get("text", "")
+
+        # Если это не текстовое сообщение — обрабатываем только фото/голос
+        if not text:
+            # === ОБРАБОТКА ИЗОБРАЖЕНИЙ ===
+            if "photo" in msg or "document" in msg:
+                file_id = msg["photo"][-1]["file_id"] if "photo" in msg else msg["document"]["file_id"]
+                file_resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}").json()
+                if file_resp.get("ok"):
+                    image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_resp['result']['file_path']}"
+                    recognized = await recognize_image_with_deepseek(image_url)
+                    await send_message(user_id, recognized)
+                    save_message(user_id, "assistant", recognized)
+                return JSONResponse({"ok": True})
+
+            # === ОБРАБОТКА ГОЛОСА ===
+            if "voice" in msg:
+                file_id = msg["voice"]["file_id"]
+                file_resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}").json()
+                if file_resp.get("ok"):
+                    audio_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_resp['result']['file_path']}"
+                    resp = requests.get(audio_url, timeout=30)
+                    if resp.status_code == 200:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp:
+                            tmp.write(resp.content)
+                            tmp_path = tmp.name
+                        with open(tmp_path, "rb") as f:
+                            result = groq.audio.transcriptions.create(file=(tmp_path, f.read()), model="whisper-large-v3-turbo", language="ru")
+                        os.unlink(tmp_path)
+                        text = result.text
+                        save_message(user_id, "user", text)
+                        # Дальше обрабатываем как текстовое сообщение
+                    else:
+                        await send_message(user_id, "⚠️ Не удалось загрузить голосовое.")
+                        return JSONResponse({"ok": True})
+                else:
+                    return JSONResponse({"ok": True})
+            else:
+                # Если это не текст, не фото, не голос — игнорируем
+                return JSONResponse({"ok": True})
 
         # === АВТОРИЗАЦИЯ ===
         if str(user_id) != ADMIN_CHAT_ID:
@@ -204,38 +246,6 @@ async def webhook(request: Request):
                 await send_message(user_id, "🔐 Введите пароль для входа:")
                 user_states[user_id] = {"state": "entering_password"}
                 return JSONResponse({"ok": True})
-
-        # === ОБРАБОТКА ИЗОБРАЖЕНИЙ ===
-        if "photo" in msg or "document" in msg:
-            file_id = msg["photo"][-1]["file_id"] if "photo" in msg else msg["document"]["file_id"]
-            file_resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}").json()
-            if file_resp.get("ok"):
-                image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_resp['result']['file_path']}"
-                recognized = await recognize_image_with_deepseek(image_url)
-                await send_message(user_id, recognized)
-                save_message(user_id, "assistant", recognized)
-            return JSONResponse({"ok": True})
-
-        # === ОБРАБОТКА ГОЛОСА ===
-        if "voice" in msg:
-            file_id = msg["voice"]["file_id"]
-            file_resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}").json()
-            if file_resp.get("ok"):
-                audio_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_resp['result']['file_path']}"
-                resp = requests.get(audio_url, timeout=30)
-                if resp.status_code == 200:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp:
-                        tmp.write(resp.content)
-                        tmp_path = tmp.name
-                    with open(tmp_path, "rb") as f:
-                        result = groq.audio.transcriptions.create(file=(tmp_path, f.read()), model="whisper-large-v3-turbo", language="ru")
-                    os.unlink(tmp_path)
-                    text = result.text
-                    save_message(user_id, "user", text)
-            return JSONResponse({"ok": True})
-
-        if not text:
-            return JSONResponse({"ok": True})
 
         # === ЗАЩИТА ОТ ПОВТОРОВ ===
         hash_val = hashlib.md5(f"{user_id}:{text}".encode()).hexdigest()
@@ -301,12 +311,10 @@ async def webhook(request: Request):
         found_answer = None
         for msg in history:
             if msg['role'] == 'assistant':
-                # Ищем ответ, который относится к этому вопросу
                 found_answer = msg['content']
                 break
 
         if found_answer:
-            # Если в истории есть ответ — отдаём его
             await send_message(user_id, found_answer)
             save_message(user_id, "assistant", found_answer)
             return JSONResponse({"ok": True})
