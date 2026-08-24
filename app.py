@@ -162,15 +162,6 @@ async def webhook(request: Request):
                 user_states[user_id] = {"state": "entering_password"}
                 return JSONResponse({"ok": True})
 
-        # ===== ОБРАБОТКА КАРТИНОК =====
-        if "photo" in msg:
-            file_id = msg["photo"][-1]["file_id"]
-            file_resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}").json()
-            if file_resp.get("ok"):
-                await send_message(user_id, "📸 Получил картинку. Спроси, что на ней, если нужно.")
-                save_message(user_id, "assistant", "Получил картинку")
-            return JSONResponse({"ok": True})
-
         if not text:
             return JSONResponse({"ok": True})
 
@@ -230,54 +221,60 @@ async def webhook(request: Request):
             recent_text = "\n".join(recent_lines)
         
         keywords = [w for w in text.lower().split() if len(w) > 3 and w not in ["найди", "меня", "что", "это"]]
-        found_text = ""
+        found = []
         if keywords:
             found = search_history(user_id, keywords)
-            if found:
-                found_lines = []
-                for msg in found:
-                    role = "Пользователь" if msg['role'] == 'user' else "AURA"
-                    found_lines.append(f"{role}: {msg['content'][:300]}")
-                found_text = "\n".join(found_lines)
-        
-        # ===== DEEPSEEK РЕШАЕТ =====
-        prompt = f"""Ты — DeepSeek, мозг AURA. AURA — это лицо, ты — его интеллект.
+        found_text = ""
+        if found:
+            found_lines = []
+            for msg in found:
+                role = "Пользователь" if msg['role'] == 'user' else "AURA"
+                found_lines.append(f"{role}: {msg['content'][:300]}")
+            found_text = "\n".join(found_lines)
 
-ПОРТРЕТ:
-- Имя: {user_name}
-- Город: {user_city}
+        # ===== ОПРЕДЕЛЯЕМ, ЧТО ДЕЛАТЬ =====
+        decision_prompt = f"""
+Ты — DeepSeek. Твоя задача — решить, что делать.
 
-ПОСЛЕДНИЙ КОНТЕКСТ:
-{recent_text if recent_text else "Нет контекста"}
+Вопрос: "{text}"
 
-НАЙДЕНО В ИСТОРИИ:
-{found_text if found_text else "Ничего не найдено"}
+Если в истории есть готовый ответ — скажи "ИСТОРИЯ".
+Если знаешь ответ сам — скажи "ЗНАЮ".
+Если нужно поискать в интернете — скажи "ИНТЕРНЕТ".
 
-ВОПРОС: "{text}"
+История:
+{found_text if found_text else "Нет ответа"}
 
-Твоя задача — решить, как ответить:
-1. Если в истории есть готовый ответ — скажи его.
-2. Если ты знаешь ответ из своих знаний — скажи его.
-3. Если не знаешь — скажи только "ИСКАТЬ В ИНТЕРНЕТЕ".
-
-Отвечай кратко (1-2 предложения) или только "ИСКАТЬ В ИНТЕРНЕТЕ"."""
+Ответь ТОЛЬКО одним словом: ИСТОРИЯ, ЗНАЮ или ИНТЕРНЕТ.
+"""
 
         try:
             resp = deepseek.chat.completions.create(
                 model="deepseek-chat",
-                messages=[{"role": "system", "content": prompt}],
-                max_tokens=80,
-                temperature=0.3,
-                timeout=10
+                messages=[{"role": "system", "content": decision_prompt}],
+                max_tokens=10,
+                temperature=0.1,
+                timeout=5
             )
-            decision = resp.choices[0].message.content.strip()
+            decision = resp.choices[0].message.content.strip().upper()
         except:
-            decision = "ИСКАТЬ В ИНТЕРНЕТЕ"
-        
-        # Если DeepSeek сказал искать в интернете
-        if "ИСКАТЬ В ИНТЕРНЕТЕ" in decision.upper():
-            logger.info("DeepSeek решил искать в интернете")
-            
+            decision = "ИНТЕРНЕТ"
+
+        # ===== ФОРМИРУЕМ ОТВЕТ =====
+        answer = ""
+        link = ""
+
+        if decision == "ИСТОРИЯ" and found:
+            # Берём последний ответ из истории
+            for msg in reversed(found):
+                if msg['role'] == 'assistant' and len(msg['content']) > 5:
+                    answer = msg['content']
+                    break
+            if not answer:
+                decision = "ИНТЕРНЕТ"
+
+        if decision == "ИНТЕРНЕТ" or not answer:
+            # Ищем в интернете
             if "билет" in text.lower():
                 agent_id = AGENT_SEARCH_ID
             elif any(w in text.lower() for w in ["посоветуй", "что лучше"]):
@@ -288,42 +285,54 @@ async def webhook(request: Request):
                 agent_id = AGENT_SEARCH_ID
             
             raw = call_yandex_agent(agent_id, text, user_name, user_city, budget)
-            
             if raw:
-                # Формируем ответ
-                prompt2 = f"""Ты — DeepSeek, мозг AURA. 
-                Вопрос пользователя: {text}
-                Данные из интернета: {raw[:500]}
-                Дай короткий ответ (2-3 предложения) как живой человек."""
-                
+                prompt = f"""Ты — DeepSeek. Дай короткий ответ (1-2 предложения) на вопрос.
+Вопрос: {text}
+Данные: {raw[:500]}
+Ответ:"""
                 try:
-                    resp2 = deepseek.chat.completions.create(
+                    resp = deepseek.chat.completions.create(
                         model="deepseek-chat",
-                        messages=[{"role": "system", "content": prompt2}],
-                        max_tokens=120,
-                        temperature=0.7,
-                        timeout=15
+                        messages=[{"role": "system", "content": prompt}],
+                        max_tokens=80,
+                        temperature=0.3,
+                        timeout=10
                     )
-                    answer = resp2.choices[0].message.content
-                    if not answer or len(answer) < 5:
-                        answer = raw[:300]
+                    answer = resp.choices[0].message.content
                 except:
-                    answer = raw[:300]
-                
-                if "фильм" in text.lower():
-                    link = f"🔗 [Смотреть на Яндекс.Видео](https://yandex.ru/video/search?text={text.replace(' ', '+')})"
-                    if "http" not in answer:
-                        answer += f"\n\n{link}"
-                elif "билет" in text.lower():
-                    link = f"✈️ [Найти билеты](https://www.aviasales.ru/search?q={text.replace(' ', '+')})"
-                    if "http" not in answer:
-                        answer += f"\n\n{link}"
+                    answer = raw[:200]
             else:
                 answer = "Не нашёл в интернете. Попробуй уточнить."
-        else:
-            # DeepSeek дал готовый ответ
-            answer = decision
-        
+
+        if not answer:
+            # Если DeepSeek сказал "ЗНАЮ" или просто нет ответа
+            prompt = f"""Ты — DeepSeek. Ответь кратко (1-2 предложения) на вопрос.
+Вопрос: {text}
+Ответ:"""
+            try:
+                resp = deepseek.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=[{"role": "system", "content": prompt}],
+                    max_tokens=80,
+                    temperature=0.3,
+                    timeout=10
+                )
+                answer = resp.choices[0].message.content
+            except:
+                answer = "Не понял вопроса. Попробуй уточнить."
+
+        # ===== ДОБАВЛЯЕМ ССЫЛКУ =====
+        if "фильм" in text.lower() and "http" not in answer:
+            link = f"🔗 [Смотреть](https://yandex.ru/video/search?text={text.replace(' ', '+')})"
+        elif "билет" in text.lower() and "http" not in answer:
+            link = f"✈️ [Найти билеты](https://www.aviasales.ru/search?q={text.replace(' ', '+')})"
+        elif "клиника" in text.lower() and "http" not in answer:
+            # Если есть сайт в ответе, оставляем
+            pass
+
+        if link:
+            answer += f"\n\n{link}"
+
         await send_message(user_id, answer)
         save_message(user_id, "assistant", answer)
 
