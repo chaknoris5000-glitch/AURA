@@ -404,35 +404,37 @@ async def webhook(request: Request):
         # === ПОЛУЧЕНИЕ ИМЕНИ ===
         if user_id in user_states and user_states[user_id].get("state") == "collecting_name":
             name = text.strip()
-            if name and len(name) > 1 and name[0].isupper():
+            if name and len(name) > 1:
                 save_fact(user_id, "name", name)
                 save_portrait_field(user_id, "name", name)
                 await send_message(user_id, f"Приятно познакомиться, {name}! ✈️ В каком городе ты живёшь?")
                 user_states[user_id] = {"state": "collecting_city"}
             else:
-                await send_message(user_id, "Пожалуйста, напиши своё имя с заглавной буквы.")
+                await send_message(user_id, "Пожалуйста, напиши своё имя (не менее 2 символов).")
             return JSONResponse({"ok": True})
 
+        # === ПОЛУЧЕНИЕ ГОРОДА ===
         if user_id in user_states and user_states[user_id].get("state") == "collecting_city":
             city = text.strip()
-            if city and len(city) > 1 and city[0].isupper():
+            if city and len(city) > 1:
                 save_fact(user_id, "city", city)
                 save_portrait_field(user_id, "city", city)
                 await send_message(user_id, f"Отлично, {get_fact(user_id, 'name')}! Я запомнил твой город. Чем ты занимаешься?")
                 user_states[user_id] = {"state": "collecting_profession"}
             else:
-                await send_message(user_id, "Напиши город с заглавной буквы.")
+                await send_message(user_id, "Напиши город (не менее 2 символов).")
             return JSONResponse({"ok": True})
 
+        # === ПОЛУЧЕНИЕ ПРОФЕССИИ ===
         if user_id in user_states and user_states[user_id].get("state") == "collecting_profession":
             profession = text.strip()
             if profession:
                 save_fact(user_id, "profession", profession)
                 save_portrait_field(user_id, "profession", profession)
                 await send_message(user_id, f"Понял, {get_fact(user_id, 'name')}! Теперь я знаю о тебе немного больше. Задавай любые вопросы.")
+                del user_states[user_id]
             else:
                 await send_message(user_id, "Расскажи, чем ты занимаешься.")
-            del user_states[user_id]
             return JSONResponse({"ok": True})
 
         # === ОСНОВНАЯ ЛОГИКА ===
