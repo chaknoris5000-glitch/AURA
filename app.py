@@ -77,7 +77,6 @@ def save_message(user_id, role, content):
         logger.error(f"❌ Ошибка сохранения истории: {e}")
 
 def get_recent_history(user_id, limit=5):
-    """Последние 5 сообщений для контекста"""
     if not supabase: return []
     try:
         res = supabase.table("history").select("role, content, created_at").eq("user_id", user_id).order("created_at", desc=True).limit(limit).execute()
@@ -86,7 +85,6 @@ def get_recent_history(user_id, limit=5):
         return []
 
 def search_history(user_id, keywords):
-    """Поиск по ключевым словам во всей истории"""
     if not supabase: return []
     try:
         res = supabase.table("history").select("role, content, created_at").eq("user_id", user_id).order("created_at", desc=True).execute()
@@ -169,9 +167,7 @@ async def webhook(request: Request):
             file_id = msg["photo"][-1]["file_id"]
             file_resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}").json()
             if file_resp.get("ok"):
-                image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_resp['result']['file_path']}"
-                # Простое описание
-                await send_message(user_id, "📸 Вижу картинку. Если хочешь, опишу подробнее — спроси.")
+                await send_message(user_id, "📸 Получил картинку. Спроси, что на ней, если нужно.")
                 save_message(user_id, "assistant", "Получил картинку")
             return JSONResponse({"ok": True})
 
@@ -216,94 +212,120 @@ async def webhook(request: Request):
                 await send_message(user_id, "Напиши город.")
             return JSONResponse({"ok": True})
 
-        # ===== СОХРАНЯЕМ ЗАПРОС =====
+        # ===== ОСНОВНАЯ ЛОГИКА =====
         save_message(user_id, "user", text)
-
-        # ===== ПОИСК В ИСТОРИИ =====
-        keywords = [w for w in text.lower().split() if len(w) > 3 and w not in ["найди", "меня", "что", "это", "вот"]]
         
-        # Загружаем последние 5 сообщений для контекста
-        recent = get_recent_history(user_id, limit=5)
-        recent_text = "\n".join([f"{msg['role']}: {msg['content'][:200]}" for msg in recent]) if recent else ""
-        
-        # Ищем по ключевым словам
-        found = []
-        if keywords:
-            found = search_history(user_id, keywords)
-        
-        found_text = ""
-        answer_from_history = None
-        if found:
-            for msg in found:
-                if msg['role'] == 'assistant' and len(msg['content']) > 10 and not msg['content'].startswith("Не нашёл"):
-                    answer_from_history = msg['content']
-                    break
-            if answer_from_history:
-                found_text = f"В ИСТОРИИ НАЙДЕН ОТВЕТ:\n{answer_from_history}"
-
-        # ===== ФОРМИРУЕМ ОТВЕТ =====
-        if answer_from_history:
-            # Если есть готовый ответ — отдаём его
-            await send_message(user_id, f"📌 Нашёл в истории:\n{answer_from_history}")
-            save_message(user_id, "assistant", f"Из истории: {answer_from_history}")
-            return JSONResponse({"ok": True})
-
-        # ===== ЕСЛИ В ИСТОРИИ НЕТ ОТВЕТА — ИДЁМ В ИНТЕРНЕТ =====
+        # Собираем контекст
         user_name = get_fact(user_id, "name") or "Гость"
         user_city = get_fact(user_id, "city") or "Москва"
         budget = get_fact(user_id, "budget_travel") or ""
+        
+        recent = get_recent_history(user_id, limit=5)
+        recent_text = ""
+        if recent:
+            recent_lines = []
+            for msg in recent:
+                role = "Пользователь" if msg['role'] == 'user' else "AURA"
+                recent_lines.append(f"{role}: {msg['content'][:200]}")
+            recent_text = "\n".join(recent_lines)
+        
+        keywords = [w for w in text.lower().split() if len(w) > 3 and w not in ["найди", "меня", "что", "это"]]
+        found_text = ""
+        if keywords:
+            found = search_history(user_id, keywords)
+            if found:
+                found_lines = []
+                for msg in found:
+                    role = "Пользователь" if msg['role'] == 'user' else "AURA"
+                    found_lines.append(f"{role}: {msg['content'][:300]}")
+                found_text = "\n".join(found_lines)
+        
+        # ===== DEEPSEEK РЕШАЕТ =====
+        prompt = f"""Ты — DeepSeek, мозг AURA. AURA — это лицо, ты — его интеллект.
 
-        if "билет" in text.lower():
-            agent_id = AGENT_SEARCH_ID
-        elif any(w in text.lower() for w in ["посоветуй", "что лучше"]):
-            agent_id = AGENT_REASONING_ID
-        elif any(w in text.lower() for w in ["сравни", "проанализируй"]):
-            agent_id = AGENT_RESEARCH_ID
-        else:
-            agent_id = AGENT_SEARCH_ID
+ПОРТРЕТ:
+- Имя: {user_name}
+- Город: {user_city}
 
-        raw = call_yandex_agent(agent_id, text, user_name, user_city, budget)
-        if raw:
-            # Формируем красивый ответ
-            prompt = f"""Ты — AURA, личный ассистент. Отвечай коротко, 2-3 предложения, как живой человек. Без приветствий.
-
-Контекст диалога:
+ПОСЛЕДНИЙ КОНТЕКСТ:
 {recent_text if recent_text else "Нет контекста"}
 
-Информация из интернета:
-{raw[:500]}
+НАЙДЕНО В ИСТОРИИ:
+{found_text if found_text else "Ничего не найдено"}
 
-Вопрос пользователя: "{text}"
+ВОПРОС: "{text}"
 
-Твой ответ:"""
-            try:
-                resp = deepseek.chat.completions.create(
-                    model="deepseek-chat",
-                    messages=[{"role": "system", "content": prompt}],
-                    max_tokens=100,
-                    temperature=0.7,
-                    timeout=15
-                )
-                answer = resp.choices[0].message.content
-            except Exception as e:
-                logger.error(f"❌ Ошибка DeepSeek: {e}")
-                answer = raw[:300]
+Твоя задача — решить, как ответить:
+1. Если в истории есть готовый ответ — скажи его.
+2. Если ты знаешь ответ из своих знаний — скажи его.
+3. Если не знаешь — скажи только "ИСКАТЬ В ИНТЕРНЕТЕ".
+
+Отвечай кратко (1-2 предложения) или только "ИСКАТЬ В ИНТЕРНЕТЕ"."""
+
+        try:
+            resp = deepseek.chat.completions.create(
+                model="deepseek-chat",
+                messages=[{"role": "system", "content": prompt}],
+                max_tokens=80,
+                temperature=0.3,
+                timeout=10
+            )
+            decision = resp.choices[0].message.content.strip()
+        except:
+            decision = "ИСКАТЬ В ИНТЕРНЕТЕ"
+        
+        # Если DeepSeek сказал искать в интернете
+        if "ИСКАТЬ В ИНТЕРНЕТЕ" in decision.upper():
+            logger.info("DeepSeek решил искать в интернете")
             
-            # Добавляем ссылку, если нужно
-            if "фильм" in text.lower():
-                link = f"🔗 [Смотреть на Яндекс.Видео](https://yandex.ru/video/search?text={text.replace(' ', '+')})"
-                if "http" not in answer:
-                    answer += f"\n\n{link}"
-            elif "билет" in text.lower():
-                link = f"✈️ [Найти билеты](https://www.aviasales.ru/search?q={text.replace(' ', '+')})"
-                if "http" not in answer:
-                    answer += f"\n\n{link}"
+            if "билет" in text.lower():
+                agent_id = AGENT_SEARCH_ID
+            elif any(w in text.lower() for w in ["посоветуй", "что лучше"]):
+                agent_id = AGENT_REASONING_ID
+            elif any(w in text.lower() for w in ["сравни", "проанализируй"]):
+                agent_id = AGENT_RESEARCH_ID
+            else:
+                agent_id = AGENT_SEARCH_ID
             
-            await send_message(user_id, answer)
-            save_message(user_id, "assistant", answer)
+            raw = call_yandex_agent(agent_id, text, user_name, user_city, budget)
+            
+            if raw:
+                # Формируем ответ
+                prompt2 = f"""Ты — DeepSeek, мозг AURA. 
+                Вопрос пользователя: {text}
+                Данные из интернета: {raw[:500]}
+                Дай короткий ответ (2-3 предложения) как живой человек."""
+                
+                try:
+                    resp2 = deepseek.chat.completions.create(
+                        model="deepseek-chat",
+                        messages=[{"role": "system", "content": prompt2}],
+                        max_tokens=120,
+                        temperature=0.7,
+                        timeout=15
+                    )
+                    answer = resp2.choices[0].message.content
+                    if not answer or len(answer) < 5:
+                        answer = raw[:300]
+                except:
+                    answer = raw[:300]
+                
+                if "фильм" in text.lower():
+                    link = f"🔗 [Смотреть на Яндекс.Видео](https://yandex.ru/video/search?text={text.replace(' ', '+')})"
+                    if "http" not in answer:
+                        answer += f"\n\n{link}"
+                elif "билет" in text.lower():
+                    link = f"✈️ [Найти билеты](https://www.aviasales.ru/search?q={text.replace(' ', '+')})"
+                    if "http" not in answer:
+                        answer += f"\n\n{link}"
+            else:
+                answer = "Не нашёл в интернете. Попробуй уточнить."
         else:
-            await send_message(user_id, "Не нашёл в интернете. Попробуй уточнить.")
-            save_message(user_id, "assistant", "Не нашёл в интернете.")
+            # DeepSeek дал готовый ответ
+            answer = decision
+        
+        await send_message(user_id, answer)
+        save_message(user_id, "assistant", answer)
 
         return JSONResponse({"ok": True})
 
