@@ -1,5 +1,6 @@
 import os
 import logging
+import json
 import requests
 from fastapi import FastAPI, Request, Response
 from supabase import create_client
@@ -7,21 +8,21 @@ from supabase import create_client
 logging.basicConfig(level=logging.INFO)
 app = FastAPI()
 
+# === Переменные окружения ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
-# ID агентов
+# ID агентов (можно менять в Render без передеплоя)
 AGENTS = {
-    "search": "fvt3te2kgttig7u3a1fb",
-    "researcher": "fvti80ngse2778agbmdl",
-    "reasoning": "fvtg0c38oi7n43d0n9gf"
+    "search": os.getenv("AGENT_SEARCH", "fvt3te2kgttig7u3a1fb"),
+    "researcher": os.getenv("AGENT_RESEARCHER", "fvti80ngse2778agbmdl"),
+    "reasoning": os.getenv("AGENT_REASONING", "fvtg0c38oi7n43d0n9gf")
 }
 
 def detect_agent(text):
-    """Определяет, какого агента использовать по тексту"""
     text_lower = text.lower()
     if any(word in text_lower for word in ["сравни", "проанализируй", "исследуй", "динамика", "статистика"]):
         return AGENTS["researcher"]
@@ -31,15 +32,14 @@ def detect_agent(text):
         return AGENTS["search"]
 
 def call_yandex_agent(text, agent_id):
-    """Вызывает агента в Yandex AI Studio"""
     try:
-        url = "https://llm.api.cloud.yandex.net/v1/agent"
+        url = "https://llm.api.cloud.yandex.net/v1/chat/completions"
         headers = {
             "Authorization": f"Api-Key {YANDEX_API_KEY}",
             "Content-Type": "application/json"
         }
         payload = {
-            "agentId": agent_id,
+            "modelUri": f"gpt://{YANDEX_FOLDER_ID}/agent/{agent_id}",
             "messages": [{"role": "user", "text": text}],
             "variables": {
                 "user_name": "Гость",
@@ -48,15 +48,22 @@ def call_yandex_agent(text, agent_id):
             }
         }
         response = requests.post(url, headers=headers, json=payload, timeout=60)
-        data = response.json()
-        # Проверяем структуру ответа
+        
+        # Если ответ от Яндекса не JSON — показываем ошибку
+        try:
+            data = response.json()
+        except json.JSONDecodeError:
+            return f"Ошибка: Яндекс вернул не JSON. Ответ: {response.text[:200]}"
+
+        # Проверяем, есть ли ответ
         if 'result' in data and 'alternatives' in data['result']:
             return data['result']['alternatives'][0]['message']['text']
         else:
-            return "Не удалось получить ответ от агента."
+            return f"Не удалось получить ответ от агента. Ответ: {data}"
+
     except Exception as e:
         logging.error(f"Ошибка вызова агента: {e}")
-        return f"Ошибка: {str(e)}"
+        return "Сервис временно недоступен. Попробуйте позже."
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -72,7 +79,6 @@ async def webhook(request: Request):
         if not user_text:
             return Response(status_code=200)
 
-        # Сохраняем запрос в историю (если Supabase доступен)
         if SUPABASE_URL and SUPABASE_KEY:
             try:
                 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -84,7 +90,6 @@ async def webhook(request: Request):
             except Exception as e:
                 logging.warning(f"Ошибка записи в Supabase: {e}")
 
-        # Выбираем агента
         agent_id = detect_agent(user_text)
         answer = call_yandex_agent(user_text, agent_id)
 
