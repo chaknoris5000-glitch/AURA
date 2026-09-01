@@ -13,23 +13,49 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
-def call_yandex_agent(text):
+# ID агентов
+AGENTS = {
+    "search": "fvt3te2kgttig7u3a1fb",
+    "researcher": "fvti80ngse2778agbmdl",
+    "reasoning": "fvtg0c38oi7n43d0n9gf"
+}
+
+def detect_agent(text):
+    """Определяет, какого агента использовать по тексту"""
+    text_lower = text.lower()
+    if any(word in text_lower for word in ["сравни", "проанализируй", "исследуй", "динамика", "статистика"]):
+        return AGENTS["researcher"]
+    elif any(word in text_lower for word in ["посоветуй", "что лучше", "стоит ли", "как думаешь"]):
+        return AGENTS["reasoning"]
+    else:
+        return AGENTS["search"]
+
+def call_yandex_agent(text, agent_id):
+    """Вызывает агента в Yandex AI Studio"""
     try:
-        url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+        url = "https://llm.api.cloud.yandex.net/v1/agent"
         headers = {
             "Authorization": f"Api-Key {YANDEX_API_KEY}",
             "Content-Type": "application/json"
         }
         payload = {
-            "modelUri": f"gpt://{YANDEX_FOLDER_ID}/yandexgpt-lite",
-            "completionOptions": {"temperature": 0.6},
-            "messages": [{"role": "user", "text": text}]
+            "agentId": agent_id,
+            "messages": [{"role": "user", "text": text}],
+            "variables": {
+                "user_name": "Гость",
+                "user_city": "Москва",
+                "budget": "не указан"
+            }
         }
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
         data = response.json()
-        return data['result']['alternatives'][0]['message']['text']
+        # Проверяем структуру ответа
+        if 'result' in data and 'alternatives' in data['result']:
+            return data['result']['alternatives'][0]['message']['text']
+        else:
+            return "Не удалось получить ответ от агента."
     except Exception as e:
-        logging.error(f"Ошибка вызова Яндекса: {e}")
+        logging.error(f"Ошибка вызова агента: {e}")
         return f"Ошибка: {str(e)}"
 
 @app.post("/webhook")
@@ -46,6 +72,7 @@ async def webhook(request: Request):
         if not user_text:
             return Response(status_code=200)
 
+        # Сохраняем запрос в историю (если Supabase доступен)
         if SUPABASE_URL and SUPABASE_KEY:
             try:
                 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -57,7 +84,9 @@ async def webhook(request: Request):
             except Exception as e:
                 logging.warning(f"Ошибка записи в Supabase: {e}")
 
-        answer = call_yandex_agent(user_text)
+        # Выбираем агента
+        agent_id = detect_agent(user_text)
+        answer = call_yandex_agent(user_text, agent_id)
 
         if SUPABASE_URL and SUPABASE_KEY:
             try:
