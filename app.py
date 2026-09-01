@@ -33,37 +33,23 @@ def detect_agent(text):
 
 def call_yandex_agent(text, agent_id):
     try:
-        url = "https://llm.api.cloud.yandex.net/v1/chat/completions"
+        # Первый вариант: через /completion
+        url = "https://llm.api.cloud.yandex.net/v1/completion"
         headers = {
             "Authorization": f"Api-Key {YANDEX_API_KEY}",
             "Content-Type": "application/json"
         }
         payload = {
-            "modelUri": f"assistant://{agent_id}",
-            "messages": [{"role": "user", "text": text}],
-            "variables": {
-                "user_name": "Гость",
-                "user_city": "Москва",
-                "budget": "не указан"
-            }
+            "modelUri": f"gpt://{YANDEX_FOLDER_ID}/agent/{agent_id}",
+            "completionOptions": {"temperature": 0.6},
+            "messages": [{"role": "user", "text": text}]
         }
         response = requests.post(url, headers=headers, json=payload, timeout=60)
-        
-        # Если ответ от Яндекса не JSON — показываем ошибку
-        try:
-            data = response.json()
-        except json.JSONDecodeError:
-            return f"Ошибка: Яндекс вернул не JSON. Ответ: {response.text[:200]}"
-
-        # Проверяем, есть ли ответ
-        if 'result' in data and 'alternatives' in data['result']:
-            return data['result']['alternatives'][0]['message']['text']
-        else:
-            return f"Не удалось получить ответ от агента. Ответ: {data}"
-
+        data = response.json()
+        return data['result']['alternatives'][0]['message']['text']
     except Exception as e:
         logging.error(f"Ошибка вызова агента: {e}")
-        return "Сервис временно недоступен. Попробуйте позже."
+        return f"Ошибка: {str(e)}"
 
 @app.post("/webhook")
 async def webhook(request: Request):
