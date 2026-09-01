@@ -39,7 +39,7 @@ def call_yandex_agent(text, agent_id):
             "Content-Type": "application/json"
         }
         payload = {
-            "modelUri": f"gpt://{YANDEX_FOLDER_ID}/agent/{agent_id}",
+            "modelUri": f"assistant://{agent_id}",
             "messages": [{"role": "user", "text": text}],
             "variables": {
                 "user_name": "Гость",
