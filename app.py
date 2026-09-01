@@ -15,7 +15,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
-# === Функция вызова Яндекса ===
+# === Функция вызова Яндекса (с логированием) ===
 def call_yandex_agent(text):
     try:
         url = "https://llm.api.cloud.yandex.net/v1/completion"
@@ -29,16 +29,22 @@ def call_yandex_agent(text):
             "messages": [{"role": "user", "text": text}]
         }
         response = requests.post(url, headers=headers, json=payload, timeout=30)
+        # Логируем реальный ответ
+        logging.info(f"Ответ от Яндекса: {response.text}")
+        
         data = response.json()
         
-        # Упрощённый парсинг
-        alternatives = data.get('result', {}).get('alternatives', [])
-        if alternatives:
-            return alternatives[0].get('message', {}).get('text', 'Не понял')
-        else:
-            return 'Не удалось получить ответ от Яндекса.'
+        # Универсальный парсинг
+        try:
+            return data['result']['alternatives'][0]['message']['text']
+        except (KeyError, IndexError, TypeError):
+            # Если структура другая, пробуем альтернативный путь
+            if 'result' in data:
+                return str(data['result'])
+            else:
+                return f"Получен ответ: {response.text[:100]}..."
     except Exception as e:
-        logging.error(f"Ошибка вызова Яндекса: {e}")
+        logging.error(f"Ошибка: {e}")
         return f"Ошибка: {str(e)}"
 
 # === Обработчик сообщений ===
