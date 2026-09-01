@@ -7,17 +7,12 @@ from supabase import create_client
 logging.basicConfig(level=logging.INFO)
 app = FastAPI()
 
-# === Переменные окружения ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
-# === Подключение к Supabase ===
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# === Функция вызова Яндекса ===
 def call_yandex_agent(text):
     try:
         url = "https://llm.api.cloud.yandex.net/v1/completion"
@@ -34,9 +29,9 @@ def call_yandex_agent(text):
         result = response.json()
         return result.get('result', {}).get('alternatives', [{}])[0].get('message', {}).get('text', "Не понял")
     except Exception as e:
+        logging.error(f"Ошибка вызова Яндекса: {e}")
         return f"Ошибка: {str(e)}"
 
-# === Обработчик сообщений ===
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
@@ -51,6 +46,8 @@ async def webhook(request: Request):
         if not user_text:
             return Response(status_code=200)
 
+        # Сохраняем запрос в историю
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
         supabase.table("history").insert({
             "user_id": chat_id,
             "role": "user",
