@@ -38,7 +38,7 @@ def call_yandex_agent(text, agent_id):
             "x-folder-id": YANDEX_FOLDER_ID
         }
         payload = {
-            "model": f"agent:{agent_id}",
+            "model": f"assistant:{agent_id}",
             "input": text,
             "temperature": 0.6
         }
