@@ -1,9 +1,8 @@
 import os
 import logging
-import json
-import requests
 from fastapi import FastAPI, Request, Response
 from supabase import create_client
+from yandex_ai_studio_sdk import AIStudio
 
 logging.basicConfig(level=logging.INFO)
 app = FastAPI()
@@ -15,11 +14,11 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
-# ID агентов (можно менять в Render без передеплоя)
+# === ID агентов ===
 AGENTS = {
-    "search": os.getenv("AGENT_SEARCH", "fvt3te2kgttig7u3a1fb"),
-    "researcher": os.getenv("AGENT_RESEARCHER", "fvti80ngse2778agbmdl"),
-    "reasoning": os.getenv("AGENT_REASONING", "fvtg0c38oi7n43d0n9gf")
+    "search": "fvt3te2kgttig7u3a1fb",
+    "researcher": "fvti80ngse2778agbmdl",
+    "reasoning": "fvtg0c38oi7n43d0n9gf"
 }
 
 def detect_agent(text):
@@ -33,23 +32,11 @@ def detect_agent(text):
 
 def call_yandex_agent(text, agent_id):
     try:
-        url = "https://llm.api.cloud.yandex.net/v1/agent"
-        headers = {
-            "Authorization": f"Api-Key {YANDEX_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "agentId": agent_id,
-            "messages": [{"role": "user", "text": text}],
-            "variables": {
-                "user_name": "Гость",
-                "user_city": "Москва",
-                "budget": "не указан"
-            }
-        }
-        response = requests.post(url, headers=headers, json=payload, timeout=60)
-        data = response.json()
-        return data['result']['alternatives'][0]['message']['text']
+        sdk = AIStudio(folder_id=YANDEX_FOLDER_ID, auth=YANDEX_API_KEY)
+        model = sdk.models.completions(f"agent/{agent_id}")
+        model = model.configure(temperature=0.6)
+        result = model.run(text)
+        return result.alternatives[0].text
     except Exception as e:
         logging.error(f"Ошибка вызова агента: {e}")
         return f"Ошибка: {str(e)}"
