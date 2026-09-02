@@ -14,39 +14,32 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
-AGENTS = {
-    "search": "fvt3te2kgttig7u3a1fb",
-    "researcher": "fvti80ngse2778agbmdl",
-    "reasoning": "fvtg0c38oi7n43d0n9gf"
-}
-
-def detect_agent(text):
-    text_lower = text.lower()
-    if any(word in text_lower for word in ["сравни", "проанализируй", "исследуй", "динамика", "статистика"]):
-        return AGENTS["researcher"]
-    elif any(word in text_lower for word in ["посоветуй", "что лучше", "стоит ли", "как думаешь"]):
-        return AGENTS["reasoning"]
-    else:
-        return AGENTS["search"]
-
-def call_yandex_agent(text, agent_id):
+def call_yandex_agent(text):
     try:
-        url = "https://llm.api.cloud.yandex.net/v1/responses"
+        # Простейший запрос к YandexGPT через правильный эндпоинт
+        url = "https://llm.api.cloud.yandex.net/v1/completion"
         headers = {
             "Authorization": f"Api-Key {YANDEX_API_KEY}",
-            "Content-Type": "application/json",
-            "x-folder-id": YANDEX_FOLDER_ID
+            "Content-Type": "application/json"
         }
         payload = {
-            "model": f"agent/{agent_id}",
-            "input": text,
-            "temperature": 0.6
+            "modelUri": f"gpt://{YANDEX_FOLDER_ID}/yandexgpt-lite",
+            "completionOptions": {"temperature": 0.6},
+            "messages": [{"role": "user", "text": text}]
         }
-        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        
+        # Отправляем запрос
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        
+        # Логируем статус и сырой ответ
+        logging.info(f"Статус ответа Яндекса: {response.status_code}")
+        logging.info(f"Сырой ответ Яндекса: {response.text[:500]}")
+        
+        # Пытаемся распарсить JSON
         data = response.json()
-        return data['output'][0]['content'][0]['text']
+        return data['result']['alternatives'][0]['message']['text']
     except Exception as e:
-        logging.error(f"Ошибка вызова агента: {e}")
+        logging.error(f"Ошибка: {e}")
         return f"Ошибка: {str(e)}"
 
 @app.post("/webhook")
@@ -63,29 +56,7 @@ async def webhook(request: Request):
         if not user_text:
             return Response(status_code=200)
 
-        if SUPABASE_URL and SUPABASE_KEY:
-            try:
-                supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-                supabase.table("history").insert({
-                    "user_id": chat_id,
-                    "role": "user",
-                    "content": user_text
-                }).execute()
-            except Exception as e:
-                logging.warning(f"Ошибка записи в Supabase: {e}")
-
-        agent_id = detect_agent(user_text)
-        answer = call_yandex_agent(user_text, agent_id)
-
-        if SUPABASE_URL and SUPABASE_KEY:
-            try:
-                supabase.table("history").insert({
-                    "user_id": chat_id,
-                    "role": "assistant",
-                    "content": answer
-                }).execute()
-            except Exception as e:
-                logging.warning(f"Ошибка записи в Supabase: {e}")
+        answer = call_yandex_agent(user_text)
 
         telegram_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         requests.post(telegram_url, json={"chat_id": chat_id, "text": answer})
