@@ -14,7 +14,6 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
-# ID агентов
 AGENTS = {
     "search": "fvt3te2kgttig7u3a1fb",
     "researcher": "fvti80ngse2778agbmdl",
@@ -32,7 +31,6 @@ def detect_agent(text):
 
 def call_yandex_agent(text, agent_id):
     try:
-        # Правильный эндпоинт Responses API
         url = "https://llm.api.cloud.yandex.net/v1/responses"
         headers = {
             "Authorization": f"Api-Key {YANDEX_API_KEY}",
@@ -45,6 +43,10 @@ def call_yandex_agent(text, agent_id):
             "temperature": 0.6
         }
         response = requests.post(url, headers=headers, json=payload, timeout=60)
+        
+        logging.info(f"Статус ответа Яндекса: {response.status_code}")
+        logging.info(f"Сырой ответ Яндекса: {response.text[:500]}")
+        
         data = response.json()
         return data['output'][0]['content'][0]['text']
     except Exception as e:
