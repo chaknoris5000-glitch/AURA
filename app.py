@@ -31,7 +31,7 @@ def detect_agent(text):
 
 def call_yandex_agent(text, agent_id):
     try:
-        url = "https://llm.api.cloud.yandex.net/v1/responses"
+        url = "https://ai.api.cloud.yandex.net/v1/responses"
         headers = {
             "Authorization": f"Api-Key {YANDEX_API_KEY}",
             "Content-Type": "application/json",
