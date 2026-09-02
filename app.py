@@ -20,6 +20,7 @@ AGENTS = {
     "reasoning": "fvtg0c38oi7n43d0n9gf"
 }
 
+
 def detect_agent(text):
     text_lower = text.lower()
     if any(word in text_lower for word in ["сравни", "проанализируй", "исследуй", "динамика", "статистика"]):
@@ -29,8 +30,12 @@ def detect_agent(text):
     else:
         return AGENTS["search"]
 
+
 def call_yandex_agent(text, agent_id):
     try:
+        if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
+            return "Ошибка: не заданы YANDEX_API_KEY или YANDEX_FOLDER_ID"
+
         url = "https://ai.api.cloud.yandex.net/v1/responses"
         headers = {
             "Authorization": f"Api-Key {YANDEX_API_KEY}",
@@ -42,16 +47,49 @@ def call_yandex_agent(text, agent_id):
             "input": text,
             "temperature": 0.6
         }
+
         response = requests.post(url, headers=headers, json=payload, timeout=60)
-        
+
         logging.info(f"Статус ответа Яндекса: {response.status_code}")
-        logging.info(f"Сырой ответ Яндекса: {response.text[:500]}")
-        
+        logging.info(f"Сырой ответ Яндекса: {response.text[:1000]}")
+
+        # Проверяем HTTP-статус ДО парсинга
+        if response.status_code != 200:
+            return f"Ошибка API ({response.status_code}): {response.text[:300]}"
+
         data = response.json()
-        return data['output'][0]['content'][0]['text']
+
+        # --- Надёжный парсинг Responses API ---
+        # Ответ имеет структуру:
+        # { "output": [ { "type": "message", "content": [ {"type": "output_text", "text": "..."} ] } ] }
+        texts = []
+        for item in data.get("output", []):
+            if item.get("type") == "message":
+                for content in item.get("content", []):
+                    if content.get("type") == "output_text":
+                        texts.append(content.get("text", ""))
+            # Если агент вернул просто строку в поле text
+            elif item.get("type") == "output_text":
+                texts.append(item.get("text", ""))
+
+        answer = "\n".join(t for t in texts if t).strip()
+
+        if not answer:
+            # Запасной вариант: если структура не совпала, отдаём сырой JSON для диагностики
+            return f"Пустой ответ. Сырой ответ: {response.text[:500]}"
+
+        return answer
+
+    except requests.exceptions.Timeout:
+        logging.error("Таймаут при вызове агента")
+        return "Ошибка: таймаут при обращении к Yandex AI"
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Сетевая ошибка: {e}")
+        return f"Ошибка сети: {str(e)}"
     except Exception as e:
         logging.error(f"Ошибка вызова агента: {e}")
         return f"Ошибка: {str(e)}"
+
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -100,9 +138,11 @@ async def webhook(request: Request):
         logging.error(f"Ошибка: {e}")
         return Response(status_code=500)
 
+
 @app.get("/")
 def home():
     return {"status": "AURA работает"}
+
 
 if __name__ == "__main__":
     import uvicorn
