@@ -1,21 +1,19 @@
 import os
 import logging
 import requests
+import json
 from fastapi import FastAPI, Request, Response
 from supabase import create_client
-from yandex_ai_studio_sdk import AIStudio
 
 logging.basicConfig(level=logging.INFO)
 app = FastAPI()
 
-# === Переменные окружения ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
-# === ID агентов ===
 AGENTS = {
     "search": "fvt3te2kgttig7u3a1fb",
     "researcher": "fvti80ngse2778agbmdl",
@@ -33,12 +31,20 @@ def detect_agent(text):
 
 def call_yandex_agent(text, agent_id):
     try:
-        sdk = AIStudio(folder_id=YANDEX_FOLDER_ID, auth=YANDEX_API_KEY)
-        # Правильный формат URI агента
-        model = sdk.models.completions(f"agent:{agent_id}")
-        model = model.configure(temperature=0.6)
-        result = model.run(text)
-        return result.alternatives[0].text
+        url = "https://llm.api.cloud.yandex.net/v1/responses"
+        headers = {
+            "Authorization": f"Api-Key {YANDEX_API_KEY}",
+            "Content-Type": "application/json",
+            "x-folder-id": YANDEX_FOLDER_ID
+        }
+        payload = {
+            "model": f"agent/{agent_id}",
+            "input": text,
+            "temperature": 0.6
+        }
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        data = response.json()
+        return data['output'][0]['content'][0]['text']
     except Exception as e:
         logging.error(f"Ошибка вызова агента: {e}")
         return f"Ошибка: {str(e)}"
