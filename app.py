@@ -1,5 +1,6 @@
 import os
 import logging
+import requests
 from fastapi import FastAPI, Request, Response
 from supabase import create_client
 from yandex_ai_studio_sdk import AIStudio
@@ -33,7 +34,8 @@ def detect_agent(text):
 def call_yandex_agent(text, agent_id):
     try:
         sdk = AIStudio(folder_id=YANDEX_FOLDER_ID, auth=YANDEX_API_KEY)
-        model = sdk.models.completions(f"agent/{agent_id}")
+        # Правильный формат URI агента
+        model = sdk.models.completions(f"agent:{agent_id}")
         model = model.configure(temperature=0.6)
         result = model.run(text)
         return result.alternatives[0].text
